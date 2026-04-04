@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { CompanyPortabilityFileEntry } from "@paperclipai/shared";
+import { buildIsolatedGitEnv, type CompanyPortabilityFileEntry } from "@paperclipai/shared";
 
 const companySvc = {
   getById: vi.fn(),
@@ -926,11 +926,16 @@ describe("company portability", () => {
   it("infers portable git metadata from a local checkout without task warning fan-out", async () => {
     const portability = companyPortabilityService({} as any);
     const repoDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-portability-git-"));
-    execFileSync("git", ["init"], { cwd: repoDir, stdio: "ignore" });
-    execFileSync("git", ["checkout", "-b", "main"], { cwd: repoDir, stdio: "ignore" });
+    execFileSync("git", ["init"], { cwd: repoDir, stdio: "ignore", env: buildIsolatedGitEnv() });
+    execFileSync("git", ["checkout", "-b", "main"], {
+      cwd: repoDir,
+      stdio: "ignore",
+      env: buildIsolatedGitEnv(),
+    });
     execFileSync("git", ["remote", "add", "origin", "https://github.com/paperclipai/paperclip.git"], {
       cwd: repoDir,
       stdio: "ignore",
+      env: buildIsolatedGitEnv(),
     });
 
     projectSvc.list.mockResolvedValue([

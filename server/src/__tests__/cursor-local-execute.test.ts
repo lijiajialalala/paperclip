@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { execute } from "@paperclipai/adapter-cursor-local/server";
 
-async function writeFakeCursorCommand(commandPath: string): Promise<void> {
+async function writeFakeCursorCommand(commandBasePath: string): Promise<string> {
   const script = `#!/usr/bin/env node
 const fs = require("node:fs");
 
@@ -36,8 +36,18 @@ console.log(JSON.stringify({
   result: "ok",
 }));
 `;
-  await fs.writeFile(commandPath, script, "utf8");
-  await fs.chmod(commandPath, 0o755);
+  if (process.platform === "win32") {
+    const scriptPath = `${commandBasePath}.js`;
+    const wrapperPath = `${commandBasePath}.cmd`;
+    const wrapper = `@echo off\r\nnode "%~dp0${path.basename(scriptPath)}" %*\r\n`;
+    await fs.writeFile(scriptPath, script, "utf8");
+    await fs.writeFile(wrapperPath, wrapper, "utf8");
+    return wrapperPath;
+  }
+
+  await fs.writeFile(commandBasePath, script, "utf8");
+  await fs.chmod(commandBasePath, 0o755);
+  return commandBasePath;
 }
 
 type CapturePayload = {
@@ -57,10 +67,9 @@ describe("cursor execute", () => {
   it("injects paperclip env vars and prompt note by default", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-cursor-execute-"));
     const workspace = path.join(root, "workspace");
-    const commandPath = path.join(root, "agent");
+    const commandPath = await writeFakeCursorCommand(path.join(root, "agent"));
     const capturePath = path.join(root, "capture.json");
     await fs.mkdir(workspace, { recursive: true });
-    await writeFakeCursorCommand(commandPath);
 
     const previousHome = process.env.HOME;
     process.env.HOME = root;
@@ -132,10 +141,9 @@ describe("cursor execute", () => {
   it("passes --mode when explicitly configured", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-cursor-execute-mode-"));
     const workspace = path.join(root, "workspace");
-    const commandPath = path.join(root, "agent");
+    const commandPath = await writeFakeCursorCommand(path.join(root, "agent"));
     const capturePath = path.join(root, "capture.json");
     await fs.mkdir(workspace, { recursive: true });
-    await writeFakeCursorCommand(commandPath);
 
     const previousHome = process.env.HOME;
     process.env.HOME = root;
@@ -190,10 +198,9 @@ describe("cursor execute", () => {
   it("injects company-library runtime skills into the Cursor skills home before execution", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-cursor-execute-runtime-skill-"));
     const workspace = path.join(root, "workspace");
-    const commandPath = path.join(root, "agent");
+    const commandPath = await writeFakeCursorCommand(path.join(root, "agent"));
     const runtimeSkillsRoot = path.join(root, "runtime-skills");
     await fs.mkdir(workspace, { recursive: true });
-    await writeFakeCursorCommand(commandPath);
 
     const paperclipDir = await createSkillDir(runtimeSkillsRoot, "paperclip");
     const asciiHeartDir = await createSkillDir(runtimeSkillsRoot, "ascii-heart");

@@ -5,7 +5,6 @@ import path from "node:path";
 import { testEnvironment } from "@paperclipai/adapter-gemini-local/server";
 
 async function writeFakeGeminiCommand(binDir: string, argsCapturePath: string): Promise<string> {
-  const commandPath = path.join(binDir, "gemini");
   const script = `#!/usr/bin/env node
 const fs = require("node:fs");
 const outPath = process.env.PAPERCLIP_TEST_ARGS_PATH;
@@ -22,13 +21,22 @@ console.log(JSON.stringify({
   result: "hello",
 }));
 `;
-  await fs.writeFile(commandPath, script, "utf8");
-  await fs.chmod(commandPath, 0o755);
-  return commandPath;
+  const commandBasePath = path.join(binDir, "gemini");
+  if (process.platform === "win32") {
+    const scriptPath = `${commandBasePath}.js`;
+    const wrapperPath = `${commandBasePath}.cmd`;
+    const wrapper = `@echo off\r\nnode "%~dp0${path.basename(scriptPath)}" %*\r\n`;
+    await fs.writeFile(scriptPath, script, "utf8");
+    await fs.writeFile(wrapperPath, wrapper, "utf8");
+    return wrapperPath;
+  }
+
+  await fs.writeFile(commandBasePath, script, "utf8");
+  await fs.chmod(commandBasePath, 0o755);
+  return commandBasePath;
 }
 
 async function writeQuotaGeminiCommand(binDir: string): Promise<string> {
-  const commandPath = path.join(binDir, "gemini");
   const script = `#!/usr/bin/env node
 if (process.argv.includes("--help")) {
   process.exit(0);
@@ -36,9 +44,19 @@ if (process.argv.includes("--help")) {
 console.error("429 RESOURCE_EXHAUSTED: You exceeded your current quota and billing details.");
 process.exit(1);
 `;
-  await fs.writeFile(commandPath, script, "utf8");
-  await fs.chmod(commandPath, 0o755);
-  return commandPath;
+  const commandBasePath = path.join(binDir, "gemini");
+  if (process.platform === "win32") {
+    const scriptPath = `${commandBasePath}.js`;
+    const wrapperPath = `${commandBasePath}.cmd`;
+    const wrapper = `@echo off\r\nnode "%~dp0${path.basename(scriptPath)}" %*\r\n`;
+    await fs.writeFile(scriptPath, script, "utf8");
+    await fs.writeFile(wrapperPath, wrapper, "utf8");
+    return wrapperPath;
+  }
+
+  await fs.writeFile(commandBasePath, script, "utf8");
+  await fs.chmod(commandBasePath, 0o755);
+  return commandBasePath;
 }
 
 describe("gemini_local environment diagnostics", () => {

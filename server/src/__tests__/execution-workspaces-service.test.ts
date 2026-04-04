@@ -13,8 +13,10 @@ import {
   projectWorkspaces,
   projects,
 } from "@paperclipai/db";
+import { buildIsolatedGitEnv } from "@paperclipai/shared";
 import {
   getEmbeddedPostgresTestSupport,
+  removeTempDirBestEffort,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import {
@@ -96,6 +98,7 @@ describe("execution workspace config helpers", () => {
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
+const embeddedPostgresSuiteTimeoutMs = 60_000;
 
 if (!embeddedPostgresSupport.supported) {
   console.warn(
@@ -104,7 +107,10 @@ if (!embeddedPostgresSupport.supported) {
 }
 
 async function runGit(cwd: string, args: string[]) {
-  await execFileAsync("git", ["-C", cwd, ...args], { cwd });
+  await execFileAsync("git", ["-C", cwd, ...args], {
+    cwd,
+    env: buildIsolatedGitEnv(),
+  });
 }
 
 async function createTempRepo() {
@@ -129,7 +135,7 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-execution-workspaces-service-");
     db = createDb(tempDb.connectionString);
     svc = executionWorkspaceService(db);
-  }, 20_000);
+  }, embeddedPostgresSuiteTimeoutMs);
 
   afterEach(async () => {
     await db.delete(issues);
@@ -138,8 +144,8 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
     await db.delete(projects);
     await db.delete(companies);
 
-    for (const dir of tempDirs) {
-      await fs.rm(dir, { recursive: true, force: true });
+    for (const dir of Array.from(tempDirs).sort((left, right) => right.length - left.length)) {
+      await removeTempDirBestEffort(dir);
     }
     tempDirs.clear();
   });

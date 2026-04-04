@@ -23,6 +23,7 @@ import {
   issueComments,
   issueDocuments,
   issues,
+  removeTempDirBestEffort,
 } from "@paperclipai/db";
 import { feedbackService } from "../services/feedback.ts";
 
@@ -92,6 +93,8 @@ async function startTempDatabase() {
   return { connectionString, dataDir, instance };
 }
 
+const feedbackServiceTestTimeoutMs = 60_000;
+
 describe("feedbackService.saveIssueVote", () => {
   let db!: ReturnType<typeof createDb>;
   let svc!: ReturnType<typeof feedbackService>;
@@ -105,7 +108,7 @@ describe("feedbackService.saveIssueVote", () => {
     svc = feedbackService(db);
     instance = started.instance;
     dataDir = started.dataDir;
-  }, 20_000);
+  }, feedbackServiceTestTimeoutMs);
 
   afterEach(async () => {
     await db.delete(feedbackExports);
@@ -122,7 +125,7 @@ describe("feedbackService.saveIssueVote", () => {
     await db.delete(agents);
     await db.delete(companies);
     for (const dir of tempDirs) {
-      fs.rmSync(dir, { recursive: true, force: true });
+      await removeTempDirBestEffort(dir);
     }
     vi.unstubAllEnvs();
     tempDirs = [];
@@ -131,7 +134,7 @@ describe("feedbackService.saveIssueVote", () => {
   afterAll(async () => {
     await instance?.stop();
     if (dataDir) {
-      fs.rmSync(dataDir, { recursive: true, force: true });
+      await removeTempDirBestEffort(dataDir);
     }
   });
 

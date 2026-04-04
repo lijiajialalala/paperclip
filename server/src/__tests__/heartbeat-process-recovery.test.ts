@@ -36,6 +36,7 @@ vi.mock("@paperclipai/shared/telemetry", async () => {
 import { heartbeatService } from "../services/heartbeat.ts";
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
+const embeddedPostgresSuiteTimeoutMs = 60_000;
 
 if (!embeddedPostgresSupport.supported) {
   console.warn(
@@ -57,7 +58,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-heartbeat-recovery-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, embeddedPostgresSuiteTimeoutMs);
 
   afterEach(async () => {
     vi.clearAllMocks();

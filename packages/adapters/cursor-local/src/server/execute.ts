@@ -90,8 +90,15 @@ function renderPaperclipEnvNote(env: Record<string, string>): string {
   ].join("\n");
 }
 
-function cursorSkillsHome(): string {
-  return path.join(os.homedir(), ".cursor", "skills");
+function resolveCursorHome(env: Record<string, unknown> | null | undefined): string {
+  const configuredHome = typeof env?.HOME === "string" ? env.HOME.trim() : "";
+  if (configuredHome) return path.resolve(configuredHome);
+  const runtimeHome = process.env.HOME?.trim();
+  return runtimeHome ? path.resolve(runtimeHome) : os.homedir();
+}
+
+function cursorSkillsHome(env: Record<string, unknown> | null | undefined): string {
+  return path.join(resolveCursorHome(env), ".cursor", "skills");
 }
 
 type EnsureCursorSkillsInjectedOptions = {
@@ -117,41 +124,41 @@ export async function ensureCursorSkillsInjected(
       : await readPaperclipRuntimeSkillEntries({}, __moduleDir));
   if (skillsEntries.length === 0) return;
 
-  const skillsHome = options.skillsHome ?? cursorSkillsHome();
+  const resolvedSkillsHome = options.skillsHome ?? cursorSkillsHome(null);
   try {
-    await fs.mkdir(skillsHome, { recursive: true });
+    await fs.mkdir(resolvedSkillsHome, { recursive: true });
   } catch (err) {
     await onLog(
       "stderr",
-      `[paperclip] Failed to prepare Cursor skills directory ${skillsHome}: ${err instanceof Error ? err.message : String(err)}\n`,
+      `[paperclip] Failed to prepare Cursor skills directory ${resolvedSkillsHome}: ${err instanceof Error ? err.message : String(err)}\n`,
     );
     return;
   }
   const removedSkills = await removeMaintainerOnlySkillSymlinks(
-    skillsHome,
+    resolvedSkillsHome,
     skillsEntries.map((entry) => entry.runtimeName),
   );
   for (const skillName of removedSkills) {
     await onLog(
       "stderr",
-      `[paperclip] Removed maintainer-only Cursor skill "${skillName}" from ${skillsHome}\n`,
+      `[paperclip] Removed maintainer-only Cursor skill "${skillName}" from ${resolvedSkillsHome}\n`,
     );
   }
   const linkSkill = options.linkSkill ?? ((source: string, target: string) => fs.symlink(source, target));
   for (const entry of skillsEntries) {
-    const target = path.join(skillsHome, entry.runtimeName);
+    const target = path.join(resolvedSkillsHome, entry.runtimeName);
     try {
       const result = await ensurePaperclipSkillSymlink(entry.source, target, linkSkill);
       if (result === "skipped") continue;
 
-      await onLog(
-        "stderr",
-        `[paperclip] ${result === "repaired" ? "Repaired" : "Injected"} Cursor skill "${entry.key}" into ${skillsHome}\n`,
-      );
+        await onLog(
+          "stderr",
+        `[paperclip] ${result === "repaired" ? "Repaired" : "Injected"} Cursor skill "${entry.key}" into ${resolvedSkillsHome}\n`,
+        );
     } catch (err) {
       await onLog(
         "stderr",
-        `[paperclip] Failed to inject Cursor skill "${entry.key}" into ${skillsHome}: ${err instanceof Error ? err.message : String(err)}\n`,
+        `[paperclip] Failed to inject Cursor skill "${entry.key}" into ${resolvedSkillsHome}: ${err instanceof Error ? err.message : String(err)}\n`,
       );
     }
   }
@@ -185,13 +192,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const effectiveWorkspaceCwd = useConfiguredInsteadOfAgentHome ? "" : workspaceCwd;
   const cwd = effectiveWorkspaceCwd || configuredCwd || process.cwd();
   await ensureAbsoluteDirectory(cwd, { createIfMissing: true });
+  const envConfig = parseObject(config.env);
   const cursorSkillEntries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
   const desiredCursorSkillNames = resolvePaperclipDesiredSkillNames(config, cursorSkillEntries);
   await ensureCursorSkillsInjected(onLog, {
     skillsEntries: cursorSkillEntries.filter((entry) => desiredCursorSkillNames.includes(entry.key)),
+    skillsHome: cursorSkillsHome(envConfig),
   });
-
-  const envConfig = parseObject(config.env);
   const hasExplicitApiKey =
     typeof envConfig.PAPERCLIP_API_KEY === "string" && envConfig.PAPERCLIP_API_KEY.trim().length > 0;
   const env: Record<string, string> = { ...buildPaperclipEnv(agent) };

@@ -1,8 +1,8 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { prepareOpenCodeRuntimeConfig } from "./runtime-config.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { prepareOpenCodeRuntimeConfig, removeDirectoryWithRetries } from "./runtime-config.js";
 
 const cleanupPaths = new Set<string>();
 
@@ -75,5 +75,21 @@ describe("prepareOpenCodeRuntimeConfig", () => {
     expect(prepared.env).toEqual({ XDG_CONFIG_HOME: configHome });
     expect(prepared.notes).toEqual([]);
     await prepared.cleanup();
+  });
+
+  it("retries transient Windows-style cleanup errors", async () => {
+    const busyError = Object.assign(new Error("busy"), { code: "EBUSY" });
+    const rmSpy = vi
+      .spyOn(fs, "rm")
+      .mockRejectedValueOnce(busyError)
+      .mockResolvedValueOnce(undefined);
+
+    await removeDirectoryWithRetries("C:\\temp\\paperclip-opencode-config", {
+      retries: 1,
+      delayMs: 0,
+    });
+
+    expect(rmSpy).toHaveBeenCalledTimes(2);
+    rmSpy.mockRestore();
   });
 });

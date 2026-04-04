@@ -29,6 +29,7 @@ import type {
   CompanySkill,
   RoutineVariable,
 } from "@paperclipai/shared";
+import { buildIsolatedGitEnv } from "@paperclipai/shared";
 import {
   ISSUE_PRIORITIES,
   ISSUE_STATUSES,
@@ -747,7 +748,10 @@ function stripPortableProjectExecutionWorkspaceRefs(policy: Record<string, unkno
 }
 
 async function readGitOutput(cwd: string, args: string[]) {
-  const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], { cwd });
+  const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], {
+    cwd,
+    env: buildIsolatedGitEnv(),
+  });
   const trimmed = stdout.trim();
   return trimmed.length > 0 ? trimmed : null;
 }

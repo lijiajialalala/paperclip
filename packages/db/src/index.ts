@@ -13,6 +13,7 @@ export {
 } from "./client.js";
 export {
   getEmbeddedPostgresTestSupport,
+  removeTempDirBestEffort,
   startEmbeddedPostgresTestDatabase,
   type EmbeddedPostgresTestDatabase,
   type EmbeddedPostgresTestSupport,

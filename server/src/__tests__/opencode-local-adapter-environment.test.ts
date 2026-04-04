@@ -4,6 +4,23 @@ import os from "node:os";
 import path from "node:path";
 import { testEnvironment } from "@paperclipai/adapter-opencode-local/server";
 
+const environmentTestTimeoutMs = 30_000;
+
+async function writeFakeOpencodeCommand(commandBasePath: string, script: string): Promise<string> {
+  if (process.platform === "win32") {
+    const scriptPath = `${commandBasePath}.js`;
+    const wrapperPath = `${commandBasePath}.cmd`;
+    const wrapper = `@echo off\r\nnode "%~dp0${path.basename(scriptPath)}" %*\r\n`;
+    await fs.writeFile(scriptPath, script, "utf8");
+    await fs.writeFile(wrapperPath, wrapper, "utf8");
+    return wrapperPath;
+  }
+
+  await fs.writeFile(commandBasePath, script, "utf8");
+  await fs.chmod(commandBasePath, 0o755);
+  return commandBasePath;
+}
+
 describe("opencode_local environment diagnostics", () => {
   it("reports a missing working directory as an error when cwd is absolute", async () => {
     const cwd = path.join(
@@ -26,7 +43,7 @@ describe("opencode_local environment diagnostics", () => {
     expect(result.checks.some((check) => check.code === "opencode_cwd_invalid")).toBe(true);
     expect(result.checks.some((check) => check.level === "error")).toBe(true);
     expect(result.status).toBe("fail");
-  });
+  }, environmentTestTimeoutMs);
 
   it("treats an empty OPENAI_API_KEY override as missing", async () => {
     const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-env-empty-key-"));
@@ -57,23 +74,21 @@ describe("opencode_local environment diagnostics", () => {
       }
       await fs.rm(cwd, { recursive: true, force: true });
     }
-  });
+  }, environmentTestTimeoutMs);
 
   it("classifies ProviderModelNotFoundError probe output as model-unavailable warning", async () => {
     const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-env-probe-cwd-"));
     const binDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-env-probe-bin-"));
-    const fakeOpencode = path.join(binDir, "opencode");
     const script = [
-      "#!/bin/sh",
-      "echo 'ProviderModelNotFoundError: ProviderModelNotFoundError' 1>&2",
-      "echo 'data: { providerID: \"openai\", modelID: \"gpt-5.3-codex\", suggestions: [] }' 1>&2",
-      "exit 1",
+      "#!/usr/bin/env node",
+      "console.error('ProviderModelNotFoundError: ProviderModelNotFoundError');",
+      "console.error('data: { providerID: \"openai\", modelID: \"gpt-5.3-codex\", suggestions: [] }');",
+      "process.exit(1);",
       "",
     ].join("\n");
 
     try {
-      await fs.writeFile(fakeOpencode, script, "utf8");
-      await fs.chmod(fakeOpencode, 0o755);
+      const fakeOpencode = await writeFakeOpencodeCommand(path.join(binDir, "opencode"), script);
 
       const result = await testEnvironment({
         companyId: "company-1",
@@ -92,5 +107,5 @@ describe("opencode_local environment diagnostics", () => {
       await fs.rm(cwd, { recursive: true, force: true });
       await fs.rm(binDir, { recursive: true, force: true });
     }
-  });
+  }, environmentTestTimeoutMs);
 });

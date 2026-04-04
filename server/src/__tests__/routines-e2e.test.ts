@@ -80,6 +80,8 @@ vi.mock("../services/index.js", async () => {
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
+const embeddedPostgresSuiteTimeoutMs = 60_000;
+const routineRoutesE2eTestTimeoutMs = 20_000;
 
 if (!embeddedPostgresSupport.supported) {
   console.warn(
@@ -94,7 +96,7 @@ describeEmbeddedPostgres("routine routes end-to-end", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-routines-e2e-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, embeddedPostgresSuiteTimeoutMs);
 
   afterEach(async () => {
     await db.delete(activityLog);

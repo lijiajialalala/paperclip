@@ -4,6 +4,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
+import { buildIsolatedGitEnv } from "@paperclipai/shared";
 import { executionWorkspaces, issues, projects, projectWorkspaces, workspaceRuntimeServices } from "@paperclipai/db";
 import type {
   ExecutionWorkspace,
@@ -46,7 +47,10 @@ async function pathExists(value: string | null | undefined) {
 }
 
 async function runGit(args: string[], cwd: string) {
-  return await execFileAsync("git", ["-C", cwd, ...args], { cwd });
+  return await execFileAsync("git", ["-C", cwd, ...args], {
+    cwd,
+    env: buildIsolatedGitEnv(),
+  });
 }
 
 async function inspectGitCloseReadiness(workspace: ExecutionWorkspace): Promise<{

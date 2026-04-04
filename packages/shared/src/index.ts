@@ -1,3 +1,5 @@
+export { buildIsolatedGitEnv } from "./git-env.js";
+
 export {
   COMPANY_STATUSES,
   DEPLOYMENT_MODES,

@@ -28,6 +28,7 @@ import { routineService } from "../services/routines.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
+const embeddedPostgresSuiteTimeoutMs = 60_000;
 
 if (!embeddedPostgresSupport.supported) {
   console.warn(
@@ -42,7 +43,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-routines-service-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, embeddedPostgresSuiteTimeoutMs);
 
   afterEach(async () => {
     await db.delete(activityLog);

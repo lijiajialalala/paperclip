@@ -42,6 +42,7 @@ const PAPERCLIP_SKILL_ROOT_RELATIVE_CANDIDATES = [
   "../../skills",
   "../../../../../skills",
 ];
+const PAPERCLIP_MANAGED_SKILL_METADATA_FILE = ".paperclip-skill-link.json";
 
 export interface PaperclipSkillEntry {
   key: string;
@@ -53,7 +54,7 @@ export interface PaperclipSkillEntry {
 
 export interface InstalledSkillTarget {
   targetPath: string | null;
-  kind: "symlink" | "directory" | "file";
+  kind: "symlink" | "managed_directory" | "directory" | "file";
 }
 
 interface PersistentSkillSnapshotOptions {
@@ -82,6 +83,73 @@ function skillLocationLabel(value: string | null | undefined): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function isSymlinkPermissionError(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  return code === "EPERM" || code === "EACCES" || code === "ENOTSUP";
+}
+
+async function mirrorSkillDirectory(source: string, target: string): Promise<void> {
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  await fs.rm(target, { recursive: true, force: true });
+  await fs.cp(source, target, { recursive: true });
+}
+
+async function writeManagedSkillMetadata(target: string, source: string): Promise<void> {
+  await fs.writeFile(
+    path.join(target, PAPERCLIP_MANAGED_SKILL_METADATA_FILE),
+    `${JSON.stringify({ source: path.resolve(source) }, null, 2)}\n`,
+    "utf8",
+  );
+}
+
+async function readManagedSkillMetadata(target: string): Promise<string | null> {
+  try {
+    const raw = await fs.readFile(path.join(target, PAPERCLIP_MANAGED_SKILL_METADATA_FILE), "utf8");
+    const parsed = parseJson(raw);
+    const source = typeof parsed?.source === "string" ? parsed.source.trim() : "";
+    return source ? path.resolve(source) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function looksLikeManagedMirroredSkill(source: string, target: string): Promise<boolean> {
+  const metadataSource = await readManagedSkillMetadata(target);
+  return metadataSource === path.resolve(source);
+}
+
+async function tryCreateWindowsSkillJunction(source: string, target: string): Promise<boolean> {
+  if (process.platform !== "win32") return false;
+  try {
+    await fs.symlink(source, target, "junction");
+    return true;
+  } catch (err) {
+    if (!isSymlinkPermissionError(err)) throw err;
+    return false;
+  }
+}
+
+async function createManagedSkillLink(
+  source: string,
+  target: string,
+  linkSkill: (source: string, target: string) => Promise<void>,
+): Promise<void> {
+  try {
+    await linkSkill(source, target);
+    return;
+  } catch (err) {
+    if (!isSymlinkPermissionError(err)) throw err;
+  }
+
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  if (await tryCreateWindowsSkillJunction(source, target)) {
+    return;
+  }
+
+  await mirrorSkillDirectory(source, target);
+  await writeManagedSkillMetadata(target, source);
 }
 
 function buildManagedSkillOrigin(entry: { required?: boolean }): Pick<
@@ -422,6 +490,13 @@ export async function readInstalledSkillTargets(skillsHome: string): Promise<Map
   const out = new Map<string, InstalledSkillTarget>();
   for (const entry of entries) {
     const fullPath = path.join(skillsHome, entry.name);
+    if (entry.isDirectory()) {
+      const managedSource = await readManagedSkillMetadata(fullPath);
+      if (managedSource) {
+        out.set(entry.name, { targetPath: managedSource, kind: "managed_directory" });
+        continue;
+      }
+    }
     const linkedPath = entry.isSymbolicLink() ? await fs.readlink(fullPath).catch(() => null) : null;
     out.set(entry.name, resolveInstalledEntryTarget(skillsHome, entry.name, entry, linkedPath));
   }
@@ -668,15 +743,22 @@ export async function ensurePaperclipSkillSymlink(
   source: string,
   target: string,
   linkSkill: (source: string, target: string) => Promise<void> = (linkSource, linkTarget) =>
-    fs.symlink(linkSource, linkTarget),
+    process.platform === "win32"
+      ? fs.symlink(linkSource, linkTarget, "junction")
+      : fs.symlink(linkSource, linkTarget),
 ): Promise<"created" | "repaired" | "skipped"> {
   const existing = await fs.lstat(target).catch(() => null);
   if (!existing) {
-    await linkSkill(source, target);
+    await createManagedSkillLink(source, target, linkSkill);
     return "created";
   }
 
   if (!existing.isSymbolicLink()) {
+    if (existing.isDirectory() && (await looksLikeManagedMirroredSkill(source, target))) {
+      await fs.rm(target, { recursive: true, force: true });
+      await createManagedSkillLink(source, target, linkSkill);
+      return "repaired";
+    }
     return "skipped";
   }
 
@@ -694,7 +776,7 @@ export async function ensurePaperclipSkillSymlink(
   }
 
   await fs.unlink(target);
-  await linkSkill(source, target);
+  await createManagedSkillLink(source, target, linkSkill);
   return "repaired";
 }
 

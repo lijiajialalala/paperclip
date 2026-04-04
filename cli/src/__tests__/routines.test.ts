@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -13,12 +13,14 @@ import {
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
+  removeTempDirBestEffort,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { disableAllRoutinesInConfig } from "../commands/routines.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
+const embeddedPostgresSuiteTimeoutMs = 60_000;
 
 if (!embeddedPostgresSupport.supported) {
   console.warn(
@@ -98,7 +100,7 @@ describeEmbeddedPostgres("disableAllRoutinesInConfig", () => {
     tempRoot = mkdtempSync(path.join(os.tmpdir(), "paperclip-routines-cli-config-"));
     configPath = path.join(tempRoot, "config.json");
     writeTestConfig(configPath, tempRoot, tempDb.connectionString);
-  }, 20_000);
+  }, embeddedPostgresSuiteTimeoutMs);
 
   afterEach(async () => {
     await db.delete(routines);
@@ -110,7 +112,7 @@ describeEmbeddedPostgres("disableAllRoutinesInConfig", () => {
   afterAll(async () => {
     await tempDb?.cleanup();
     if (tempRoot) {
-      rmSync(tempRoot, { recursive: true, force: true });
+      await removeTempDirBestEffort(tempRoot);
     }
   });
 

@@ -4,6 +4,10 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { resolveServerDevWatchIgnorePaths } from "../dev-watch-ignore.js";
 
+function linkDirSync(target: string, linkPath: string): void {
+  fs.symlinkSync(target, linkPath, process.platform === "win32" ? "junction" : undefined);
+}
+
 describe("resolveServerDevWatchIgnorePaths", () => {
   it("includes both the worktree UI paths and their real shared targets", () => {
     const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-dev-watch-"));
@@ -18,9 +22,9 @@ describe("resolveServerDevWatchIgnorePaths", () => {
     fs.mkdirSync(serverRoot, { recursive: true });
     fs.mkdirSync(worktreeUiRoot, { recursive: true });
 
-    fs.symlinkSync(path.join(sharedUiRoot, "node_modules"), path.join(worktreeUiRoot, "node_modules"));
-    fs.symlinkSync(path.join(sharedUiRoot, ".vite"), path.join(worktreeUiRoot, ".vite"));
-    fs.symlinkSync(path.join(sharedUiRoot, "dist"), path.join(worktreeUiRoot, "dist"));
+    linkDirSync(path.join(sharedUiRoot, "node_modules"), path.join(worktreeUiRoot, "node_modules"));
+    linkDirSync(path.join(sharedUiRoot, ".vite"), path.join(worktreeUiRoot, ".vite"));
+    linkDirSync(path.join(sharedUiRoot, "dist"), path.join(worktreeUiRoot, "dist"));
 
     const ignorePaths = resolveServerDevWatchIgnorePaths(serverRoot);
 

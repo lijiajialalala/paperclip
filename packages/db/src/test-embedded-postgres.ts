@@ -2,7 +2,41 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
+import { setTimeout as delay } from "node:timers/promises";
 import { applyPendingMigrations, ensurePostgresDatabase } from "./client.js";
+
+export async function removeTempDirBestEffort(dir: string) {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    try {
+      fs.rmSync(dir, {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 200,
+      });
+      if (!fs.existsSync(dir)) return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EPERM" && code !== "EBUSY" && code !== "ENOTEMPTY") {
+        throw error;
+      }
+    }
+
+    if (process.platform === "win32") {
+      try {
+        execFileSync("cmd", ["/d", "/s", "/c", `rmdir /s /q "${dir}"`], {
+          stdio: "ignore",
+        });
+        if (!fs.existsSync(dir)) return;
+      } catch {
+        // Fall through to retry loop.
+      }
+    }
+
+    await delay(200);
+  }
+}
 
 type EmbeddedPostgresInstance = {
   initialise(): Promise<void>;
@@ -90,7 +124,7 @@ async function probeEmbeddedPostgresSupport(): Promise<EmbeddedPostgresTestSuppo
     };
   } finally {
     await instance.stop().catch(() => {});
-    fs.rmSync(dataDir, { recursive: true, force: true });
+    await removeTempDirBestEffort(dataDir);
   }
 }
 
@@ -131,12 +165,12 @@ export async function startEmbeddedPostgresTestDatabase(
       connectionString,
       cleanup: async () => {
         await instance.stop().catch(() => {});
-        fs.rmSync(dataDir, { recursive: true, force: true });
+        await removeTempDirBestEffort(dataDir);
       },
     };
   } catch (error) {
     await instance.stop().catch(() => {});
-    fs.rmSync(dataDir, { recursive: true, force: true });
+    await removeTempDirBestEffort(dataDir);
     throw new Error(
       `Failed to start embedded PostgreSQL test database: ${formatEmbeddedPostgresError(error)}`,
     );

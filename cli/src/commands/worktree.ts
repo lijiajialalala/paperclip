@@ -20,6 +20,7 @@ import { Readable } from "node:stream";
 import * as p from "@clack/prompts";
 import pc from "picocolors";
 import { and, eq, inArray, sql } from "drizzle-orm";
+import { buildIsolatedGitEnv } from "@paperclipai/shared";
 import {
   applyPendingMigrations,
   agents,
@@ -400,9 +401,24 @@ function extractExecSyncErrorMessage(error: unknown): string | null {
   return error instanceof Error ? nonEmpty(error.message) : null;
 }
 
+function execGitSync(args: string[], options?: Parameters<typeof execFileSync>[2]) {
+  return execFileSync("git", args, {
+    ...options,
+    env: buildIsolatedGitEnv(options?.env ?? process.env),
+  });
+}
+
+function execGitText(args: string[], options?: Parameters<typeof execFileSync>[2]): string {
+  return String(execFileSync("git", args, {
+    ...options,
+    encoding: "utf8",
+    env: buildIsolatedGitEnv(options?.env ?? process.env),
+  }));
+}
+
 function localBranchExists(cwd: string, branchName: string): boolean {
   try {
-    execFileSync("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branchName}`], {
+    execGitSync(["show-ref", "--verify", "--quiet", `refs/heads/${branchName}`], {
       cwd,
       stdio: "ignore",
     });
@@ -525,9 +541,8 @@ function collectClaimedWorktreePorts(homeDir: string, currentInstanceId: string,
 
 function detectGitBranchName(cwd: string): string | null {
   try {
-    const value = execFileSync("git", ["branch", "--show-current"], {
+    const value = execGitText(["branch", "--show-current"], {
       cwd,
-      encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
     return nonEmpty(value);
@@ -538,24 +553,20 @@ function detectGitBranchName(cwd: string): string | null {
 
 function detectGitWorkspaceInfo(cwd: string): GitWorkspaceInfo | null {
   try {
-    const root = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+    const root = execGitText(["rev-parse", "--show-toplevel"], {
       cwd,
-      encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
-    const commonDirRaw = execFileSync("git", ["rev-parse", "--git-common-dir"], {
+    const commonDirRaw = execGitText(["rev-parse", "--git-common-dir"], {
       cwd: root,
-      encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
-    const gitDirRaw = execFileSync("git", ["rev-parse", "--git-dir"], {
+    const gitDirRaw = execGitText(["rev-parse", "--git-dir"], {
       cwd: root,
-      encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
-    const hooksPathRaw = execFileSync("git", ["rev-parse", "--git-path", "hooks"], {
+    const hooksPathRaw = execGitText(["rev-parse", "--git-path", "hooks"], {
       cwd: root,
-      encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
     return {
@@ -1066,12 +1077,12 @@ export async function worktreeMakeCommand(nameArg: string, opts: WorktreeMakeOpt
 
   mkdirSync(path.dirname(targetPath), { recursive: true });
   if (startPoint) {
-    const [remote] = startPoint.split("/", 1);
-    try {
-      execFileSync("git", ["fetch", remote], {
-        cwd: sourceCwd,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
+      const [remote] = startPoint.split("/", 1);
+      try {
+        execGitSync(["fetch", remote], {
+          cwd: sourceCwd,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
     } catch (error) {
       throw new Error(
         `Failed to fetch from remote "${remote}": ${extractExecSyncErrorMessage(error) ?? String(error)}`,
@@ -1086,13 +1097,13 @@ export async function worktreeMakeCommand(nameArg: string, opts: WorktreeMakeOpt
     startPoint,
   });
 
-  const spinner = p.spinner();
-  spinner.start(`Creating git worktree at ${targetPath}...`);
-  try {
-    execFileSync("git", worktreeArgs, {
-      cwd: sourceCwd,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const spinner = p.spinner();
+    spinner.start(`Creating git worktree at ${targetPath}...`);
+    try {
+      execGitSync(worktreeArgs, {
+        cwd: sourceCwd,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
     spinner.stop(`Created git worktree at ${targetPath}.`);
   } catch (error) {
     spinner.stop(pc.red("Failed to create git worktree."));
@@ -1156,9 +1167,8 @@ type ResolvedWorktreeEndpoint = {
 };
 
 function parseGitWorktreeList(cwd: string): GitWorktreeListEntry[] {
-  const raw = execFileSync("git", ["worktree", "list", "--porcelain"], {
+  const raw = execGitText(["worktree", "list", "--porcelain"], {
     cwd,
-    encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
   const entries: GitWorktreeListEntry[] = [];
@@ -1210,10 +1220,9 @@ function toMergeSourceChoices(cwd: string): MergeSourceChoice[] {
 
 function branchHasUniqueCommits(cwd: string, branchName: string): boolean {
   try {
-    const output = execFileSync(
-      "git",
+    const output = execGitText(
       ["log", "--oneline", branchName, "--not", "--remotes", "--exclude", `refs/heads/${branchName}`, "--branches"],
-      { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+      { cwd, stdio: ["ignore", "pipe", "pipe"] },
     ).trim();
     return output.length > 0;
   } catch {
@@ -1223,10 +1232,9 @@ function branchHasUniqueCommits(cwd: string, branchName: string): boolean {
 
 function branchExistsOnAnyRemote(cwd: string, branchName: string): boolean {
   try {
-    const output = execFileSync(
-      "git",
+    const output = execGitText(
       ["branch", "-r", "--list", `*/${branchName}`],
-      { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+      { cwd, stdio: ["ignore", "pipe", "pipe"] },
     ).trim();
     return output.length > 0;
   } catch {
@@ -1236,10 +1244,9 @@ function branchExistsOnAnyRemote(cwd: string, branchName: string): boolean {
 
 function worktreePathHasUncommittedChanges(worktreePath: string): boolean {
   try {
-    const output = execFileSync(
-      "git",
+    const output = execGitText(
       ["status", "--porcelain"],
-      { cwd: worktreePath, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+      { cwd: worktreePath, stdio: ["ignore", "pipe", "pipe"] },
     ).trim();
     return output.length > 0;
   } catch {
@@ -1319,32 +1326,32 @@ export async function worktreeCleanupCommand(nameArg: string, opts: WorktreeClea
     const spinner = p.spinner();
     if (worktreeDirExists) {
       spinner.start(`Removing git worktree at ${linkedWorktree.worktree}...`);
-      try {
-        const removeArgs = ["worktree", "remove", linkedWorktree.worktree];
-        if (opts.force) removeArgs.push("--force");
-        execFileSync("git", removeArgs, {
-          cwd: sourceCwd,
-          stdio: ["ignore", "pipe", "pipe"],
-        });
+        try {
+          const removeArgs = ["worktree", "remove", linkedWorktree.worktree];
+          if (opts.force) removeArgs.push("--force");
+          execGitSync(removeArgs, {
+            cwd: sourceCwd,
+            stdio: ["ignore", "pipe", "pipe"],
+          });
         spinner.stop(`Removed git worktree at ${linkedWorktree.worktree}.`);
       } catch (error) {
         spinner.stop(pc.yellow(`Could not remove worktree cleanly, will prune instead.`));
         p.log.warning(extractExecSyncErrorMessage(error) ?? String(error));
       }
+      } else {
+        spinner.start("Pruning stale worktree entry...");
+        execGitSync(["worktree", "prune"], {
+          cwd: sourceCwd,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+      spinner.stop("Pruned stale worktree entry.");
+    }
     } else {
-      spinner.start("Pruning stale worktree entry...");
-      execFileSync("git", ["worktree", "prune"], {
+      // Even without a linked worktree, prune to clean up any orphaned entries
+      execGitSync(["worktree", "prune"], {
         cwd: sourceCwd,
         stdio: ["ignore", "pipe", "pipe"],
       });
-      spinner.stop("Pruned stale worktree entry.");
-    }
-  } else {
-    // Even without a linked worktree, prune to clean up any orphaned entries
-    execFileSync("git", ["worktree", "prune"], {
-      cwd: sourceCwd,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
   }
 
   // 3b. Remove the worktree directory if it still exists (e.g. partial creation)
@@ -1358,13 +1365,13 @@ export async function worktreeCleanupCommand(nameArg: string, opts: WorktreeClea
   // 3c. Delete the local branch (now safe — worktree is gone)
   if (localBranchExists(sourceCwd, name)) {
     const spinner = p.spinner();
-    spinner.start(`Deleting local branch "${name}"...`);
-    try {
-      const deleteFlag = opts.force ? "-D" : "-d";
-      execFileSync("git", ["branch", deleteFlag, name], {
-        cwd: sourceCwd,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
+      spinner.start(`Deleting local branch "${name}"...`);
+      try {
+        const deleteFlag = opts.force ? "-D" : "-d";
+        execGitSync(["branch", deleteFlag, name], {
+          cwd: sourceCwd,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
       spinner.stop(`Deleted local branch "${name}".`);
     } catch (error) {
       spinner.stop(pc.yellow(`Could not delete branch "${name}".`));

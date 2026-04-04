@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { buildIsolatedGitEnv } from "@paperclipai/shared";
 import {
   copyGitHooksToWorktreeGitDir,
   copySeededSecretsKey,
@@ -39,6 +40,40 @@ afterEach(() => {
     else process.env[key] = value;
   }
 });
+
+function removeTempDir(tempRoot: string) {
+  try {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  } catch (error) {
+    try {
+      execFileSync("cmd", ["/d", "/s", "/c", `rmdir /s /q "${tempRoot}"`], {
+        stdio: "ignore",
+      });
+    } catch {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EPERM" && code !== "EBUSY" && code !== "ENOTEMPTY") {
+        throw error;
+      }
+    }
+  }
+}
+
+function execGitSync(cwd: string, args: string[]) {
+  execFileSync("git", args, {
+    cwd,
+    stdio: "ignore",
+    env: buildIsolatedGitEnv(),
+  });
+}
+
+function execGitText(cwd: string, args: string[]) {
+  return execFileSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+    env: buildIsolatedGitEnv(),
+  }).trim();
+}
 
 function buildSourceConfig(): PaperclipConfig {
   return {
@@ -145,6 +180,36 @@ describe("worktree helpers", () => {
         startPoint: "public-gh/master",
       }),
     ).toEqual(["worktree", "add", "-b", "my-worktree", "/tmp/my-worktree", "public-gh/master"]);
+  });
+
+  it("preserves git authentication helpers while stripping nested worktree context", () => {
+    const env = buildIsolatedGitEnv({
+      PATH: "/usr/bin",
+      GIT_DIR: "/tmp/hook.git",
+      GIT_WORK_TREE: "/tmp/worktree",
+      GIT_INDEX_FILE: "/tmp/index",
+      GIT_OBJECT_DIRECTORY: "/tmp/objects",
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: "/tmp/alternate",
+      GIT_COMMON_DIR: "/tmp/common",
+      GIT_PREFIX: "nested/",
+      GIT_SSH_COMMAND: "ssh -i ~/.ssh/id_test",
+      GIT_ASKPASS: "echo hunter2",
+      GIT_SSH: "/custom/ssh",
+      GIT_TRACE: "1",
+    });
+
+    expect(env.PATH).toBe("/usr/bin");
+    expect(env.GIT_DIR).toBeUndefined();
+    expect(env.GIT_WORK_TREE).toBeUndefined();
+    expect(env.GIT_INDEX_FILE).toBeUndefined();
+    expect(env.GIT_OBJECT_DIRECTORY).toBeUndefined();
+    expect(env.GIT_ALTERNATE_OBJECT_DIRECTORIES).toBeUndefined();
+    expect(env.GIT_COMMON_DIR).toBeUndefined();
+    expect(env.GIT_PREFIX).toBeUndefined();
+    expect(env.GIT_SSH_COMMAND).toBe("ssh -i ~/.ssh/id_test");
+    expect(env.GIT_ASKPASS).toBe("echo hunter2");
+    expect(env.GIT_SSH).toBe("/custom/ssh");
+    expect(env.GIT_TRACE).toBe("1");
   });
 
   it("uses start point even when a local branch with the same name exists", () => {
@@ -289,7 +354,7 @@ describe("worktree helpers", () => {
       } else {
         process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE = originalKeyFile;
       }
-      fs.rmSync(tempRoot, { recursive: true, force: true });
+      removeTempDir(tempRoot);
     }
   });
 
@@ -310,7 +375,7 @@ describe("worktree helpers", () => {
 
       expect(fs.readFileSync(targetKeyPath, "utf8")).toBe("inline-source-master-key");
     } finally {
-      fs.rmSync(tempRoot, { recursive: true, force: true });
+      removeTempDir(tempRoot);
     }
   });
 
@@ -343,7 +408,7 @@ describe("worktree helpers", () => {
       } else {
         process.env.PAPERCLIP_AGENT_JWT_SECRET = originalJwtSecret;
       }
-      fs.rmSync(tempRoot, { recursive: true, force: true });
+      removeTempDir(tempRoot);
     }
   });
 
@@ -424,7 +489,7 @@ describe("worktree helpers", () => {
       expect(config.database.embeddedPostgresPort).toBeGreaterThan(54330);
     } finally {
       process.chdir(originalCwd);
-      fs.rmSync(tempRoot, { recursive: true, force: true });
+      removeTempDir(tempRoot);
     }
   });
 
@@ -449,7 +514,7 @@ describe("worktree helpers", () => {
       } else {
         process.env.PAPERCLIP_CONFIG = originalPaperclipConfig;
       }
-      fs.rmSync(tempRoot, { recursive: true, force: true });
+      removeTempDir(tempRoot);
     }
   });
 
@@ -477,27 +542,32 @@ describe("worktree helpers", () => {
       } else {
         process.env.PAPERCLIP_CONFIG = originalPaperclipConfig;
       }
-      fs.rmSync(tempRoot, { recursive: true, force: true });
+      removeTempDir(tempRoot);
     }
   });
 
   it("rebinds same-repo workspace paths onto the current worktree root", () => {
-    expect(
-      rebindWorkspaceCwd({
-        sourceRepoRoot: "/Users/example/paperclip",
-        targetRepoRoot: "/Users/example/paperclip-pr-432",
-        workspaceCwd: "/Users/example/paperclip",
-      }),
-    ).toBe("/Users/example/paperclip-pr-432");
+    const sourceRepoRoot =
+      process.platform === "win32" ? "C:\\Users\\example\\paperclip" : "/Users/example/paperclip";
+    const targetRepoRoot =
+      process.platform === "win32" ? "C:\\Users\\example\\paperclip-pr-432" : "/Users/example/paperclip-pr-432";
 
     expect(
       rebindWorkspaceCwd({
-        sourceRepoRoot: "/Users/example/paperclip",
-        targetRepoRoot: "/Users/example/paperclip-pr-432",
-        workspaceCwd: "/Users/example/paperclip/packages/db",
+        sourceRepoRoot,
+        targetRepoRoot,
+        workspaceCwd: sourceRepoRoot,
       }),
-    ).toBe("/Users/example/paperclip-pr-432/packages/db");
-  });
+    ).toBe(path.resolve(targetRepoRoot));
+
+    expect(
+      rebindWorkspaceCwd({
+        sourceRepoRoot,
+        targetRepoRoot,
+        workspaceCwd: path.join(sourceRepoRoot, "packages", "db"),
+      }),
+    ).toBe(path.resolve(targetRepoRoot, "packages", "db"));
+  }, 20_000);
 
   it("does not rebind paths outside the source repo root", () => {
     expect(
@@ -516,30 +586,27 @@ describe("worktree helpers", () => {
 
     try {
       fs.mkdirSync(repoRoot, { recursive: true });
-      execFileSync("git", ["init"], { cwd: repoRoot, stdio: "ignore" });
-      execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repoRoot, stdio: "ignore" });
-      execFileSync("git", ["config", "user.name", "Test User"], { cwd: repoRoot, stdio: "ignore" });
+      execGitSync(repoRoot, ["init"]);
+      execGitSync(repoRoot, ["config", "user.email", "test@example.com"]);
+      execGitSync(repoRoot, ["config", "user.name", "Test User"]);
       fs.writeFileSync(path.join(repoRoot, "README.md"), "# temp\n", "utf8");
-      execFileSync("git", ["add", "README.md"], { cwd: repoRoot, stdio: "ignore" });
-      execFileSync("git", ["commit", "-m", "Initial commit"], { cwd: repoRoot, stdio: "ignore" });
+      execGitSync(repoRoot, ["add", "README.md"]);
+      execGitSync(repoRoot, ["commit", "-m", "Initial commit"]);
 
       const sourceHooksDir = path.join(repoRoot, ".git", "hooks");
+      execGitSync(repoRoot, ["config", "core.hooksPath", sourceHooksDir]);
       const sourceHookPath = path.join(sourceHooksDir, "pre-commit");
       const sourceTokensPath = path.join(sourceHooksDir, "forbidden-tokens.txt");
       fs.writeFileSync(sourceHookPath, "#!/usr/bin/env bash\nexit 0\n", { encoding: "utf8", mode: 0o755 });
       fs.chmodSync(sourceHookPath, 0o755);
       fs.writeFileSync(sourceTokensPath, "secret-token\n", "utf8");
 
-      execFileSync("git", ["worktree", "add", "--detach", worktreePath], { cwd: repoRoot, stdio: "ignore" });
+      execGitSync(repoRoot, ["worktree", "add", "--detach", worktreePath]);
 
       const copied = copyGitHooksToWorktreeGitDir(worktreePath);
-      const worktreeGitDir = execFileSync("git", ["rev-parse", "--git-dir"], {
-        cwd: worktreePath,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-      }).trim();
-      const resolvedSourceHooksDir = fs.realpathSync(sourceHooksDir);
-      const resolvedTargetHooksDir = fs.realpathSync(path.resolve(worktreePath, worktreeGitDir, "hooks"));
+      expect(copied).toBeTruthy();
+      const resolvedSourceHooksDir = fs.realpathSync(copied!.sourceHooksPath);
+      const resolvedTargetHooksDir = fs.realpathSync(copied!.targetHooksPath);
       const targetHookPath = path.join(resolvedTargetHooksDir, "pre-commit");
       const targetTokensPath = path.join(resolvedTargetHooksDir, "forbidden-tokens.txt");
 
@@ -549,13 +616,19 @@ describe("worktree helpers", () => {
         copied: true,
       });
       expect(fs.readFileSync(targetHookPath, "utf8")).toBe("#!/usr/bin/env bash\nexit 0\n");
-      expect(fs.statSync(targetHookPath).mode & 0o111).not.toBe(0);
+      if (process.platform !== "win32") {
+        expect(fs.statSync(targetHookPath).mode & 0o111).not.toBe(0);
+      }
       expect(fs.readFileSync(targetTokensPath, "utf8")).toBe("secret-token\n");
     } finally {
-      execFileSync("git", ["worktree", "remove", "--force", worktreePath], { cwd: repoRoot, stdio: "ignore" });
-      fs.rmSync(tempRoot, { recursive: true, force: true });
+      try {
+        execGitSync(repoRoot, ["worktree", "remove", "--force", worktreePath]);
+      } catch {
+        // Best-effort cleanup on Windows when git or filesystem handles are still open.
+      }
+      removeTempDir(tempRoot);
     }
-  });
+  }, 20_000);
 
   it("creates and initializes a worktree from the top-level worktree:make command", async () => {
     const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-worktree-make-"));
@@ -568,12 +641,12 @@ describe("worktree helpers", () => {
     try {
       fs.mkdirSync(repoRoot, { recursive: true });
       fs.mkdirSync(fakeHome, { recursive: true });
-      execFileSync("git", ["init"], { cwd: repoRoot, stdio: "ignore" });
-      execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repoRoot, stdio: "ignore" });
-      execFileSync("git", ["config", "user.name", "Test User"], { cwd: repoRoot, stdio: "ignore" });
+      execGitSync(repoRoot, ["init"]);
+      execGitSync(repoRoot, ["config", "user.email", "test@example.com"]);
+      execGitSync(repoRoot, ["config", "user.name", "Test User"]);
       fs.writeFileSync(path.join(repoRoot, "README.md"), "# temp\n", "utf8");
-      execFileSync("git", ["add", "README.md"], { cwd: repoRoot, stdio: "ignore" });
-      execFileSync("git", ["commit", "-m", "Initial commit"], { cwd: repoRoot, stdio: "ignore" });
+      execGitSync(repoRoot, ["add", "README.md"]);
+      execGitSync(repoRoot, ["commit", "-m", "Initial commit"]);
 
       process.chdir(repoRoot);
 
@@ -588,7 +661,7 @@ describe("worktree helpers", () => {
     } finally {
       process.chdir(originalCwd);
       homedirSpy.mockRestore();
-      fs.rmSync(tempRoot, { recursive: true, force: true });
+      removeTempDir(tempRoot);
     }
   }, 20_000);
 });

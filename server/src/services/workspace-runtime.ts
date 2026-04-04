@@ -7,6 +7,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { AdapterRuntimeServiceReport } from "@paperclipai/adapter-utils";
 import type { Db } from "@paperclipai/db";
 import { executionWorkspaces, projectWorkspaces, workspaceRuntimeServices } from "@paperclipai/db";
+import { buildIsolatedGitEnv } from "@paperclipai/shared";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { asNumber, asString, parseObject, renderTemplate } from "../adapters/utils.js";
 import { resolveHomeAwarePath } from "../home-paths.js";
@@ -25,7 +26,58 @@ import { readExecutionWorkspaceConfig } from "./execution-workspaces.js";
 import { readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-config.js";
 
 export function resolveShell(): string {
-  return process.env.SHELL?.trim() || (process.platform === "win32" ? "sh" : "/bin/sh");
+  const shell = process.env.SHELL?.trim();
+  if (shell && (process.platform !== "win32" || isPosixLikeShell(shell))) {
+    return shell;
+  }
+  if (process.platform === "win32") {
+    return process.env.ComSpec?.trim() || process.env.COMSPEC?.trim() || "cmd.exe";
+  }
+  return "/bin/sh";
+}
+
+function normalizeShellBasename(shell: string): string {
+  const normalized = shell.trim().replaceAll("\\", "/");
+  const lastSlash = normalized.lastIndexOf("/");
+  return (lastSlash >= 0 ? normalized.slice(lastSlash + 1) : normalized).toLowerCase();
+}
+
+function isPosixLikeShell(shell: string): boolean {
+  const basename = normalizeShellBasename(shell);
+  return basename === "sh"
+    || basename === "sh.exe"
+    || basename === "bash"
+    || basename === "bash.exe"
+    || basename === "zsh"
+    || basename === "zsh.exe"
+    || basename === "fish"
+    || basename === "fish.exe"
+    || basename === "dash"
+    || basename === "dash.exe";
+}
+
+function isCmdShell(shell: string): boolean {
+  const basename = normalizeShellBasename(shell);
+  return basename === "cmd" || basename === "cmd.exe";
+}
+
+function isPowerShellShell(shell: string): boolean {
+  const basename = normalizeShellBasename(shell);
+  return basename === "powershell" || basename === "powershell.exe" || basename === "pwsh" || basename === "pwsh.exe";
+}
+
+export function buildShellArgs(
+  command: string,
+  input?: { login?: boolean; shell?: string },
+): string[] {
+  const shell = input?.shell ?? resolveShell();
+  if (isCmdShell(shell)) {
+    return ["/d", "/s", "/c", command];
+  }
+  if (isPowerShellShell(shell)) {
+    return ["-NoLogo", "-NoProfile", "-Command", command];
+  }
+  return [input?.login ? "-lc" : "-c", command];
 }
 
 export interface ExecutionWorkspaceInput {
@@ -289,6 +341,7 @@ async function runGit(args: string[], cwd: string): Promise<string> {
     command: "git",
     args,
     cwd,
+    env: buildIsolatedGitEnv(),
   });
   if (proc.code !== 0) {
     throw new Error(proc.stderr.trim() || proc.stdout.trim() || `git ${args.join(" ")} failed`);
@@ -329,6 +382,15 @@ async function detectDefaultBranch(repoRoot: string): Promise<string | null> {
 
 async function directoryExists(value: string) {
   return fs.stat(value).then((stats) => stats.isDirectory()).catch(() => false);
+}
+
+async function waitForDirectoryRemoval(value: string, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!(await directoryExists(value))) return true;
+    await delay(100);
+  }
+  return !(await directoryExists(value));
 }
 
 function terminateChildProcess(child: ChildProcess) {
@@ -386,7 +448,7 @@ async function runWorkspaceCommand(input: {
   const shell = resolveShell();
   const proc = await executeProcess({
     command: shell,
-    args: ["-c", input.command],
+    args: buildShellArgs(input.command, { shell }),
     cwd: input.cwd,
     env: input.env,
   });
@@ -428,6 +490,7 @@ async function recordGitOperation(
         command: "git",
         args: input.args,
         cwd: input.cwd,
+        env: buildIsolatedGitEnv(),
       });
       stdout = result.stdout;
       stderr = result.stderr;
@@ -482,7 +545,7 @@ async function recordWorkspaceCommandOperation(
       const shell = resolveShell();
       const result = await executeProcess({
         command: shell,
-        args: ["-c", input.command],
+        args: buildShellArgs(input.command),
         cwd: input.cwd,
         env: input.env,
       });
@@ -890,7 +953,7 @@ export async function cleanupExecutionWorkspaceArtifacts(input: {
 
   const cleaned =
     !workspacePath ||
-    !(await directoryExists(workspacePath));
+    (await waitForDirectoryRemoval(workspacePath));
 
   return {
     cleanedPath: workspacePath,
@@ -1366,7 +1429,7 @@ async function startLocalRuntimeService(input: {
   }
   
   const shell = resolveShell();
-  const child = spawn(shell, ["-lc", command], {
+  const child = spawn(shell, buildShellArgs(command, { login: true, shell }), {
     cwd: serviceCwd,
     env,
     detached: process.platform !== "win32",
@@ -1374,6 +1437,7 @@ async function startLocalRuntimeService(input: {
   });
   let stderrExcerpt = "";
   let stdoutExcerpt = "";
+  let ready = false;
   child.stdout?.on("data", async (chunk) => {
     const text = String(chunk);
     stdoutExcerpt = (stdoutExcerpt + text).slice(-4096);
@@ -1385,8 +1449,30 @@ async function startLocalRuntimeService(input: {
     if (input.onLog) await input.onLog("stderr", `[service:${serviceName}] ${text}`);
   });
 
+  const startupFailure = new Promise<never>((_, reject) => {
+    const rejectWithShellFailure = (message: string) => {
+      if (ready) return;
+      reject(new Error(message));
+    };
+    child.once("error", (error) => {
+      rejectWithShellFailure(`command failed to spawn via ${shell}: ${error.message}`);
+    });
+    child.once("exit", (code, signal) => {
+      if (ready) return;
+      const reason =
+        typeof code === "number"
+          ? `exited before readiness with code ${code}`
+          : `exited before readiness with signal ${signal ?? "unknown"}`;
+      rejectWithShellFailure(reason);
+    });
+  });
+
   try {
-    await waitForReadiness({ service: input.service, url });
+    await Promise.race([
+      waitForReadiness({ service: input.service, url }),
+      startupFailure,
+    ]);
+    ready = true;
   } catch (err) {
     terminateChildProcess(child);
     throw new Error(

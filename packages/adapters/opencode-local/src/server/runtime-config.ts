@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { asBoolean } from "@paperclipai/adapter-utils/server-utils";
 
 type PreparedOpenCodeRuntimeConfig = {
@@ -19,6 +20,34 @@ function resolveXdgConfigHome(env: Record<string, string>): string {
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isRetryableCleanupError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return code === "EBUSY" || code === "EPERM" || code === "ENOTEMPTY";
+}
+
+export async function removeDirectoryWithRetries(
+  targetPath: string,
+  options: {
+    delayMs?: number;
+    retries?: number;
+  } = {},
+): Promise<void> {
+  const retries = options.retries ?? (process.platform === "win32" ? 5 : 0);
+  const delayMs = options.delayMs ?? 100;
+
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await fs.rm(targetPath, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (attempt >= retries || !isRetryableCleanupError(error)) {
+        throw error;
+      }
+      await delay(delayMs);
+    }
+  }
 }
 
 async function readJsonObject(filepath: string): Promise<Record<string, unknown>> {
@@ -85,7 +114,7 @@ export async function prepareOpenCodeRuntimeConfig(input: {
       "Injected runtime OpenCode config with permission.external_directory=allow to avoid headless approval prompts.",
     ],
     cleanup: async () => {
-      await fs.rm(runtimeConfigHome, { recursive: true, force: true });
+      await removeDirectoryWithRetries(runtimeConfigHome);
     },
   };
 }

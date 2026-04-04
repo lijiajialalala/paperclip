@@ -257,6 +257,25 @@ export async function terminateLocalService(
 ) {
   const signal = opts?.signal ?? "SIGTERM";
   const targetProcessGroup = process.platform !== "win32" && record.processGroupId && record.processGroupId > 0;
+  if (process.platform === "win32") {
+    try {
+      await execFileAsync("taskkill", ["/PID", String(record.pid), "/T", "/F"], {
+        windowsHide: true,
+      });
+    } catch {
+      return;
+    }
+
+    const deadline = Date.now() + (opts?.forceAfterMs ?? 2_000);
+    while (Date.now() < deadline) {
+      if (!isPidAlive(record.pid)) {
+        return;
+      }
+      await delay(100);
+    }
+    return;
+  }
+
   try {
     if (targetProcessGroup) {
       process.kill(-record.processGroupId!, signal);
