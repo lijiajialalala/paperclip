@@ -80,6 +80,213 @@ const SESSIONED_LOCAL_ADAPTERS = new Set([
   "pi_local",
 ]);
 
+export type AutomaticRetryReason = "process_lost" | "rate_limited" | "auth_file_transient" | "browser_busy";
+
+export interface AutomaticRetryDecision {
+  reason: AutomaticRetryReason;
+  maxAttempts: number;
+}
+
+export interface AutomaticRetryPlan extends AutomaticRetryDecision {
+  attempt: number;
+  retryAfterMs: number;
+  retryNotBeforeAt: Date | null;
+}
+
+function normalizeRetryAttempt(value: unknown) {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return 0;
+  return Math.floor(parsed);
+}
+
+function hasAuthJsonRetryContext(normalizedError: string) {
+  return normalizedError.includes("auth.json");
+}
+
+export function classifyAutomaticRetry(input: {
+  errorCode?: string | null;
+  errorMessage?: string | null;
+}): AutomaticRetryDecision | null {
+  const errorCode = readNonEmptyString(input.errorCode)?.toLowerCase() ?? "";
+  const errorMessage = readNonEmptyString(input.errorMessage)?.toLowerCase() ?? "";
+
+  if (errorCode === "process_lost") {
+    return {
+      reason: "process_lost",
+      maxAttempts: 1,
+    };
+  }
+
+  if (
+    errorCode === "rate_limited" ||
+    /\b429\b/.test(errorMessage) ||
+    errorMessage.includes("too many requests") ||
+    errorMessage.includes("rate limit") ||
+    errorMessage.includes("resource_exhausted")
+  ) {
+    return {
+      reason: "rate_limited",
+      maxAttempts: 2,
+    };
+  }
+
+  if (
+    errorMessage.includes("browser is already in use") ||
+    errorMessage.includes("playwright is already in use")
+  ) {
+    return {
+      reason: "browser_busy",
+      maxAttempts: 1,
+    };
+  }
+
+  if (
+    hasAuthJsonRetryContext(errorMessage) &&
+    (
+      errorMessage.includes("enoent") ||
+      errorMessage.includes("ebusy") ||
+      errorMessage.includes("eperm") ||
+      errorMessage.includes("eacces") ||
+      errorMessage.includes("unexpected token") ||
+      errorMessage.includes("unexpected end") ||
+      errorMessage.includes("json")
+    )
+  ) {
+    return {
+      reason: "auth_file_transient",
+      maxAttempts: 2,
+    };
+  }
+
+  return null;
+}
+
+export function getRetryChainAttempt(input: {
+  contextSnapshot?: Record<string, unknown> | null;
+  processLossRetryCount?: number | null;
+}) {
+  const context = parseObject(input.contextSnapshot);
+  return Math.max(
+    normalizeRetryAttempt(context.retryAttempt),
+    normalizeRetryAttempt(input.processLossRetryCount),
+  );
+}
+
+export function resolveAutomaticRetryDelayMs(reason: AutomaticRetryReason, attempt: number) {
+  switch (reason) {
+    case "process_lost":
+      return 0;
+    case "rate_limited":
+      return attempt >= 2 ? 120_000 : 30_000;
+    case "auth_file_transient":
+      return attempt >= 2 ? 30_000 : 10_000;
+    case "browser_busy":
+      return 10_000;
+  }
+}
+
+export function resolveAutomaticRetryPlan(
+  run: {
+    contextSnapshot?: Record<string, unknown> | null;
+    processLossRetryCount?: number | null;
+  },
+  failure: {
+    errorCode?: string | null;
+    errorMessage?: string | null;
+  },
+  now = new Date(),
+): AutomaticRetryPlan | null {
+  const decision = classifyAutomaticRetry(failure);
+  if (!decision) return null;
+
+  const attempt = getRetryChainAttempt(run) + 1;
+  if (attempt > decision.maxAttempts) return null;
+
+  const retryAfterMs = resolveAutomaticRetryDelayMs(decision.reason, attempt);
+  return {
+    ...decision,
+    attempt,
+    retryAfterMs,
+    retryNotBeforeAt: retryAfterMs > 0 ? new Date(now.getTime() + retryAfterMs) : null,
+  };
+}
+
+export function getRetryNotBeforeAt(contextSnapshot: Record<string, unknown> | null | undefined) {
+  const context = parseObject(contextSnapshot);
+  const raw = readNonEmptyString(context.retryNotBeforeAt);
+  if (!raw) return null;
+  const parsed = Date.parse(raw);
+  if (!Number.isFinite(parsed)) return null;
+  return new Date(parsed);
+}
+
+function isQueuedRunReadyForStart(
+  run: { contextSnapshot?: Record<string, unknown> | null },
+  now = new Date(),
+) {
+  const retryNotBeforeAt = getRetryNotBeforeAt(run.contextSnapshot);
+  return !retryNotBeforeAt || retryNotBeforeAt.getTime() <= now.getTime();
+}
+
+export function selectReadyQueuedRunsForStart<T extends { contextSnapshot?: Record<string, unknown> | null }>(
+  runs: T[],
+  now = new Date(),
+  limit = Number.POSITIVE_INFINITY,
+) {
+  return runs
+    .filter((run) => isQueuedRunReadyForStart(run, now))
+    .slice(0, Math.max(0, limit));
+}
+
+export async function handleAutomaticRetryOrRelease<T>(input: {
+  plan: AutomaticRetryPlan | null;
+  enqueueRetry: (plan: AutomaticRetryPlan) => Promise<T>;
+  release: () => Promise<void>;
+  onRetryEnqueueFailure?: (err: unknown, plan: AutomaticRetryPlan) => Promise<void> | void;
+}): Promise<
+  | { action: "retried"; retriedRun: T; retryEnqueueFailed: false }
+  | { action: "released"; retriedRun: null; retryEnqueueFailed: boolean }
+> {
+  if (!input.plan) {
+    await input.release();
+    return {
+      action: "released",
+      retriedRun: null,
+      retryEnqueueFailed: false,
+    };
+  }
+
+  try {
+    const retriedRun = await input.enqueueRetry(input.plan);
+    return {
+      action: "retried",
+      retriedRun,
+      retryEnqueueFailed: false,
+    };
+  } catch (err) {
+    await input.onRetryEnqueueFailure?.(err, input.plan);
+    await input.release();
+    return {
+      action: "released",
+      retriedRun: null,
+      retryEnqueueFailed: true,
+    };
+  }
+}
+
+function describeAutomaticRetryReason(reason: AutomaticRetryReason) {
+  switch (reason) {
+    case "process_lost":
+      return "orphaned child process";
+    case "rate_limited":
+      return "rate limit";
+    case "auth_file_transient":
+      return "transient auth file failure";
+    case "browser_busy":
+      return "busy browser session";
+  }
+}
+
 export function applyPersistedExecutionWorkspaceConfig(input: {
   config: Record<string, unknown>;
   workspaceConfig: ExecutionWorkspaceConfig | null;
@@ -1620,21 +1827,34 @@ export function heartbeatService(db: Db) {
     return updated;
   }
 
-  async function enqueueProcessLossRetry(
+  function getAutomaticRetryWakeReason(reason: AutomaticRetryReason) {
+    return reason === "process_lost" ? "process_lost_retry" : `${reason}_retry`;
+  }
+
+  async function enqueueAutomaticRetry(
     run: typeof heartbeatRuns.$inferSelect,
     agent: typeof agents.$inferSelect,
+    plan: AutomaticRetryPlan,
     now: Date,
   ) {
     const contextSnapshot = parseObject(run.contextSnapshot);
     const issueId = readNonEmptyString(contextSnapshot.issueId);
     const taskKey = deriveTaskKeyWithHeartbeatFallback(contextSnapshot, null);
     const sessionBefore = await resolveSessionBeforeForWakeup(agent, taskKey);
-    const retryContextSnapshot = {
+    const wakeReason = getAutomaticRetryWakeReason(plan.reason);
+    const retryContextSnapshot: Record<string, unknown> = {
       ...contextSnapshot,
       retryOfRunId: run.id,
-      wakeReason: "process_lost_retry",
-      retryReason: "process_lost",
+      wakeReason,
+      retryReason: plan.reason,
+      retryAttempt: plan.attempt,
+      retryMaxAttempts: plan.maxAttempts,
     };
+    if (plan.retryNotBeforeAt) {
+      retryContextSnapshot.retryNotBeforeAt = plan.retryNotBeforeAt.toISOString();
+    } else {
+      delete retryContextSnapshot.retryNotBeforeAt;
+    }
 
     const queued = await db.transaction(async (tx) => {
       const wakeupRequest = await tx
@@ -1644,10 +1864,11 @@ export function heartbeatService(db: Db) {
           agentId: run.agentId,
           source: "automation",
           triggerDetail: "system",
-          reason: "process_lost_retry",
+          reason: wakeReason,
           payload: {
             ...(issueId ? { issueId } : {}),
             retryOfRunId: run.id,
+            retryReason: plan.reason,
           },
           status: "queued",
           requestedByActorType: "system",
@@ -1669,7 +1890,10 @@ export function heartbeatService(db: Db) {
           contextSnapshot: retryContextSnapshot,
           sessionIdBefore: sessionBefore,
           retryOfRunId: run.id,
-          processLossRetryCount: (run.processLossRetryCount ?? 0) + 1,
+          processLossRetryCount:
+            plan.reason === "process_lost"
+              ? (run.processLossRetryCount ?? 0) + 1
+              : (run.processLossRetryCount ?? 0),
           updatedAt: now,
         })
         .returning()
@@ -1714,13 +1938,42 @@ export function heartbeatService(db: Db) {
       eventType: "lifecycle",
       stream: "system",
       level: "warn",
-      message: "Queued automatic retry after orphaned child process was confirmed dead",
+      message: `Queued automatic retry after ${describeAutomaticRetryReason(plan.reason)}`,
       payload: {
         retryOfRunId: run.id,
+        retryReason: plan.reason,
+        retryAttempt: plan.attempt,
+        retryMaxAttempts: plan.maxAttempts,
+        retryNotBeforeAt: plan.retryNotBeforeAt ? plan.retryNotBeforeAt.toISOString() : null,
       },
     });
 
     return queued;
+  }
+
+  async function handleRunAutomaticRetryOrRelease(input: {
+    run: typeof heartbeatRuns.$inferSelect;
+    agent: typeof agents.$inferSelect | null;
+    plan: AutomaticRetryPlan | null;
+    now: Date;
+  }) {
+    const effectivePlan = input.agent ? input.plan : null;
+    return handleAutomaticRetryOrRelease({
+      plan: effectivePlan,
+      enqueueRetry: async (plan) => enqueueAutomaticRetry(input.run, input.agent!, plan, input.now),
+      release: async () => releaseIssueExecutionAndPromote(input.run),
+      onRetryEnqueueFailure: async (err, plan) => {
+        logger.warn(
+          {
+            err,
+            runId: input.run.id,
+            retryReason: plan.reason,
+            retryAttempt: plan.attempt,
+          },
+          "failed to enqueue automatic retry; releasing issue execution lock",
+        );
+      },
+    });
   }
 
   function parseHeartbeatPolicy(agent: typeof agents.$inferSelect) {
@@ -1899,10 +2152,22 @@ export function heartbeatService(db: Db) {
         continue;
       }
 
-      const shouldRetry = tracksLocalChild && !!run.processPid && (run.processLossRetryCount ?? 0) < 1;
       const baseMessage = run.processPid
         ? `Process lost -- child pid ${run.processPid} is no longer running`
         : "Process lost -- server may have restarted";
+      const retryPlan =
+        tracksLocalChild && run.processPid
+          ? resolveAutomaticRetryPlan(
+              run,
+              {
+                errorCode: "process_lost",
+                errorMessage: baseMessage,
+              },
+              now,
+            )
+          : null;
+      const retryAgent = retryPlan ? await getAgent(run.agentId) : null;
+      const shouldRetry = !!(retryPlan && retryAgent);
 
       let finalizedRun = await setRunStatus(run.id, "failed", {
         error: shouldRetry ? `${baseMessage}; retrying once` : baseMessage,
@@ -1916,26 +2181,29 @@ export function heartbeatService(db: Db) {
       if (!finalizedRun) finalizedRun = await getRun(run.id);
       if (!finalizedRun) continue;
 
-      let retriedRun: typeof heartbeatRuns.$inferSelect | null = null;
-      if (shouldRetry) {
-        const agent = await getAgent(run.agentId);
-        if (agent) {
-          retriedRun = await enqueueProcessLossRetry(finalizedRun, agent, now);
-        }
-      } else {
-        await releaseIssueExecutionAndPromote(finalizedRun);
-      }
+      const retryResult = await handleRunAutomaticRetryOrRelease({
+        run: finalizedRun,
+        agent: retryAgent,
+        plan: shouldRetry ? retryPlan : null,
+        now,
+      });
+      const retriedRunId = retryResult.action === "retried" ? retryResult.retriedRun.id : null;
+      const lifecycleMessage =
+        retriedRunId
+          ? `${baseMessage}; queued retry ${retriedRunId}`
+          : retryResult.retryEnqueueFailed
+            ? `${baseMessage}; automatic retry enqueue failed, released issue execution`
+            : baseMessage;
 
       await appendRunEvent(finalizedRun, await nextRunEventSeq(finalizedRun.id), {
         eventType: "lifecycle",
         stream: "system",
         level: "error",
-        message: shouldRetry
-          ? `${baseMessage}; queued retry ${retriedRun?.id ?? ""}`.trim()
-          : baseMessage,
+        message: lifecycleMessage,
         payload: {
           ...(run.processPid ? { processPid: run.processPid } : {}),
-          ...(retriedRun ? { retryRunId: retriedRun.id } : {}),
+          ...(retriedRunId ? { retryRunId: retriedRunId } : {}),
+          ...(retryResult.retryEnqueueFailed ? { retryEnqueueFailed: true } : {}),
         },
       });
 
@@ -2034,12 +2302,13 @@ export function heartbeatService(db: Db) {
         .select()
         .from(heartbeatRuns)
         .where(and(eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.status, "queued")))
-        .orderBy(asc(heartbeatRuns.createdAt))
-        .limit(availableSlots);
+        .orderBy(asc(heartbeatRuns.createdAt));
       if (queuedRuns.length === 0) return [];
+      const readyQueuedRuns = selectReadyQueuedRunsForStart(queuedRuns, new Date(), availableSlots);
+      if (readyQueuedRuns.length === 0) return [];
 
       const claimedRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
-      for (const queuedRun of queuedRuns) {
+      for (const queuedRun of readyQueuedRuns) {
         const claimed = await claimQueuedRun(queuedRun);
         if (claimed) claimedRuns.push(claimed);
       }
@@ -2792,23 +3061,26 @@ export function heartbeatService(db: Db) {
             } as Record<string, unknown>)
           : null;
 
+      const finishedAt = new Date();
+      const rawFinalErrorMessage =
+        outcome === "succeeded"
+          ? null
+          : (adapterResult.errorMessage ?? (outcome === "timed_out" ? "Timed out" : "Adapter failed"));
+      const finalErrorCode =
+        outcome === "timed_out"
+          ? "timeout"
+          : outcome === "cancelled"
+            ? "cancelled"
+            : outcome === "failed"
+              ? (adapterResult.errorCode ?? "adapter_failed")
+              : null;
       await setRunStatus(run.id, status, {
-        finishedAt: new Date(),
+        finishedAt,
         error:
-          outcome === "succeeded"
+          rawFinalErrorMessage == null
             ? null
-            : redactCurrentUserText(
-                adapterResult.errorMessage ?? (outcome === "timed_out" ? "Timed out" : "Adapter failed"),
-                currentUserRedactionOptions,
-              ),
-        errorCode:
-          outcome === "timed_out"
-            ? "timeout"
-            : outcome === "cancelled"
-              ? "cancelled"
-              : outcome === "failed"
-                ? (adapterResult.errorCode ?? "adapter_failed")
-                : null,
+            : redactCurrentUserText(rawFinalErrorMessage, currentUserRedactionOptions),
+        errorCode: finalErrorCode,
         exitCode: adapterResult.exitCode,
         signal: adapterResult.signal,
         usageJson,
@@ -2822,12 +3094,37 @@ export function heartbeatService(db: Db) {
       });
 
       await setWakeupStatus(run.wakeupRequestId, outcome === "succeeded" ? "completed" : status, {
-        finishedAt: new Date(),
-        error: adapterResult.errorMessage ?? null,
+        finishedAt,
+        error: rawFinalErrorMessage,
       });
 
       const finalizedRun = await getRun(run.id);
       if (finalizedRun) {
+        const retryPlan =
+          outcome === "failed"
+            ? resolveAutomaticRetryPlan(
+                finalizedRun,
+                {
+                  errorCode: finalErrorCode,
+                  errorMessage: rawFinalErrorMessage,
+                },
+                finishedAt,
+              )
+            : null;
+        const retryResult =
+          outcome === "failed"
+            ? await handleRunAutomaticRetryOrRelease({
+                run: finalizedRun,
+                agent,
+                plan: retryPlan,
+                now: finishedAt,
+              })
+            : (await releaseIssueExecutionAndPromote(finalizedRun),
+              {
+                action: "released",
+                retriedRun: null,
+                retryEnqueueFailed: false,
+              } as const);
         await appendRunEvent(finalizedRun, seq++, {
           eventType: "lifecycle",
           stream: "system",
@@ -2836,9 +3133,18 @@ export function heartbeatService(db: Db) {
           payload: {
             status,
             exitCode: adapterResult.exitCode,
+            ...(retryPlan ? {
+              automaticRetryReason: retryPlan.reason,
+              automaticRetryAttempt: retryPlan.attempt,
+              automaticRetryMaxAttempts: retryPlan.maxAttempts,
+              automaticRetryNotBeforeAt: retryPlan.retryNotBeforeAt
+                ? retryPlan.retryNotBeforeAt.toISOString()
+                : null,
+            } : {}),
+            ...(retryResult.action === "retried" ? { retryRunId: retryResult.retriedRun.id } : {}),
+            ...(retryResult.retryEnqueueFailed ? { retryEnqueueFailed: true } : {}),
           },
         });
-        await releaseIssueExecutionAndPromote(finalizedRun);
       }
 
       if (finalizedRun) {
@@ -2867,8 +3173,14 @@ export function heartbeatService(db: Db) {
       }
       await finalizeAgentStatus(agent.id, outcome);
     } catch (err) {
+      const rawErrorMessage = err instanceof Error ? err.message : "Unknown adapter failure";
+      const errorWithCode = err as { code?: unknown } | null;
+      const rawErrorCode =
+        errorWithCode && typeof errorWithCode.code === "string"
+          ? errorWithCode.code
+          : "adapter_failed";
       const message = redactCurrentUserText(
-        err instanceof Error ? err.message : "Unknown adapter failure",
+        rawErrorMessage,
         await getCurrentUserRedactionOptions(),
       );
       logger.error({ err, runId }, "heartbeat execution failed");
@@ -2882,10 +3194,11 @@ export function heartbeatService(db: Db) {
         }
       }
 
+      const failedAt = new Date();
       const failedRun = await setRunStatus(run.id, "failed", {
         error: message,
-        errorCode: "adapter_failed",
-        finishedAt: new Date(),
+        errorCode: rawErrorCode,
+        finishedAt: failedAt,
         stdoutExcerpt,
         stderrExcerpt,
         logBytes: logSummary?.bytes,
@@ -2893,18 +3206,43 @@ export function heartbeatService(db: Db) {
         logCompressed: logSummary?.compressed ?? false,
       });
       await setWakeupStatus(run.wakeupRequestId, "failed", {
-        finishedAt: new Date(),
+        finishedAt: failedAt,
         error: message,
       });
 
       if (failedRun) {
+        const retryPlan = resolveAutomaticRetryPlan(
+          failedRun,
+          {
+            errorCode: rawErrorCode,
+            errorMessage: rawErrorMessage,
+          },
+          failedAt,
+        );
+        const retryResult = await handleRunAutomaticRetryOrRelease({
+          run: failedRun,
+          agent,
+          plan: retryPlan,
+          now: failedAt,
+        });
         await appendRunEvent(failedRun, seq++, {
           eventType: "error",
           stream: "system",
           level: "error",
-          message,
+          message: rawErrorMessage,
+          payload: {
+            ...(retryPlan ? {
+              automaticRetryReason: retryPlan.reason,
+              automaticRetryAttempt: retryPlan.attempt,
+              automaticRetryMaxAttempts: retryPlan.maxAttempts,
+              automaticRetryNotBeforeAt: retryPlan.retryNotBeforeAt
+                ? retryPlan.retryNotBeforeAt.toISOString()
+                : null,
+            } : {}),
+            ...(retryResult.action === "retried" ? { retryRunId: retryResult.retriedRun.id } : {}),
+            ...(retryResult.retryEnqueueFailed ? { retryEnqueueFailed: true } : {}),
+          },
         });
-        await releaseIssueExecutionAndPromote(failedRun);
 
         await updateRuntimeState(agent, failedRun, {
           exitCode: null,
@@ -2934,28 +3272,62 @@ export function heartbeatService(db: Db) {
     } catch (outerErr) {
           // Setup code before adapter.execute threw (e.g. ensureRuntimeState, resolveWorkspaceForRun).
           // The inner catch did not fire, so we must record the failure here.
-          const message = outerErr instanceof Error ? outerErr.message : "Unknown setup failure";
+          const rawErrorMessage = outerErr instanceof Error ? outerErr.message : "Unknown setup failure";
+          const outerErrorWithCode = outerErr as { code?: unknown } | null;
+          const rawErrorCode =
+            outerErrorWithCode && typeof outerErrorWithCode.code === "string"
+              ? outerErrorWithCode.code
+              : "adapter_failed";
+          const message = redactCurrentUserText(
+            rawErrorMessage,
+            await getCurrentUserRedactionOptions(),
+          );
+          const failedAt = new Date();
           logger.error({ err: outerErr, runId }, "heartbeat execution setup failed");
           await setRunStatus(runId, "failed", {
             error: message,
-            errorCode: "adapter_failed",
-            finishedAt: new Date(),
+            errorCode: rawErrorCode,
+            finishedAt: failedAt,
           }).catch(() => undefined);
           await setWakeupStatus(run.wakeupRequestId, "failed", {
-            finishedAt: new Date(),
+            finishedAt: failedAt,
             error: message,
           }).catch(() => undefined);
           const failedRun = await getRun(runId).catch(() => null);
           if (failedRun) {
+            const retryPlan = resolveAutomaticRetryPlan(
+              failedRun,
+              {
+                errorCode: rawErrorCode,
+                errorMessage: rawErrorMessage,
+              },
+              failedAt,
+            );
+            const retryAgent = retryPlan ? await getAgent(run.agentId).catch(() => null) : null;
             // Emit a run-log event so the failure is visible in the run timeline,
             // consistent with what the inner catch block does for adapter failures.
             await appendRunEvent(failedRun, 1, {
               eventType: "error",
               stream: "system",
               level: "error",
-              message,
+              message: rawErrorMessage,
+              payload: {
+                ...(retryPlan ? {
+                  automaticRetryReason: retryPlan.reason,
+                  automaticRetryAttempt: retryPlan.attempt,
+                  automaticRetryMaxAttempts: retryPlan.maxAttempts,
+                  automaticRetryNotBeforeAt: retryPlan.retryNotBeforeAt
+                    ? retryPlan.retryNotBeforeAt.toISOString()
+                    : null,
+                } : {}),
+              },
             }).catch(() => undefined);
-            await releaseIssueExecutionAndPromote(failedRun).catch(() => undefined);
+            await handleRunAutomaticRetryOrRelease({
+              run: failedRun,
+              agent: retryAgent,
+              plan: retryPlan,
+              now: failedAt,
+            }).catch(() => undefined);
           }
           // Ensure the agent is not left stuck in "running" if the inner catch handler's
           // DB calls threw (e.g. a transient DB error in finalizeAgentStatus).
