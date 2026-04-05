@@ -7,6 +7,7 @@ import {
   companies,
   createDb,
   executionWorkspaces,
+  heartbeatRuns,
   instanceSettings,
   issueComments,
   issueInboxArchives,
@@ -47,6 +48,7 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     await db.delete(issueInboxArchives);
     await db.delete(activityLog);
     await db.delete(issues);
+    await db.delete(heartbeatRuns);
     await db.delete(executionWorkspaces);
     await db.delete(projectWorkspaces);
     await db.delete(projects);
@@ -602,6 +604,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     await db.delete(issueInboxArchives);
     await db.delete(activityLog);
     await db.delete(issues);
+    await db.delete(heartbeatRuns);
     await db.delete(executionWorkspaces);
     await db.delete(projectWorkspaces);
     await db.delete(projects);
@@ -857,6 +860,182 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     expect(followUp.executionWorkspacePreference).toBe("reuse_existing");
     expect(followUp.executionWorkspaceSettings).toEqual({
       mode: "operator_branch",
+    });
+  });
+
+  describe("assertCanTransitionIssueToDone", () => {
+    async function seedDoneGuardFixture() {
+      const companyId = randomUUID();
+      const agentId = randomUUID();
+      const issueId = randomUUID();
+
+      await db.insert(companies).values({
+        id: companyId,
+        name: "Paperclip",
+        issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      });
+
+      await db.insert(agents).values({
+        id: agentId,
+        companyId,
+        name: "DoneGuardAgent",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      });
+
+      await db.insert(issues).values({
+        id: issueId,
+        companyId,
+        title: "Guard done transitions",
+        status: "in_review",
+        priority: "medium",
+        assigneeAgentId: agentId,
+        issueNumber: 1,
+        identifier: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}-1`,
+      });
+
+      return { companyId, agentId, issueId };
+    }
+
+    async function insertIssueRun(input: {
+      companyId: string;
+      agentId: string;
+      issueId: string;
+      runId?: string;
+      status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+      verdict?: string | null;
+      errorCode?: string | null;
+      error?: string | null;
+      finishedAt?: Date | null;
+      createdAt?: Date;
+    }) {
+      const createdAt = input.createdAt ?? new Date("2026-04-05T16:00:00.000Z");
+      const finishedAt = input.finishedAt ?? (input.status === "succeeded" ? createdAt : null);
+
+      await db.insert(heartbeatRuns).values({
+        id: input.runId ?? randomUUID(),
+        companyId: input.companyId,
+        agentId: input.agentId,
+        invocationSource: "assignment",
+        triggerDetail: "system",
+        status: input.status,
+        contextSnapshot: { issueId: input.issueId },
+        resultJson: input.verdict ? { verdict: input.verdict } : {},
+        errorCode: input.errorCode ?? null,
+        error: input.error ?? null,
+        startedAt: new Date(createdAt.getTime() - 60_000),
+        finishedAt,
+        createdAt,
+        updatedAt: createdAt,
+      });
+    }
+
+    it("blocks board-driven done transitions when the latest terminal run requested changes", async () => {
+      const { companyId, agentId, issueId } = await seedDoneGuardFixture();
+
+      await insertIssueRun({
+        companyId,
+        agentId,
+        issueId,
+        status: "succeeded",
+        verdict: "changes_requested",
+      });
+
+      await expect(
+        svc.assertCanTransitionIssueToDone({
+          issueId,
+          companyId,
+          actorType: "board",
+          actorAgentId: null,
+          actorRunId: null,
+        }),
+      ).rejects.toMatchObject({
+        status: 422,
+        details: expect.objectContaining({
+          code: "issue_done_blocked_by_negative_run_verdict",
+          verdict: "changes_requested",
+        }),
+      });
+    });
+
+    it("allows board-driven done transitions when the latest terminal run has no explicit verdict", async () => {
+      const { companyId, agentId, issueId } = await seedDoneGuardFixture();
+
+      await insertIssueRun({
+        companyId,
+        agentId,
+        issueId,
+        status: "succeeded",
+        verdict: null,
+      });
+
+      await expect(
+        svc.assertCanTransitionIssueToDone({
+          issueId,
+          companyId,
+          actorType: "board",
+          actorAgentId: null,
+          actorRunId: null,
+        }),
+      ).resolves.toBeUndefined();
+    });
+
+    it("blocks agent-driven done transitions until the actor run is terminal", async () => {
+      const { companyId, agentId, issueId } = await seedDoneGuardFixture();
+      const actorRunId = randomUUID();
+
+      await insertIssueRun({
+        companyId,
+        agentId,
+        issueId,
+        runId: actorRunId,
+        status: "running",
+        finishedAt: null,
+      });
+
+      await expect(
+        svc.assertCanTransitionIssueToDone({
+          issueId,
+          companyId,
+          actorType: "agent",
+          actorAgentId: agentId,
+          actorRunId,
+        }),
+      ).rejects.toMatchObject({
+        status: 422,
+        details: expect.objectContaining({
+          code: "issue_done_requires_terminal_actor_run",
+        }),
+      });
+    });
+
+    it("allows agent-driven done transitions when the actor run explicitly passed", async () => {
+      const { companyId, agentId, issueId } = await seedDoneGuardFixture();
+      const actorRunId = randomUUID();
+
+      await insertIssueRun({
+        companyId,
+        agentId,
+        issueId,
+        runId: actorRunId,
+        status: "succeeded",
+        verdict: "passed",
+      });
+
+      await expect(
+        svc.assertCanTransitionIssueToDone({
+          issueId,
+          companyId,
+          actorType: "agent",
+          actorAgentId: agentId,
+          actorRunId,
+        }),
+      ).resolves.toBeUndefined();
     });
   });
 });

@@ -23,6 +23,7 @@ import {
 } from "@paperclipai/db";
 import { extractAgentMentionIds, extractProjectMentionIds, isUuidLike } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
+import { deriveHeartbeatRunBusinessVerdict } from "./heartbeat-run-verdict.js";
 import {
   defaultIssueExecutionWorkspaceSettingsForProject,
   gateProjectExecutionWorkspacePolicy,
@@ -115,6 +116,17 @@ type DbReader = Pick<Db, "select">;
 type IssueCreateInput = Omit<typeof issues.$inferInsert, "companyId"> & {
   labelIds?: string[];
   inheritExecutionWorkspaceFromIssueId?: string | null;
+};
+type IssueDoneGuardActorType = "agent" | "board";
+type IssueDoneGuardRunRow = {
+  id: string;
+  agentId: string;
+  status: string;
+  finishedAt: Date | null;
+  createdAt: Date;
+  resultJson: Record<string, unknown> | null;
+  errorCode: string | null;
+  error: string | null;
 };
 
 function sameRunLock(checkoutRunId: string | null, actorRunId: string | null) {
@@ -551,6 +563,55 @@ export function issueService(db: Db) {
     if (!row) return null;
     const [enriched] = await withIssueLabels(db, [row]);
     return enriched;
+  }
+
+  async function getLatestTerminalRunForIssue(companyId: string, issueId: string): Promise<IssueDoneGuardRunRow | null> {
+    return db
+      .select({
+        id: heartbeatRuns.id,
+        agentId: heartbeatRuns.agentId,
+        status: heartbeatRuns.status,
+        finishedAt: heartbeatRuns.finishedAt,
+        createdAt: heartbeatRuns.createdAt,
+        resultJson: heartbeatRuns.resultJson,
+        errorCode: heartbeatRuns.errorCode,
+        error: heartbeatRuns.error,
+      })
+      .from(heartbeatRuns)
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, companyId),
+          eq(sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'issueId'`, issueId),
+          inArray(heartbeatRuns.status, [...TERMINAL_HEARTBEAT_RUN_STATUSES]),
+        ),
+      )
+      .orderBy(desc(heartbeatRuns.finishedAt), desc(heartbeatRuns.createdAt))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+  }
+
+  async function getRunByIdForIssue(companyId: string, issueId: string, runId: string): Promise<IssueDoneGuardRunRow | null> {
+    return db
+      .select({
+        id: heartbeatRuns.id,
+        agentId: heartbeatRuns.agentId,
+        status: heartbeatRuns.status,
+        finishedAt: heartbeatRuns.finishedAt,
+        createdAt: heartbeatRuns.createdAt,
+        resultJson: heartbeatRuns.resultJson,
+        errorCode: heartbeatRuns.errorCode,
+        error: heartbeatRuns.error,
+      })
+      .from(heartbeatRuns)
+      .where(
+        and(
+          eq(heartbeatRuns.id, runId),
+          eq(heartbeatRuns.companyId, companyId),
+          eq(sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'issueId'`, issueId),
+        ),
+      )
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
   }
 
   function redactIssueComment<T extends { body: string }>(comment: T, censorUsernameInLogs: boolean): T {
@@ -1074,6 +1135,55 @@ export function issueService(db: Db) {
 
     getByIdentifier: async (identifier: string) => {
       return getIssueByIdentifier(identifier);
+    },
+
+    assertCanTransitionIssueToDone: async (input: {
+      issueId: string;
+      companyId: string;
+      actorType: IssueDoneGuardActorType;
+      actorAgentId: string | null;
+      actorRunId: string | null;
+    }) => {
+      const latestTerminalRun = await getLatestTerminalRunForIssue(input.companyId, input.issueId);
+      if (latestTerminalRun) {
+        const latestVerdict = deriveHeartbeatRunBusinessVerdict(latestTerminalRun);
+        if (latestVerdict.kind === "changes_requested" || latestVerdict.kind === "blocked") {
+          throw unprocessable("Issue cannot be marked done because the latest run did not pass", {
+            code: "issue_done_blocked_by_negative_run_verdict",
+            runId: latestTerminalRun.id,
+            verdict: latestVerdict.kind,
+            rawVerdict: latestVerdict.rawVerdict,
+          });
+        }
+      }
+
+      if (input.actorType !== "agent") {
+        return;
+      }
+
+      if (!input.actorAgentId || !input.actorRunId) {
+        throw unprocessable("Agent run must finish before marking issue done", {
+          code: "issue_done_requires_terminal_actor_run",
+        });
+      }
+
+      const actorRun = await getRunByIdForIssue(input.companyId, input.issueId, input.actorRunId);
+      if (!actorRun || actorRun.agentId !== input.actorAgentId || !TERMINAL_HEARTBEAT_RUN_STATUSES.has(actorRun.status)) {
+        throw unprocessable("Agent run must finish before marking issue done", {
+          code: "issue_done_requires_terminal_actor_run",
+          runId: input.actorRunId,
+        });
+      }
+
+      const actorVerdict = deriveHeartbeatRunBusinessVerdict(actorRun);
+      if (actorVerdict.kind !== "passed") {
+        throw unprocessable("Agent run must finish with an explicit passed verdict before marking issue done", {
+          code: "issue_done_requires_explicit_passed_verdict",
+          runId: actorRun.id,
+          verdict: actorVerdict.kind,
+          rawVerdict: actorVerdict.rawVerdict,
+        });
+      }
     },
 
     create: async (

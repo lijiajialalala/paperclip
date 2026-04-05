@@ -2,9 +2,11 @@ import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { issueRoutes } from "../routes/issues.js";
+import { unprocessable } from "../errors.js";
 import { errorHandler } from "../middleware/index.js";
 
 const mockIssueService = vi.hoisted(() => ({
+  assertCanTransitionIssueToDone: vi.fn(),
   getById: vi.fn(),
   update: vi.fn(),
 }));
@@ -77,6 +79,7 @@ describe("issue telemetry routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockGetTelemetryClient.mockReturnValue({ track: vi.fn() });
+    mockIssueService.assertCanTransitionIssueToDone.mockResolvedValue(undefined);
     mockIssueService.getById.mockResolvedValue(makeIssue("todo"));
     mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
       ...makeIssue("todo"),
@@ -121,5 +124,52 @@ describe("issue telemetry routes", () => {
     expect(res.status).toBe(200);
     expect(mockTrackAgentTaskCompleted).not.toHaveBeenCalled();
     expect(mockAgentService.getById).not.toHaveBeenCalled();
+  });
+
+  it("checks the done guard before applying board-driven completions", async () => {
+    const res = await request(createApp({
+      type: "board",
+      userId: "local-board",
+      companyIds: ["company-1"],
+      source: "local_implicit",
+      isInstanceAdmin: false,
+    }))
+      .patch("/api/issues/11111111-1111-4111-8111-111111111111")
+      .send({ status: "done" });
+
+    expect(res.status).toBe(200);
+    expect(mockIssueService.assertCanTransitionIssueToDone).toHaveBeenCalledWith({
+      issueId: "11111111-1111-4111-8111-111111111111",
+      companyId: "company-1",
+      actorType: "board",
+      actorAgentId: null,
+      actorRunId: null,
+    });
+  });
+
+  it("returns 422 when the done guard rejects an agent completion", async () => {
+    mockIssueService.assertCanTransitionIssueToDone.mockRejectedValue(
+      unprocessable("Agent run must finish with an explicit passed verdict before marking issue done", {
+        code: "issue_done_requires_explicit_passed_verdict",
+      }),
+    );
+
+    const res = await request(createApp({
+      type: "agent",
+      agentId: "agent-1",
+      companyId: "company-1",
+      runId: "run-1",
+    }))
+      .patch("/api/issues/11111111-1111-4111-8111-111111111111")
+      .send({ status: "done" });
+
+    expect(res.status).toBe(422);
+    expect(res.body).toEqual({
+      error: "Agent run must finish with an explicit passed verdict before marking issue done",
+      details: {
+        code: "issue_done_requires_explicit_passed_verdict",
+      },
+    });
+    expect(mockIssueService.update).not.toHaveBeenCalled();
   });
 });
