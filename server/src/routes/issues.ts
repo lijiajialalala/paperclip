@@ -1120,6 +1120,15 @@ export function issueRoutes(
     if (commentBody && reopenRequested === true && isClosed && updateFields.status === undefined) {
       updateFields.status = "todo";
     }
+    if (updateFields.status === "done" && existing.status !== "done") {
+      await svc.assertCanTransitionIssueToDone({
+        issueId: existing.id,
+        companyId: existing.companyId,
+        actorType: req.actor.type === "agent" ? "agent" : "board",
+        actorAgentId: req.actor.type === "agent" ? req.actor.agentId ?? null : null,
+        actorRunId: req.actor.runId ?? null,
+      });
+    }
     let issue;
     try {
       issue = await svc.update(id, updateFields);
