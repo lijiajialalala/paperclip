@@ -30,4 +30,8 @@ export {
   createEmbeddedPostgresLogBuffer,
   formatEmbeddedPostgresError,
 } from "./embedded-postgres-error.js";
+export {
+  hasEmbeddedPostgresSharedMemoryConflict,
+  tryRecoverStaleEmbeddedPostgresPreferredPort,
+} from "./embedded-postgres-recovery.js";
 export * from "./schema/index.js";

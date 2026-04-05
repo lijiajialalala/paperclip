@@ -3,6 +3,7 @@ import { createServer } from "node:net";
 import path from "node:path";
 import { ensurePostgresDatabase, getPostgresDataDirectory } from "./client.js";
 import { createEmbeddedPostgresLogBuffer, formatEmbeddedPostgresError } from "./embedded-postgres-error.js";
+import { tryRecoverStaleEmbeddedPostgresPreferredPort } from "./embedded-postgres-recovery.js";
 import { resolveDatabaseTarget } from "./runtime-config.js";
 
 type EmbeddedPostgresInstance = {
@@ -51,6 +52,17 @@ function readPidFilePort(postmasterPidFile: string): number | null {
   }
 }
 
+async function loadEmbeddedPostgresCtor(): Promise<EmbeddedPostgresCtor> {
+  try {
+    const mod = await import("embedded-postgres");
+    return mod.default as EmbeddedPostgresCtor;
+  } catch {
+    throw new Error(
+      "Embedded PostgreSQL support requires dependency `embedded-postgres`. Reinstall dependencies and try again.",
+    );
+  }
+}
+
 async function isPortInUse(port: number): Promise<boolean> {
   return await new Promise((resolve) => {
     const server = createServer();
@@ -74,17 +86,6 @@ async function findAvailablePort(startPort: number): Promise<number> {
   throw new Error(
     `Embedded PostgreSQL could not find a free port from ${startPort} to ${startPort + maxLookahead - 1}`,
   );
-}
-
-async function loadEmbeddedPostgresCtor(): Promise<EmbeddedPostgresCtor> {
-  try {
-    const mod = await import("embedded-postgres");
-    return mod.default as EmbeddedPostgresCtor;
-  } catch {
-    throw new Error(
-      "Embedded PostgreSQL support requires dependency `embedded-postgres`. Reinstall dependencies and try again.",
-    );
-  }
 }
 
 async function ensureEmbeddedPostgresConnection(
@@ -134,11 +135,12 @@ async function ensureEmbeddedPostgresConnection(
     };
   }
 
-  const instance = new EmbeddedPostgres({
+  let port = selectedPort;
+  let instance = new EmbeddedPostgres({
     databaseDir: dataDir,
     user: "paperclip",
     password: "paperclip",
-    port: selectedPort,
+    port,
     persistent: true,
     initdbFlags: ["--encoding=UTF8", "--locale=C", "--lc-messages=C"],
     onLog: logBuffer.append,
@@ -162,18 +164,46 @@ async function ensureEmbeddedPostgresConnection(
   try {
     await instance.start();
   } catch (error) {
-    throw formatEmbeddedPostgresError(error, {
-      fallbackMessage: `Failed to start embedded PostgreSQL on port ${selectedPort}`,
+    const recoveredPreferredPort = await tryRecoverStaleEmbeddedPostgresPreferredPort({
+      dataDir,
+      preferredPort,
+      error,
       recentLogs: logBuffer.getRecentLogs(),
     });
+    if (recoveredPreferredPort) {
+      port = preferredPort;
+      instance = new EmbeddedPostgres({
+        databaseDir: dataDir,
+        user: "paperclip",
+        password: "paperclip",
+        port,
+        persistent: true,
+        initdbFlags: ["--encoding=UTF8", "--locale=C", "--lc-messages=C"],
+        onLog: logBuffer.append,
+        onError: logBuffer.append,
+      });
+      try {
+        await instance.start();
+      } catch (retryError) {
+        throw formatEmbeddedPostgresError(retryError, {
+          fallbackMessage: `Failed to start embedded PostgreSQL on port ${port}`,
+          recentLogs: logBuffer.getRecentLogs(),
+        });
+      }
+    } else {
+      throw formatEmbeddedPostgresError(error, {
+        fallbackMessage: `Failed to start embedded PostgreSQL on port ${port}`,
+        recentLogs: logBuffer.getRecentLogs(),
+      });
+    }
   }
 
-  const adminConnectionString = `postgres://paperclip:paperclip@127.0.0.1:${selectedPort}/postgres`;
+  const adminConnectionString = `postgres://paperclip:paperclip@127.0.0.1:${port}/postgres`;
   await ensurePostgresDatabase(adminConnectionString, "paperclip");
 
   return {
-    connectionString: `postgres://paperclip:paperclip@127.0.0.1:${selectedPort}/paperclip`,
-    source: `embedded-postgres@${selectedPort}`,
+    connectionString: `postgres://paperclip:paperclip@127.0.0.1:${port}/paperclip`,
+    source: `embedded-postgres@${port}`,
     stop: async () => {
       await instance.stop();
     },

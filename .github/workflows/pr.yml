@@ -117,6 +117,9 @@ jobs:
       - name: Run tests
         run: pnpm test:run
 
+      - name: Smoke root dev:once
+        run: pnpm verify:dev-once
+
       - name: Build
         run: pnpm build
 
