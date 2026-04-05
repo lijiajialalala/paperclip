@@ -2649,12 +2649,19 @@ export function heartbeatService(db: Db) {
       };
 
       const adapter = getServerAdapter(agent.adapterType);
+      const runtimeEnvConfig = parseObject(resolvedConfig.env);
+      const hasDirectPaperclipApiKey =
+        (typeof runtimeEnvConfig.PAPERCLIP_API_KEY === "string" &&
+          runtimeEnvConfig.PAPERCLIP_API_KEY.trim().length > 0) ||
+        (typeof process.env.PAPERCLIP_API_KEY === "string" &&
+          process.env.PAPERCLIP_API_KEY.trim().length > 0);
       const authToken = resolveLocalAgentAuthToken({
         supportsLocalAgentJwt: adapter.supportsLocalAgentJwt === true,
         agentId: agent.id,
         companyId: agent.companyId,
         adapterType: agent.adapterType,
         runId: run.id,
+        hasDirectPaperclipApiKey,
       });
       const adapterResult = await adapter.execute({
         runId: run.id,

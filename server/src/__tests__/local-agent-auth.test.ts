@@ -42,6 +42,21 @@ describe("local agent auth token resolution", () => {
     expect(token).toContain(".");
   });
 
+  it("returns null when a direct Paperclip API key is configured", () => {
+    delete process.env[secretEnv];
+
+    const token = resolveLocalAgentAuthToken({
+      supportsLocalAgentJwt: true,
+      agentId: "agent-1",
+      companyId: "company-1",
+      adapterType: "codex_local",
+      runId: "run-1",
+      hasDirectPaperclipApiKey: true,
+    });
+
+    expect(token).toBeNull();
+  });
+
   it("throws when a local adapter requires JWT auth but the secret is missing", () => {
     delete process.env[secretEnv];
 
@@ -52,6 +67,7 @@ describe("local agent auth token resolution", () => {
         companyId: "company-1",
         adapterType: "codex_local",
         runId: "run-1",
+        hasDirectPaperclipApiKey: false,
       }),
     ).toThrowError(LocalAgentAuthUnavailableError);
   });

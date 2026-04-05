@@ -6,6 +6,7 @@ export interface ResolveLocalAgentAuthTokenInput {
   companyId: string;
   adapterType: string;
   runId: string;
+  hasDirectPaperclipApiKey?: boolean;
 }
 
 export class LocalAgentAuthUnavailableError extends Error {
@@ -29,6 +30,7 @@ export function resolveLocalAgentAuthToken(input: ResolveLocalAgentAuthTokenInpu
     input.runId,
   );
   if (authToken) return authToken;
+  if (input.hasDirectPaperclipApiKey) return null;
 
   throw new LocalAgentAuthUnavailableError(input.adapterType);
 }
