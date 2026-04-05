@@ -18,6 +18,7 @@ import {
   reconcilePendingMigrationHistory,
   formatDatabaseBackupResult,
   runDatabaseBackup,
+  tryRecoverStaleEmbeddedPostgresPreferredPort,
   authUsers,
   companies,
   companyMemberships,
@@ -399,11 +400,43 @@ export async function startServer(): Promise<StartedServer> {
         try {
           await embeddedPostgres.start();
         } catch (err) {
-          logEmbeddedPostgresFailure("start", err);
-          throw formatEmbeddedPostgresError(err, {
-            fallbackMessage: `Failed to start embedded PostgreSQL on port ${port}`,
+          const recoveredPreferredPort = await tryRecoverStaleEmbeddedPostgresPreferredPort({
+            dataDir,
+            preferredPort: configuredPort,
+            error: err,
             recentLogs: logBuffer.getRecentLogs(),
           });
+          if (!recoveredPreferredPort) {
+            logEmbeddedPostgresFailure("start", err);
+            throw formatEmbeddedPostgresError(err, {
+              fallbackMessage: `Failed to start embedded PostgreSQL on port ${port}`,
+              recentLogs: logBuffer.getRecentLogs(),
+            });
+          }
+
+          logger.warn(
+            `Recovered stale embedded PostgreSQL listener on configured port ${configuredPort}; retrying startup on the preferred port`,
+          );
+          port = configuredPort;
+          embeddedPostgres = new EmbeddedPostgres({
+            databaseDir: dataDir,
+            user: "paperclip",
+            password: "paperclip",
+            port,
+            persistent: true,
+            initdbFlags: ["--encoding=UTF8", "--locale=C", "--lc-messages=C"],
+            onLog: appendEmbeddedPostgresLog,
+            onError: appendEmbeddedPostgresLog,
+          });
+          try {
+            await embeddedPostgres.start();
+          } catch (retryErr) {
+            logEmbeddedPostgresFailure("start", retryErr);
+            throw formatEmbeddedPostgresError(retryErr, {
+              fallbackMessage: `Failed to start embedded PostgreSQL on port ${port}`,
+              recentLogs: logBuffer.getRecentLogs(),
+            });
+          }
         }
         embeddedPostgresStartedByThisProcess = true;
       }

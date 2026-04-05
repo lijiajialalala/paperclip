@@ -4,6 +4,11 @@ import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } f
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
+import {
+  getMigrationStatusPnpmArgs,
+  getPluginSdkBuildPnpmArgs,
+  getServerChildPnpmArgs,
+} from "./dev-command-helpers.ts";
 import { shouldTrackDevServerPath } from "./dev-runner-paths.mjs";
 import { createDevServiceIdentity, repoRoot } from "./dev-service-profile.ts";
 import {
@@ -311,7 +316,7 @@ async function runPnpm(args: string[], options: {
     const spawned = spawn(pnpmBin, args, {
       stdio: options.stdio ?? ["ignore", "pipe", "pipe"],
       env: options.env ?? process.env,
-      cwd: options.cwd,
+      cwd: options.cwd ?? repoRoot,
       shell: process.platform === "win32",
     });
 
@@ -342,15 +347,12 @@ async function runPnpm(args: string[], options: {
 }
 
 async function getMigrationStatusPayload() {
-  const status = await runPnpm(
-    ["--filter", "@paperclipai/db", "exec", "tsx", "src/migration-status.ts", "--json"],
-    { env },
-  );
+  const status = await runPnpm(getMigrationStatusPnpmArgs(), { env });
   if (status.code !== 0) {
     process.stderr.write(
       status.stderr ||
         status.stdout ||
-        `[paperclip] Command failed with code ${status.code}: pnpm --filter @paperclipai/db exec tsx src/migration-status.ts --json\n`,
+        `[paperclip] Command failed with code ${status.code}: pnpm ${getMigrationStatusPnpmArgs().join(" ")}\n`,
     );
     process.exit(status.code);
   }
@@ -437,10 +439,7 @@ async function maybePreflightMigrations(options: { interactive?: boolean; autoAp
 
 async function buildPluginSdk() {
   console.log("[paperclip] building plugin sdk...");
-  const result = await runPnpm(
-    ["--filter", "@paperclipai/plugin-sdk", "build"],
-    { stdio: "inherit" },
-  );
+  const result = await runPnpm(getPluginSdkBuildPnpmArgs(), { stdio: "inherit" });
   if (result.signal) {
     exitForSignal(result.signal);
     return;
@@ -513,11 +512,10 @@ async function stopChildForRestart() {
 async function startServerChild() {
   await buildPluginSdk();
 
-  const serverScript = mode === "watch" ? "dev:watch" : "dev";
   child = spawn(
     pnpmBin,
-    ["--filter", "@paperclipai/server", serverScript, ...forwardedArgs],
-    { stdio: "inherit", env, shell: process.platform === "win32" },
+    getServerChildPnpmArgs(mode, forwardedArgs),
+    { stdio: "inherit", env, cwd: repoRoot, shell: process.platform === "win32" },
   );
 
   childExitPromise = new Promise((resolve, reject) => {
