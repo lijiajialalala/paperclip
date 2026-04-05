@@ -1144,8 +1144,10 @@ export function issueService(db: Db) {
       actorAgentId: string | null;
       actorRunId: string | null;
     }) => {
+      // Layer 1: Check the latest terminal run for an explicit negative verdict.
+      // Board users can override (governance principle) — only agents are blocked.
       const latestTerminalRun = await getLatestTerminalRunForIssue(input.companyId, input.issueId);
-      if (latestTerminalRun) {
+      if (latestTerminalRun && input.actorType !== "board") {
         const latestVerdict = deriveHeartbeatRunBusinessVerdict(latestTerminalRun);
         if (latestVerdict.kind === "changes_requested" || latestVerdict.kind === "blocked") {
           throw unprocessable("Issue cannot be marked done because the latest run did not pass", {
@@ -1157,32 +1159,27 @@ export function issueService(db: Db) {
         }
       }
 
-      if (input.actorType !== "agent") {
-        return;
-      }
-
-      if (!input.actorAgentId || !input.actorRunId) {
-        throw unprocessable("Agent run must finish before marking issue done", {
-          code: "issue_done_requires_terminal_actor_run",
-        });
-      }
-
-      const actorRun = await getRunByIdForIssue(input.companyId, input.issueId, input.actorRunId);
-      if (!actorRun || actorRun.agentId !== input.actorAgentId || !TERMINAL_HEARTBEAT_RUN_STATUSES.has(actorRun.status)) {
-        throw unprocessable("Agent run must finish before marking issue done", {
-          code: "issue_done_requires_terminal_actor_run",
-          runId: input.actorRunId,
-        });
-      }
-
-      const actorVerdict = deriveHeartbeatRunBusinessVerdict(actorRun);
-      if (actorVerdict.kind !== "passed") {
-        throw unprocessable("Agent run must finish with an explicit passed verdict before marking issue done", {
-          code: "issue_done_requires_explicit_passed_verdict",
-          runId: actorRun.id,
-          verdict: actorVerdict.kind,
-          rawVerdict: actorVerdict.rawVerdict,
-        });
+      // Layer 2: For agent callers with a known run, verify the actor's own
+      // terminal run does not carry an explicit negative verdict.
+      // Agents without a runId or whose run is still active are allowed
+      // through — Layer 1 already catches outstanding negative verdicts.
+      if (input.actorType === "agent" && input.actorAgentId && input.actorRunId) {
+        const actorRun = await getRunByIdForIssue(input.companyId, input.issueId, input.actorRunId);
+        if (
+          actorRun &&
+          actorRun.agentId === input.actorAgentId &&
+          TERMINAL_HEARTBEAT_RUN_STATUSES.has(actorRun.status)
+        ) {
+          const actorVerdict = deriveHeartbeatRunBusinessVerdict(actorRun);
+          if (actorVerdict.kind === "changes_requested" || actorVerdict.kind === "blocked") {
+            throw unprocessable("Issue cannot be marked done because the actor run did not pass", {
+              code: "issue_done_blocked_by_negative_run_verdict",
+              runId: actorRun.id,
+              verdict: actorVerdict.kind,
+              rawVerdict: actorVerdict.rawVerdict,
+            });
+          }
+        }
       }
     },
 

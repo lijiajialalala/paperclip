@@ -935,7 +935,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       });
     }
 
-    it("blocks board-driven done transitions when the latest terminal run requested changes", async () => {
+    it("allows board-driven done transitions even when the latest terminal run requested changes", async () => {
       const { companyId, agentId, issueId } = await seedDoneGuardFixture();
 
       await insertIssueRun({
@@ -954,13 +954,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
           actorAgentId: null,
           actorRunId: null,
         }),
-      ).rejects.toMatchObject({
-        status: 422,
-        details: expect.objectContaining({
-          code: "issue_done_blocked_by_negative_run_verdict",
-          verdict: "changes_requested",
-        }),
-      });
+      ).resolves.toBeUndefined();
     });
 
     it("allows board-driven done transitions when the latest terminal run has no explicit verdict", async () => {
@@ -985,7 +979,57 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       ).resolves.toBeUndefined();
     });
 
-    it("blocks agent-driven done transitions until the actor run is terminal", async () => {
+    it("blocks agent-driven done transitions when the latest terminal run has a negative verdict", async () => {
+      const { companyId, agentId, issueId } = await seedDoneGuardFixture();
+
+      await insertIssueRun({
+        companyId,
+        agentId,
+        issueId,
+        status: "succeeded",
+        verdict: "changes_requested",
+      });
+
+      await expect(
+        svc.assertCanTransitionIssueToDone({
+          issueId,
+          companyId,
+          actorType: "agent",
+          actorAgentId: agentId,
+          actorRunId: null,
+        }),
+      ).rejects.toMatchObject({
+        status: 422,
+        details: expect.objectContaining({
+          code: "issue_done_blocked_by_negative_run_verdict",
+          verdict: "changes_requested",
+        }),
+      });
+    });
+
+    it("allows agent-driven done transitions without a runId when no negative verdict exists", async () => {
+      const { companyId, agentId, issueId } = await seedDoneGuardFixture();
+
+      await insertIssueRun({
+        companyId,
+        agentId,
+        issueId,
+        status: "succeeded",
+        verdict: null,
+      });
+
+      await expect(
+        svc.assertCanTransitionIssueToDone({
+          issueId,
+          companyId,
+          actorType: "agent",
+          actorAgentId: agentId,
+          actorRunId: null,
+        }),
+      ).resolves.toBeUndefined();
+    });
+
+    it("allows agent-driven done transitions when the actor run is still active", async () => {
       const { companyId, agentId, issueId } = await seedDoneGuardFixture();
       const actorRunId = randomUUID();
 
@@ -1006,10 +1050,35 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
           actorAgentId: agentId,
           actorRunId,
         }),
+      ).resolves.toBeUndefined();
+    });
+
+    it("blocks agent-driven done transitions when the actor's own terminal run has a negative verdict", async () => {
+      const { companyId, agentId, issueId } = await seedDoneGuardFixture();
+      const actorRunId = randomUUID();
+
+      await insertIssueRun({
+        companyId,
+        agentId,
+        issueId,
+        runId: actorRunId,
+        status: "succeeded",
+        verdict: "changes_requested",
+      });
+
+      await expect(
+        svc.assertCanTransitionIssueToDone({
+          issueId,
+          companyId,
+          actorType: "agent",
+          actorAgentId: agentId,
+          actorRunId,
+        }),
       ).rejects.toMatchObject({
         status: 422,
         details: expect.objectContaining({
-          code: "issue_done_requires_terminal_actor_run",
+          code: "issue_done_blocked_by_negative_run_verdict",
+          verdict: "changes_requested",
         }),
       });
     });

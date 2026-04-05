@@ -149,8 +149,8 @@ describe("issue telemetry routes", () => {
 
   it("returns 422 when the done guard rejects an agent completion", async () => {
     mockIssueService.assertCanTransitionIssueToDone.mockRejectedValue(
-      unprocessable("Agent run must finish with an explicit passed verdict before marking issue done", {
-        code: "issue_done_requires_explicit_passed_verdict",
+      unprocessable("Issue cannot be marked done because the actor run did not pass", {
+        code: "issue_done_blocked_by_negative_run_verdict",
       }),
     );
 
@@ -165,9 +165,9 @@ describe("issue telemetry routes", () => {
 
     expect(res.status).toBe(422);
     expect(res.body).toEqual({
-      error: "Agent run must finish with an explicit passed verdict before marking issue done",
+      error: "Issue cannot be marked done because the actor run did not pass",
       details: {
-        code: "issue_done_requires_explicit_passed_verdict",
+        code: "issue_done_blocked_by_negative_run_verdict",
       },
     });
     expect(mockIssueService.update).not.toHaveBeenCalled();
