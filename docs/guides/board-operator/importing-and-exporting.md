@@ -73,6 +73,23 @@ paperclipai company export abc123 --out ./skills-only --include skills --skills 
 
 Secret values, machine-local paths, and database IDs are **never** exported.
 
+### Company Export vs Database Backup
+
+`paperclipai company export` is for moving a company between Paperclip instances or saving a portable company package in Git. It is **not** a full database backup.
+
+Use database backups when you need to protect the whole local instance state, including:
+
+- all companies in the instance
+- local users and memberships
+- auth/session data
+- other instance-level records that are not part of the company package
+
+For that workflow, use automatic DB backups or run:
+
+```sh
+pnpm paperclipai db:backup
+```
+
 ## Importing a Company
 
 Import from a local directory, GitHub URL, or GitHub shorthand:

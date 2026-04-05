@@ -190,6 +190,8 @@ pnpm dev
 
 This starts the API server at `http://localhost:3100`. An embedded PostgreSQL database is created automatically — no setup required.
 
+If you use the embedded database for real local work, point backups outside `~/.paperclip/instances/default` so they survive instance resets. Paperclip already supports automatic SQL snapshots plus one-off backups via `pnpm paperclipai db:backup`.
+
 > **Requirements:** Node.js 20+, pnpm 9.15+
 
 <br/>
@@ -229,6 +231,8 @@ pnpm test:run         # Run tests
 pnpm db:generate      # Generate DB migration
 pnpm db:migrate       # Apply migrations
 ```
+
+For local backup safety, add `PAPERCLIP_DB_BACKUP_DIR` to your `.env` and keep it outside the instance root, for example `~/OneDrive/paperclip-db-backups` or another synced folder.
 
 See [doc/DEVELOPING.md](doc/DEVELOPING.md) for the full development guide.
 
