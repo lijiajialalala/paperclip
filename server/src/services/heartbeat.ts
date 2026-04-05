@@ -61,6 +61,7 @@ import {
   resolveSessionCompactionPolicy,
   type SessionCompactionPolicy,
 } from "@paperclipai/adapter-utils";
+import { loadConfig } from "../config.js";
 
 const MAX_LIVE_LOG_CHUNK_BYTES = 8 * 1024;
 const HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT = 1;
@@ -209,6 +210,15 @@ export function resolveAutomaticRetryPlan(
     retryAfterMs,
     retryNotBeforeAt: retryAfterMs > 0 ? new Date(now.getTime() + retryAfterMs) : null,
   };
+}
+
+export function resolveRunnableAutomaticRetryPlan(
+  plan: AutomaticRetryPlan | null,
+  heartbeatSchedulerEnabled: boolean,
+) {
+  if (!plan) return null;
+  if (heartbeatSchedulerEnabled || plan.retryAfterMs <= 0) return plan;
+  return null;
 }
 
 export function getRetryNotBeforeAt(contextSnapshot: Record<string, unknown> | null | undefined) {
@@ -1088,6 +1098,7 @@ function resolveNextSessionState(input: {
 }
 
 export function heartbeatService(db: Db) {
+  const heartbeatSchedulerEnabled = loadConfig().heartbeatSchedulerEnabled;
   const instanceSettings = instanceSettingsService(db);
   const getCurrentUserRedactionOptions = async () => ({
     enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
@@ -1957,9 +1968,27 @@ export function heartbeatService(db: Db) {
     plan: AutomaticRetryPlan | null;
     now: Date;
   }) {
-    const effectivePlan = input.agent ? input.plan : null;
-    return handleAutomaticRetryOrRelease({
-      plan: effectivePlan,
+    const runnablePlan = input.agent
+      ? resolveRunnableAutomaticRetryPlan(input.plan, heartbeatSchedulerEnabled)
+      : null;
+    const retrySuppressedByScheduler =
+      !!input.agent &&
+      !!input.plan &&
+      !runnablePlan &&
+      input.plan.retryAfterMs > 0;
+    if (retrySuppressedByScheduler && input.plan) {
+      logger.warn(
+        {
+          runId: input.run.id,
+          retryReason: input.plan.reason,
+          retryAttempt: input.plan.attempt,
+          retryAfterMs: input.plan.retryAfterMs,
+        },
+        "skipping delayed automatic retry because the heartbeat scheduler is disabled",
+      );
+    }
+    const result = await handleAutomaticRetryOrRelease({
+      plan: runnablePlan,
       enqueueRetry: async (plan) => enqueueAutomaticRetry(input.run, input.agent!, plan, input.now),
       release: async () => releaseIssueExecutionAndPromote(input.run),
       onRetryEnqueueFailure: async (err, plan) => {
@@ -1974,6 +2003,10 @@ export function heartbeatService(db: Db) {
         );
       },
     });
+    return {
+      ...result,
+      retrySuppressedByScheduler,
+    };
   }
 
   function parseHeartbeatPolicy(agent: typeof agents.$inferSelect) {
@@ -2191,6 +2224,8 @@ export function heartbeatService(db: Db) {
       const lifecycleMessage =
         retriedRunId
           ? `${baseMessage}; queued retry ${retriedRunId}`
+          : retryResult.retrySuppressedByScheduler
+            ? `${baseMessage}; delayed automatic retry skipped because the heartbeat scheduler is disabled`
           : retryResult.retryEnqueueFailed
             ? `${baseMessage}; automatic retry enqueue failed, released issue execution`
             : baseMessage;
@@ -2203,6 +2238,7 @@ export function heartbeatService(db: Db) {
         payload: {
           ...(run.processPid ? { processPid: run.processPid } : {}),
           ...(retriedRunId ? { retryRunId: retriedRunId } : {}),
+          ...(retryResult.retrySuppressedByScheduler ? { automaticRetrySuppressed: "scheduler_disabled" } : {}),
           ...(retryResult.retryEnqueueFailed ? { retryEnqueueFailed: true } : {}),
         },
       });
@@ -3124,6 +3160,7 @@ export function heartbeatService(db: Db) {
                 action: "released",
                 retriedRun: null,
                 retryEnqueueFailed: false,
+                retrySuppressedByScheduler: false,
               } as const);
         await appendRunEvent(finalizedRun, seq++, {
           eventType: "lifecycle",
@@ -3142,6 +3179,7 @@ export function heartbeatService(db: Db) {
                 : null,
             } : {}),
             ...(retryResult.action === "retried" ? { retryRunId: retryResult.retriedRun.id } : {}),
+            ...(retryResult.retrySuppressedByScheduler ? { automaticRetrySuppressed: "scheduler_disabled" } : {}),
             ...(retryResult.retryEnqueueFailed ? { retryEnqueueFailed: true } : {}),
           },
         });
@@ -3240,6 +3278,7 @@ export function heartbeatService(db: Db) {
                 : null,
             } : {}),
             ...(retryResult.action === "retried" ? { retryRunId: retryResult.retriedRun.id } : {}),
+            ...(retryResult.retrySuppressedByScheduler ? { automaticRetrySuppressed: "scheduler_disabled" } : {}),
             ...(retryResult.retryEnqueueFailed ? { retryEnqueueFailed: true } : {}),
           },
         });
@@ -3304,6 +3343,12 @@ export function heartbeatService(db: Db) {
               failedAt,
             );
             const retryAgent = retryPlan ? await getAgent(run.agentId).catch(() => null) : null;
+            const retryResult = await handleRunAutomaticRetryOrRelease({
+              run: failedRun,
+              agent: retryAgent,
+              plan: retryPlan,
+              now: failedAt,
+            }).catch(() => null);
             // Emit a run-log event so the failure is visible in the run timeline,
             // consistent with what the inner catch block does for adapter failures.
             await appendRunEvent(failedRun, 1, {
@@ -3320,13 +3365,10 @@ export function heartbeatService(db: Db) {
                     ? retryPlan.retryNotBeforeAt.toISOString()
                     : null,
                 } : {}),
+                ...(retryResult?.action === "retried" ? { retryRunId: retryResult.retriedRun.id } : {}),
+                ...(retryResult?.retrySuppressedByScheduler ? { automaticRetrySuppressed: "scheduler_disabled" } : {}),
+                ...(retryResult?.retryEnqueueFailed ? { retryEnqueueFailed: true } : {}),
               },
-            }).catch(() => undefined);
-            await handleRunAutomaticRetryOrRelease({
-              run: failedRun,
-              agent: retryAgent,
-              plan: retryPlan,
-              now: failedAt,
             }).catch(() => undefined);
           }
           // Ensure the agent is not left stuck in "running" if the inner catch handler's

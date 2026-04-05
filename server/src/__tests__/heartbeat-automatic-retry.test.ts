@@ -4,6 +4,7 @@ import {
   getRetryChainAttempt,
   handleAutomaticRetryOrRelease,
   resolveAutomaticRetryPlan,
+  resolveRunnableAutomaticRetryPlan,
   selectReadyQueuedRunsForStart,
 } from "../services/heartbeat.ts";
 
@@ -116,6 +117,32 @@ describe("resolveAutomaticRetryPlan", () => {
       maxAttempts: 2,
       retryAfterMs: 10_000,
     });
+  });
+});
+
+describe("resolveRunnableAutomaticRetryPlan", () => {
+  it("drops delayed retries when the heartbeat scheduler is disabled", () => {
+    const delayedPlan = {
+      reason: "rate_limited" as const,
+      attempt: 1,
+      maxAttempts: 2,
+      retryAfterMs: 30_000,
+      retryNotBeforeAt: new Date("2026-04-05T10:00:30.000Z"),
+    };
+
+    expect(resolveRunnableAutomaticRetryPlan(delayedPlan, false)).toBeNull();
+  });
+
+  it("keeps immediate retries runnable even when the heartbeat scheduler is disabled", () => {
+    const immediatePlan = {
+      reason: "process_lost" as const,
+      attempt: 1,
+      maxAttempts: 1,
+      retryAfterMs: 0,
+      retryNotBeforeAt: null,
+    };
+
+    expect(resolveRunnableAutomaticRetryPlan(immediatePlan, false)).toEqual(immediatePlan);
   });
 });
 
