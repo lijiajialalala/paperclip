@@ -18,20 +18,16 @@ import express from "express";
 import request from "supertest";
 import { issueRoutes } from "../routes/issues.ts";
 import { errorHandler } from "../middleware/index.js";
-import { assert } from "node:console";
 import { vi } from "vitest";
 
-vi.mock("../services/heartbeat.js", async (importOriginal) => {
-  const mod = await importOriginal<any>();
-  return {
-    ...mod,
-    heartbeatService: (db: any) => ({
-      ...mod.heartbeatService(db),
-      wakeup: vi.fn().mockResolvedValue(undefined),
-      reportRunActivity: vi.fn().mockResolvedValue(undefined),
-    }),
-  };
-});
+const mockHeartbeat = vi.hoisted(() => ({
+  wakeup: vi.fn().mockResolvedValue(undefined),
+  reportRunActivity: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("../services/heartbeat.js", () => ({
+  heartbeatService: () => mockHeartbeat,
+}));
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
