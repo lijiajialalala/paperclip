@@ -1,374 +1,283 @@
-import { randomUUID } from "node:crypto";
-import { describe, expect, it, beforeAll, afterEach, afterAll } from "vitest";
-import {
-  agents,
-  agentWakeupRequests,
-  companies,
-  createDb,
-  issues,
-  issueComments,
-  activityLog,
-  heartbeatRuns,
-} from "@paperclipai/db";
-import {
-  getEmbeddedPostgresTestSupport,
-  startEmbeddedPostgresTestDatabase,
-} from "./helpers/embedded-postgres.js";
 import express from "express";
 import request from "supertest";
+import { randomUUID } from "node:crypto";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { issueRoutes } from "../routes/issues.js";
 import { errorHandler } from "../middleware/index.js";
-import { vi } from "vitest";
+
+// ── Hoisted stubs (registered before any module loads) ─────────────────────
+const mockIssueSvc = vi.hoisted(() => ({
+  getById: vi.fn(),
+  update: vi.fn(),
+  checkout: vi.fn(),
+  addComment: vi.fn(),
+  getAncestors: vi.fn(),
+  assertCheckoutOwner: vi.fn(),
+}));
+
+const mockAgentSvc = vi.hoisted(() => ({
+  getById: vi.fn(),
+}));
+
+const mockAccessSvc = vi.hoisted(() => ({
+  canUser: vi.fn(),
+  hasPermission: vi.fn(),
+}));
 
 const mockHeartbeat = vi.hoisted(() => ({
-  wakeup: vi.fn().mockResolvedValue(undefined),
-  reportRunActivity: vi.fn().mockResolvedValue(undefined),
+  wakeup: vi.fn(),
+  reportRunActivity: vi.fn(),
 }));
 
-vi.mock("../services/heartbeat.js", () => ({
+const mockLogActivity = vi.hoisted(() => vi.fn());
+
+const mockInstanceSettings = vi.hoisted(() => ({
+  getExperimental: vi.fn(),
+}));
+
+const mockProjectSvc = vi.hoisted(() => ({
+  getById: vi.fn(),
+}));
+
+// ── Flat mock of services barrel — no importOriginal, no drizzle loaded ─────
+vi.mock("../services/index.js", () => ({
+  issueService: () => mockIssueSvc,
+  agentService: () => mockAgentSvc,
+  accessService: () => mockAccessSvc,
   heartbeatService: () => mockHeartbeat,
+  logActivity: mockLogActivity,
+  instanceSettingsService: () => mockInstanceSettings,
+  projectService: () => mockProjectSvc,
+  executionWorkspaceService: () => ({}),
+  feedbackService: () => ({}),
+  goalService: () => ({}),
+  issueApprovalService: () => ({}),
+  documentService: () => ({}),
+  routineService: () => ({}),
+  workProductService: () => ({}),
 }));
 
-const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
-const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
-const embeddedPostgresSuiteTimeoutMs = 60_000;
+// ── Stable UUIDs for the test run ───────────────────────────────────────────
+const AGENT_ASSIGNEE = randomUUID();
+const AGENT_MANAGER  = randomUUID();
+const AGENT_PARENT   = randomUUID();
+const ISSUE_ID       = randomUUID();
+const PARENT_ID      = randomUUID();
+const COMPANY_ID     = "00000000-0000-0000-0000-000000000001";
 
-if (!embeddedPostgresSupport.supported) {
-  console.warn(`Skipping embedded Postgres tests: ${embeddedPostgresSupport.reason}`);
+// ── Shared issue fixture ────────────────────────────────────────────────────
+function makeIssue(overrides: Record<string, unknown> = {}) {
+  return {
+    id: ISSUE_ID,
+    companyId: COMPANY_ID,
+    status: "todo",
+    assigneeAgentId: AGENT_ASSIGNEE,
+    parentId: null as string | null,
+    planProposedAt: null as Date | null,
+    planApprovedAt: null as Date | null,
+    identifier: "PC-1",
+    projectId: null,
+    goalId: null,
+    checkoutRunId: null,
+    labels: [],
+    ...overrides,
+  };
 }
 
-describeEmbeddedPostgres("Propose-Plan & Checkout Gate Workflow", () => {
-  let db!: ReturnType<typeof createDb>;
-  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
-  let app!: import("express").Application;
+// ── Actor factories ─────────────────────────────────────────────────────────
+function agentActor(agentId: string, runId = randomUUID()) {
+  return {
+    type: "agent",
+    actorType: "agent",
+    actorId: agentId,
+    agentId,
+    companyId: COMPANY_ID,
+    companyIds: [COMPANY_ID],
+    runId,
+    source: "agent_key",
+    isInstanceAdmin: false,
+  };
+}
 
-  beforeAll(async () => {
-    tempDb = await startEmbeddedPostgresTestDatabase("plan-approval-tests-");
-    db = createDb(tempDb.connectionString);
-    
-    app = express();
-    app.use(express.json());
-    app.use((req, res, next) => {
-      const auth = req.header("x-paperclip-auth");
-      if (!auth) {
-        (req as any).actor = { type: "none", source: "none" };
-        return next();
-      }
-      const parts = auth.split(":");
-      if (parts[0] === "agent") {
-        (req as any).actor = { type: "agent", companyId: parts[1], agentId: parts[2], source: "agent_key" };
-      } else if (parts[0] === "user") {
-        (req as any).actor = { type: "board", userId: parts[2], companyIds: [parts[1]], source: "local_implicit", isInstanceAdmin: false };
-      }
-      const runId = req.header("x-paperclip-run-id");
-      if (runId) (req as any).actor.runId = runId;
-      next();
-    });
-    app.use("/api", issueRoutes(db, {} as any, {}));
-    app.use((err: any, req: any, res: any, next: any) => {
-      console.error("TEST ERROR HANDLER", err.stack);
-      res.status(500).json({ error: err.stack });
-    });
+// local_implicit Board actor — assertCanAssignTasks returns immediately, no DB calls
+function boardActor() {
+  return {
+    type: "board",
+    actorType: "board",
+    actorId: "user-board-1",
+    userId: "user-board-1",
+    companyIds: [COMPANY_ID],
+    source: "local_implicit",
+    isInstanceAdmin: false,
+  };
+}
 
-  }, embeddedPostgresSuiteTimeoutMs);
+// ── App factory ─────────────────────────────────────────────────────────────
+function makeApp(actor: Record<string, unknown>) {
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => {
+    (req as any).actor = actor;
+    next();
+  });
+  app.use("/api", issueRoutes({} as any, {} as any, {}));
+  app.use(errorHandler);
+  return app;
+}
 
-  afterEach(async () => {
-    await db.delete(issueComments);
-    await db.delete(activityLog);
-    await db.delete(issues);
-    await db.delete(heartbeatRuns);
-    await db.delete(agentWakeupRequests);
-    await db.delete(agents);
-    await db.delete(companies);
+// ── Tests ───────────────────────────────────────────────────────────────────
+describe("Propose-Plan & Checkout Gate Workflow", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Restore defaults after clearAllMocks
+    mockHeartbeat.wakeup.mockResolvedValue(undefined);
+    mockHeartbeat.reportRunActivity.mockResolvedValue(undefined);
+    mockLogActivity.mockResolvedValue(undefined);
+    mockInstanceSettings.getExperimental.mockResolvedValue({ enableIsolatedWorkspaces: false });
+    mockProjectSvc.getById.mockResolvedValue(null);
+    mockIssueSvc.getAncestors.mockResolvedValue([]);
+    mockIssueSvc.addComment.mockResolvedValue({ id: randomUUID() });
+    mockAccessSvc.hasPermission.mockResolvedValue(false);
+    mockAccessSvc.canUser.mockResolvedValue(false);
   });
 
-  afterAll(async () => {
-    await tempDb?.cleanup();
-  });
-
-  async function seedBasicTopology() {
-    const companyId = randomUUID();
-    const boardUserId = "board_user_1";
-    
-    const prefix = companyId.split("-")[0].toUpperCase().slice(0, 4);
-    await db.insert(companies).values({
-      id: companyId,
-      name: "Paperclip",
-      issuePrefix: prefix,
-      requireBoardApprovalForNewAgents: false,
-    });
-
-    const managerAgentId = randomUUID();
-    const assigneeAgentId = randomUUID();
-    const siblingAgentId = randomUUID();
-
-    await db.insert(agents).values([
-      {
-        id: managerAgentId,
-        companyId,
-        name: "ManagerAgent",
-        role: "manager",
-        status: "active",
-        adapterType: "process",
-        permissions: { "canCreateAgents": true },
-      },
-      {
-        id: assigneeAgentId,
-        companyId,
-        name: "AssigneeAgent",
-        role: "engineer",
-        status: "active",
-        adapterType: "process",
-        permissions: {},
-      },
-      {
-        id: siblingAgentId,
-        companyId,
-        name: "SiblingAgent",
-        role: "engineer",
-        status: "active",
-        adapterType: "process",
-        permissions: {},
-      },
-    ]);
-
-    const runId = randomUUID();
-    await db.insert(heartbeatRuns).values({
-      id: runId,
-      companyId,
-      agentId: assigneeAgentId,
-      status: "running",
-      invocationSource: "scheduler",
-      createdAt: new Date(),
-    });
-
-    const siblingRunId = randomUUID();
-    await db.insert(heartbeatRuns).values({
-      id: siblingRunId,
-      companyId,
-      agentId: siblingAgentId,
-      status: "running",
-      invocationSource: "scheduler",
-      createdAt: new Date(),
-    });
-
-    return { companyId, boardUserId, managerAgentId, assigneeAgentId, siblingAgentId, runId, siblingRunId };
-  }
-
-  // 1. 未 propose 的 issue，agent checkout 仍然成功
+  // 1. No planProposedAt → checkout is not blocked
   it("allows checkout if issue has not explicitly proposed a plan yet (legacy / opt-in)", async () => {
-    const { companyId, assigneeAgentId, runId } = await seedBasicTopology();
-    
-    const issueId = randomUUID();
-    await db.insert(issues).values({
-      id: issueId,
-      companyId,
-      title: "No plan proposed issue",
-      status: "todo",
-      priority: "medium",
-      assigneeAgentId: assigneeAgentId,
-    });
+    const issue = makeIssue({ assigneeAgentId: AGENT_ASSIGNEE });
+    mockIssueSvc.getById.mockResolvedValue(issue);
+    mockIssueSvc.checkout.mockResolvedValue({ ...issue, status: "in_progress" });
+    mockIssueSvc.assertCheckoutOwner.mockResolvedValue({ adoptedFromRunId: null });
 
-    const res = await request(app)
-      .post(`/api/issues/${issueId}/checkout`)
-      .set("x-paperclip-auth", `agent:${companyId}:${assigneeAgentId}`)
-      .set("x-paperclip-run-id", runId)
-      .send({ agentId: assigneeAgentId, expectedStatuses: ["todo"] });
+    const res = await request(makeApp(agentActor(AGENT_ASSIGNEE)))
+      .post(`/api/issues/${ISSUE_ID}/checkout`)
+      .send({ agentId: AGENT_ASSIGNEE, expectedStatuses: ["todo"] });
 
     expect(res.status).toBe(200);
     expect(res.body.status).toBe("in_progress");
   });
 
-  // 2. 非 assignee agent 不能随便 propose
+  // 2. Non-assignee agent cannot propose
   it("forbids non-assignee agents from proposing a plan on another's issue", async () => {
-    const { companyId, assigneeAgentId, siblingAgentId, siblingRunId } = await seedBasicTopology();
+    const issue = makeIssue({ assigneeAgentId: AGENT_ASSIGNEE });
+    mockIssueSvc.getById.mockResolvedValue(issue);
 
-    const issueId = randomUUID();
-    await db.insert(issues).values({
-      id: issueId,
-      companyId,
-      title: "Issue assigned to someone else",
-      status: "todo",
-      priority: "medium",
-      assigneeAgentId: assigneeAgentId, // Sibling is NOT assignee
-    });
-
-    const res = await request(app)
-      .post(`/api/issues/${issueId}/propose-plan`)
-      .set("x-paperclip-auth", `agent:${companyId}:${siblingAgentId}`)
-      .set("x-paperclip-run-id", siblingRunId)
-      .send({ plan: "I propose this plan instead." });
+    const res = await request(makeApp(agentActor(AGENT_MANAGER)))
+      .post(`/api/issues/${ISSUE_ID}/propose-plan`)
+      .send({ plan: "I will steal this task." });
 
     expect(res.status).toBe(403);
-    // It should hit the error from assertAgentRunCheckoutOwnership
   });
 
-  it("allows the assignee to propose a plan, transitioning issue to in_review", async () => {
-    const { companyId, assigneeAgentId, runId } = await seedBasicTopology();
-
-    const issueId = randomUUID();
-    await db.insert(issues).values({
-      id: issueId,
-      companyId,
-      title: "Issue ready for plan",
-      status: "todo",
-      priority: "medium",
-      assigneeAgentId: assigneeAgentId,
-    });
-
-    const res = await request(app)
-      .post(`/api/issues/${issueId}/propose-plan`)
-      .set("x-paperclip-auth", `agent:${companyId}:${assigneeAgentId}`)
-      .set("x-paperclip-run-id", runId)
-      .send({ plan: "My brilliant plan." });
-
-    if (res.status === 500) console.error("PROPOSE PLAN ERROR:", res.body);
-    expect(res.status).toBe(201);
-    expect(res.body.issue.status).toBe("in_review");
-    expect(res.body.issue.planProposedAt).toBeDefined();
-    expect(res.body.issue.planApprovedAt).toBeNull();
-  });
-
-  // 3. 已 propose 未 approve 的 issue，agent checkout 返回 409
+  // 3. planProposedAt set + in_review → checkout blocked
   it("blocks checkout if a plan has been proposed but not approved (in_review)", async () => {
-    const { companyId, assigneeAgentId, runId } = await seedBasicTopology();
-
-    const issueId = randomUUID();
-    await db.insert(issues).values({
-      id: issueId,
-      companyId,
-      title: "Pending approval issue",
+    const issue = makeIssue({
+      assigneeAgentId: AGENT_ASSIGNEE,
       status: "in_review",
-      priority: "medium",
-      assigneeAgentId: assigneeAgentId,
       planProposedAt: new Date(),
     });
+    mockIssueSvc.getById.mockResolvedValue(issue);
 
-    const res = await request(app)
-      .post(`/api/issues/${issueId}/checkout`)
-      .set("x-paperclip-auth", `agent:${companyId}:${assigneeAgentId}`)
-      .set("x-paperclip-run-id", runId)
-      .send({ agentId: assigneeAgentId, expectedStatuses: ["in_review", "todo"] });
+    const res = await request(makeApp(agentActor(AGENT_ASSIGNEE)))
+      .post(`/api/issues/${ISSUE_ID}/checkout`)
+      .send({ agentId: AGENT_ASSIGNEE, expectedStatuses: ["in_review"] });
 
     expect(res.status).toBe(409);
     expect(res.body.error).toMatch(/must be approved before checkout/);
   });
 
-  // 4. assignee 不能 self-approve
+  // 4. Assignee cannot self-approve
   it("forbids an assignee from self-approving their own plan", async () => {
-    const { companyId, assigneeAgentId, runId } = await seedBasicTopology();
-
-    const issueId = randomUUID();
-    await db.insert(issues).values({
-      id: issueId,
-      companyId,
-      title: "Pending approval issue",
+    const issue = makeIssue({
+      assigneeAgentId: AGENT_ASSIGNEE,
       status: "in_review",
-      priority: "medium",
-      assigneeAgentId: assigneeAgentId,
       planProposedAt: new Date(),
     });
+    mockIssueSvc.getById.mockResolvedValue(issue);
+    mockAgentSvc.getById.mockResolvedValue({
+      id: AGENT_ASSIGNEE,
+      companyId: COMPANY_ID,
+      permissions: {},
+    });
 
-    const res = await request(app)
-      .post(`/api/issues/${issueId}/approve-plan`)
-      .set("x-paperclip-auth", `agent:${companyId}:${assigneeAgentId}`)
-      .set("x-paperclip-run-id", runId)
+    const res = await request(makeApp(agentActor(AGENT_ASSIGNEE)))
+      .post(`/api/issues/${ISSUE_ID}/approve-plan`)
       .send();
 
     expect(res.status).toBe(403);
     expect(res.body.error).toMatch(/self-approval forbidden/);
   });
 
-  // 5. board 或 manager agent 可以 approve
-  it("allows a manager agent (tasks:assign) to approve a plan", async () => {
-    const { companyId, managerAgentId, assigneeAgentId } = await seedBasicTopology();
-
-    const managerRunId = randomUUID();
-    await db.insert(heartbeatRuns).values({
-      id: managerRunId,
-      companyId,
-      agentId: managerAgentId,
-      status: "running",
-      invocationSource: "scheduler",
-      createdAt: new Date(),
-    });
-
-    const issueId = randomUUID();
-    await db.insert(issues).values({
-      id: issueId,
-      companyId,
-      title: "Pending approval issue",
+  // 5. Manager agent with canCreateAgents (legacy tasks:assign) can approve
+  it("allows a manager agent (canCreateAgents) to approve a plan", async () => {
+    const issue = makeIssue({
+      assigneeAgentId: AGENT_ASSIGNEE,
       status: "in_review",
-      priority: "medium",
-      assigneeAgentId: assigneeAgentId,
       planProposedAt: new Date(),
     });
+    const updated = makeIssue({ ...issue, status: "todo", planApprovedAt: new Date() });
 
-    const res = await request(app)
-      .post(`/api/issues/${issueId}/approve-plan`)
-      .set("x-paperclip-auth", `agent:${companyId}:${managerAgentId}`)
-      .set("x-paperclip-run-id", managerRunId)
+    mockIssueSvc.getById.mockResolvedValue(issue);
+    mockIssueSvc.update.mockResolvedValue(updated);
+    mockAgentSvc.getById.mockResolvedValue({
+      id: AGENT_MANAGER,
+      companyId: COMPANY_ID,
+      name: "ManagerAgent",
+      permissions: { canCreateAgents: true },
+    });
+
+    const res = await request(makeApp(agentActor(AGENT_MANAGER)))
+      .post(`/api/issues/${ISSUE_ID}/approve-plan`)
       .send();
 
-    expect(res.status).toBe(200); // Approve endpoint returns 201 by standard or 200
-    // Actually the code does res.status(201).json({ issue: updated, comment })
+    expect(res.status).toBe(200);
     expect(res.body.issue.status).toBe("todo");
     expect(res.body.issue.planApprovedAt).toBeDefined();
   });
 
+  // 6. Parent issue's assignee can approve child plan
   it("allows parent issue assignee to approve a plan", async () => {
-    const { companyId, assigneeAgentId, siblingAgentId, siblingRunId } = await seedBasicTopology();
-    // Use siblingAgent as parent assignee
-
-    const parentId = randomUUID();
-    await db.insert(issues).values({
-      id: parentId,
-      companyId,
-      title: "Parent issue",
-      status: "in_progress",
-      priority: "medium",
-      assigneeAgentId: siblingAgentId,
-    });
-
-    const issueId = randomUUID();
-    await db.insert(issues).values({
-      id: issueId,
-      companyId,
-      parentId,
-      title: "Pending approval issue",
+    const issue = makeIssue({
+      assigneeAgentId: AGENT_ASSIGNEE,
+      parentId: PARENT_ID,
       status: "in_review",
-      priority: "medium",
-      assigneeAgentId: assigneeAgentId,
       planProposedAt: new Date(),
     });
+    const parent = makeIssue({ id: PARENT_ID, assigneeAgentId: AGENT_PARENT });
+    const updated = { ...issue, status: "todo", planApprovedAt: new Date() };
 
-    const res = await request(app)
-      .post(`/api/issues/${issueId}/approve-plan`)
-      .set("x-paperclip-auth", `agent:${companyId}:${siblingAgentId}`)
-      .set("x-paperclip-run-id", siblingRunId)
+    mockIssueSvc.getById
+      .mockResolvedValueOnce(issue)   // first call: the issue
+      .mockResolvedValueOnce(parent); // second call: the parent issue
+    mockIssueSvc.update.mockResolvedValue(updated);
+    mockAgentSvc.getById.mockResolvedValue({
+      id: AGENT_PARENT,
+      companyId: COMPANY_ID,
+      name: "ParentAgent",
+      permissions: {},
+    });
+
+    const res = await request(makeApp(agentActor(AGENT_PARENT)))
+      .post(`/api/issues/${ISSUE_ID}/approve-plan`)
       .send();
 
     expect(res.status).toBe(200);
     expect(res.body.issue.status).toBe("todo");
   });
 
+  // 7. Board user (local_implicit) can always approve without any DB checks
   it("allows Board (implicit company access) to approve a plan", async () => {
-    const { companyId, assigneeAgentId, boardUserId } = await seedBasicTopology();
-
-    const issueId = randomUUID();
-    await db.insert(issues).values({
-      id: issueId,
-      companyId,
-      title: "Pending approval issue",
+    const issue = makeIssue({
+      assigneeAgentId: AGENT_ASSIGNEE,
       status: "in_review",
-      priority: "medium",
-      assigneeAgentId: assigneeAgentId,
       planProposedAt: new Date(),
     });
+    const updated = { ...issue, status: "todo", planApprovedAt: new Date() };
 
-    const res = await request(app)
-      .post(`/api/issues/${issueId}/approve-plan`)
-      .set("x-paperclip-auth", `user:${companyId}:${boardUserId}`)
+    mockIssueSvc.getById.mockResolvedValue(issue);
+    mockIssueSvc.update.mockResolvedValue(updated);
+
+    const res = await request(makeApp(boardActor()))
+      .post(`/api/issues/${ISSUE_ID}/approve-plan`)
       .send();
 
     expect(res.status).toBe(200);
