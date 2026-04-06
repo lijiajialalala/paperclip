@@ -16,7 +16,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 import express from "express";
 import request from "supertest";
-import { issueRoutes } from "../routes/issues.ts";
+import { issueRoutes } from "../routes/issues.js";
 import { errorHandler } from "../middleware/index.js";
 import { vi } from "vitest";
 
