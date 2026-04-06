@@ -15,6 +15,11 @@ const mockAgentService = vi.hoisted(() => ({
   getById: vi.fn(),
 }));
 
+const mockHeartbeatService = vi.hoisted(() => ({
+  reportRunActivity: vi.fn(async () => undefined),
+  wakeup: vi.fn(async () => undefined),
+}));
+
 const mockTrackAgentTaskCompleted = vi.hoisted(() => vi.fn());
 const mockGetTelemetryClient = vi.hoisted(() => vi.fn());
 
@@ -36,9 +41,7 @@ vi.mock("../services/index.js", () => ({
   executionWorkspaceService: () => ({}),
   feedbackService: () => ({}),
   goalService: () => ({}),
-  heartbeatService: () => ({
-    reportRunActivity: vi.fn(async () => undefined),
-  }),
+  heartbeatService: () => mockHeartbeatService,
   instanceSettingsService: () => ({}),
   issueApprovalService: () => ({}),
   issueService: () => mockIssueService,
@@ -79,6 +82,8 @@ describe("issue telemetry routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockGetTelemetryClient.mockReturnValue({ track: vi.fn() });
+    mockHeartbeatService.reportRunActivity.mockResolvedValue(undefined);
+    mockHeartbeatService.wakeup.mockResolvedValue(undefined);
     mockIssueService.assertCanTransitionIssueToDone.mockResolvedValue(undefined);
     mockIssueService.getById.mockResolvedValue(makeIssue("todo"));
     mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
