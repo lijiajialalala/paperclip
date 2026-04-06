@@ -502,6 +502,8 @@ export function issueRoutes(
         parentId: issue.parentId,
         assigneeAgentId: issue.assigneeAgentId,
         assigneeUserId: issue.assigneeUserId,
+        planProposedAt: issue.planProposedAt,
+        planApprovedAt: issue.planApprovedAt,
         updatedAt: issue.updatedAt,
       },
       ancestors: ancestors.map((ancestor) => ({
@@ -1270,10 +1272,8 @@ export function issueRoutes(
     }
 
     const assigneeChanged = assigneeWillChange;
-    const statusChangedFromBacklog =
-      existing.status === "backlog" &&
-      issue.status !== "backlog" &&
-      req.body.status !== undefined;
+    const statusChanged = existing.status !== issue.status && req.body.status !== undefined;
+    const priorityChanged = existing.priority !== issue.priority && req.body.priority !== undefined;
 
     // Merge all wakeups from this update into one enqueue per agent to avoid duplicate runs.
     void (async () => {
@@ -1299,11 +1299,11 @@ export function issueRoutes(
         });
       }
 
-      if (!assigneeChanged && statusChangedFromBacklog && issue.assigneeAgentId) {
+      if (!assigneeChanged && (statusChanged || priorityChanged) && issue.assigneeAgentId && !wakeups.has(issue.assigneeAgentId)) {
         wakeups.set(issue.assigneeAgentId, {
           source: "automation",
           triggerDetail: "system",
-          reason: "issue_status_changed",
+          reason: statusChanged ? "issue_status_changed" : "issue_priority_changed",
           payload: {
             issueId: issue.id,
             mutation: "update",
@@ -1313,7 +1313,7 @@ export function issueRoutes(
           requestedByActorId: actor.actorId,
           contextSnapshot: {
             issueId: issue.id,
-            source: "issue.status_change",
+            source: statusChanged ? "issue.status_change" : "issue.priority_change",
             ...(interruptedRunId ? { interruptedRunId } : {}),
           },
         });
@@ -1346,6 +1346,53 @@ export function issueRoutes(
               source: "comment.mention",
             },
           });
+        }
+      }
+
+      // Wake assignee on any comment even without @mention (e.g. board feedback)
+      if (commentBody && comment && issue.assigneeAgentId && !wakeups.has(issue.assigneeAgentId)) {
+        const commentIsFromAssignee = actor.actorType === "agent" && actor.agentId === issue.assigneeAgentId;
+        if (!commentIsFromAssignee) {
+          wakeups.set(issue.assigneeAgentId, {
+            source: "automation",
+            triggerDetail: "system",
+            reason: "issue_comment_received",
+            payload: { issueId: issue.id, commentId: comment.id },
+            requestedByActorType: actor.actorType,
+            requestedByActorId: actor.actorId,
+            contextSnapshot: {
+              issueId: issue.id,
+              commentId: comment.id,
+              wakeCommentId: comment.id,
+              wakeReason: "issue_comment_received",
+              source: "comment.direct",
+            },
+          });
+        }
+      }
+
+      // Wake parent issue assignee when a child issue is completed
+      if (issue.status === "done" && existing.status !== "done" && issue.parentId) {
+        try {
+          const parent = await svc.getById(issue.parentId);
+          if (parent?.assigneeAgentId && !wakeups.has(parent.assigneeAgentId)) {
+            wakeups.set(parent.assigneeAgentId, {
+              source: "automation",
+              triggerDetail: "system",
+              reason: "child_issue_completed",
+              payload: { issueId: parent.id, childIssueId: issue.id, mutation: "child_done" },
+              requestedByActorType: actor.actorType,
+              requestedByActorId: actor.actorId,
+              contextSnapshot: {
+                issueId: parent.id,
+                childIssueId: issue.id,
+                source: "issue.child_completed",
+                wakeReason: "child_issue_completed",
+              },
+            });
+          }
+        } catch (err) {
+          logger.warn({ err, issueId: issue.id, parentId: issue.parentId }, "failed to wake parent issue assignee on child completion");
         }
       }
 
@@ -1406,6 +1453,17 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, issue.companyId);
+
+    // Plan approval gate: agent must propose and get plan approved before checkout
+    if (req.actor.type === "agent" && !issue.planApprovedAt) {
+      res.status(409).json({
+        error: "Plan must be proposed and approved before checkout",
+        hint: "POST /issues/:id/propose-plan first",
+        planProposedAt: issue.planProposedAt,
+        planApprovedAt: issue.planApprovedAt,
+      });
+      return;
+    }
 
     if (issue.projectId) {
       const project = await projectsSvc.getById(issue.projectId);
@@ -1470,6 +1528,178 @@ export function issueRoutes(
     }
 
     res.json(updated);
+  });
+
+  // ── Propose Plan ──────────────────────────────────────────────────────────
+  router.post("/issues/:id/propose-plan", async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await svc.getById(id);
+    if (!issue) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+    assertCompanyAccess(req, issue.companyId);
+
+    const planText = typeof req.body?.plan === "string" ? req.body.plan.trim() : "";
+    if (!planText) {
+      res.status(400).json({ error: "Plan text is required" });
+      return;
+    }
+
+    const actor = getActorInfo(req);
+
+    // 1. Post plan as a comment on this issue
+    const comment = await svc.addComment(id, `📋 **Work Plan**\n\n${planText}`, {
+      agentId: actor.agentId ?? undefined,
+      userId: actor.actorType === "user" ? actor.actorId : undefined,
+      runId: actor.runId,
+    });
+
+    // 2. Update issue: set planProposedAt, status → in_review
+    const now = new Date();
+    const updated = await svc.update(id, {
+      status: "in_review",
+      planProposedAt: now,
+      planApprovedAt: null,
+    });
+
+    // 3. Bubble summary to root ancestor issue
+    const ancestors = await svc.getAncestors(id);
+    const rootAncestor = ancestors.length > 0 ? ancestors[ancestors.length - 1] : null;
+    if (rootAncestor) {
+      const agentName = actor.agentId
+        ? (await agentsSvc.getById(actor.agentId))?.name ?? "Agent"
+        : "User";
+      const summarySnippet = planText.length > 200 ? planText.slice(0, 200) + "..." : planText;
+      await svc.addComment(rootAncestor.id, `📋 [${agentName} on ${issue.identifier ?? id}] **Plan:**\n${summarySnippet}`, {
+        agentId: actor.agentId ?? undefined,
+        userId: actor.actorType === "user" ? actor.actorId : undefined,
+        runId: actor.runId,
+      });
+    }
+
+    await logActivity(db, {
+      companyId: issue.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "issue.plan_proposed",
+      entityType: "issue",
+      entityId: issue.id,
+      details: { planSnippet: planText.slice(0, 120), commentId: comment.id },
+    });
+
+    // 4. Wake parent issue assignee (for approval) + root issue assignee (for visibility)
+    void (async () => {
+      const directParent = issue.parentId ? await svc.getById(issue.parentId) : null;
+      const agentsToWake = new Set<string>();
+      if (directParent?.assigneeAgentId) agentsToWake.add(directParent.assigneeAgentId);
+      if (rootAncestor?.assigneeAgentId) agentsToWake.add(rootAncestor.assigneeAgentId);
+
+      for (const agentId of agentsToWake) {
+        heartbeat
+          .wakeup(agentId, {
+            source: "automation",
+            triggerDetail: "system",
+            reason: "child_plan_proposed",
+            payload: { issueId: issue.parentId ?? issue.id, childIssueId: issue.id, commentId: comment.id },
+            requestedByActorType: actor.actorType,
+            requestedByActorId: actor.actorId,
+            contextSnapshot: {
+              issueId: issue.parentId ?? issue.id,
+              childIssueId: issue.id,
+              source: "issue.plan_proposed",
+              wakeReason: "child_plan_proposed",
+            },
+          })
+          .catch((err) => logger.warn({ err, issueId: issue.id, agentId }, "failed to wake agent on plan proposal"));
+      }
+    })();
+
+    res.status(201).json({ issue: updated, comment });
+  });
+
+  // ── Approve Plan ──────────────────────────────────────────────────────────
+  router.post("/issues/:id/approve-plan", async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await svc.getById(id);
+    if (!issue) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+    assertCompanyAccess(req, issue.companyId);
+
+    if (!issue.planProposedAt) {
+      res.status(409).json({ error: "No plan has been proposed yet" });
+      return;
+    }
+    if (issue.planApprovedAt) {
+      res.status(409).json({ error: "Plan has already been approved" });
+      return;
+    }
+
+    const actor = getActorInfo(req);
+    const now = new Date();
+
+    // 1. Set planApprovedAt, status → todo
+    const updated = await svc.update(id, {
+      status: "todo",
+      planApprovedAt: now,
+    });
+
+    // 2. Post approval notice
+    const approverName = actor.agentId
+      ? (await agentsSvc.getById(actor.agentId))?.name ?? "Agent"
+      : "Board";
+    await svc.addComment(id, `✅ Plan approved by ${approverName}. You may proceed.`, {
+      agentId: actor.agentId ?? undefined,
+      userId: actor.actorType === "user" ? actor.actorId : undefined,
+      runId: actor.runId,
+    });
+
+    // 3. Bubble to root ancestor
+    const ancestors = await svc.getAncestors(id);
+    const rootAncestor = ancestors.length > 0 ? ancestors[ancestors.length - 1] : null;
+    if (rootAncestor) {
+      await svc.addComment(rootAncestor.id, `✅ [${approverName}] Approved plan for ${issue.identifier ?? id}`, {
+        agentId: actor.agentId ?? undefined,
+        userId: actor.actorType === "user" ? actor.actorId : undefined,
+        runId: actor.runId,
+      });
+    }
+
+    await logActivity(db, {
+      companyId: issue.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "issue.plan_approved",
+      entityType: "issue",
+      entityId: issue.id,
+    });
+
+    // 4. Wake the assignee so they know they can start
+    if (issue.assigneeAgentId) {
+      void heartbeat
+        .wakeup(issue.assigneeAgentId, {
+          source: "automation",
+          triggerDetail: "system",
+          reason: "plan_approved",
+          payload: { issueId: issue.id },
+          requestedByActorType: actor.actorType,
+          requestedByActorId: actor.actorId,
+          contextSnapshot: {
+            issueId: issue.id,
+            source: "issue.plan_approved",
+            wakeReason: "plan_approved",
+          },
+        })
+        .catch((err) => logger.warn({ err, issueId: issue.id }, "failed to wake assignee on plan approval"));
+    }
+
+    res.json({ issue: updated });
   });
 
   router.post("/issues/:id/release", async (req, res) => {

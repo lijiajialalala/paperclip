@@ -4604,7 +4604,9 @@ export function heartbeatService(db: Db) {
         checked += 1;
         const baseline = new Date(agent.lastHeartbeatAt ?? agent.createdAt).getTime();
         const elapsedMs = now.getTime() - baseline;
-        if (elapsedMs < policy.intervalSec * 1000) continue;
+        // Apply ±15% jitter to stagger agent wakeups and avoid concurrent API call bursts (429s)
+        const jitterFactor = 1 + (Math.random() - 0.5) * 0.3;
+        if (elapsedMs < policy.intervalSec * 1000 * jitterFactor) continue;
 
         const run = await enqueueWakeup(agent.id, {
           source: "timer",
