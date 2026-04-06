@@ -1454,13 +1454,17 @@ export function issueRoutes(
     }
     assertCompanyAccess(req, issue.companyId);
 
-    // Plan approval gate: agent must propose and get plan approved before checkout
-    if (req.actor.type === "agent" && !issue.planApprovedAt) {
+    // Plan approval gate: only blocks if an unapproved plan is explicitly pending review
+    const planReviewPending =
+      req.actor.type === "agent" &&
+      !!issue.planProposedAt &&
+      !issue.planApprovedAt &&
+      issue.status === "in_review";
+
+    if (planReviewPending) {
       res.status(409).json({
-        error: "Plan must be proposed and approved before checkout",
-        hint: "POST /issues/:id/propose-plan first",
+        error: "Plan is pending review and must be approved before checkout",
         planProposedAt: issue.planProposedAt,
-        planApprovedAt: issue.planApprovedAt,
       });
       return;
     }
@@ -1539,6 +1543,14 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, issue.companyId);
+
+    if (req.actor.type === "agent") {
+      if (req.actor.agentId !== issue.assigneeAgentId) {
+        res.status(403).json({ error: "Only the assigned agent can propose a plan" });
+        return;
+      }
+      if (!(await assertAgentRunCheckoutOwnership(req, res, issue))) return;
+    }
 
     const planText = typeof req.body?.plan === "string" ? req.body.plan.trim() : "";
     if (!planText) {
@@ -1640,6 +1652,36 @@ export function issueRoutes(
     }
 
     const actor = getActorInfo(req);
+
+    // Authorization: Board, tasks:assign managers, or parent issue assignee. Explicitly forbid self-approval.
+    let canApprove = false;
+    
+    // First, verify if the actor has base management rights (Board or Agent with tasks:assign)
+    try {
+      await assertCanAssignTasks(req, issue.companyId);
+      canApprove = true;
+    } catch (e) {
+      // Ignore: might be approved by parent assignee below
+    }
+
+    if (!canApprove && actor.actorType === "agent" && issue.parentId) {
+      // Allow parent issue assignee to approve
+      const parent = await svc.getById(issue.parentId);
+      if (parent && parent.assigneeAgentId === actor.agentId) {
+        canApprove = true;
+      }
+    }
+
+    if (actor.actorType === "agent" && actor.agentId === issue.assigneeAgentId) {
+      // Regardless of other roles, an assignee cannot approve their own plan
+      canApprove = false;
+    }
+
+    if (!canApprove) {
+      res.status(403).json({ error: "Only Board, Parent issue assignee, or manager agent can approve this plan (self-approval forbidden)" });
+      return;
+    }
+
     const now = new Date();
 
     // 1. Set planApprovedAt, status → todo
