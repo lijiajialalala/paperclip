@@ -21,7 +21,7 @@ import { errorHandler } from "../middleware/index.js";
 import { assert } from "node:console";
 import { vi } from "vitest";
 
-vi.mock("../services/index.js", async (importOriginal) => {
+vi.mock("../services/heartbeat.js", async (importOriginal) => {
   const mod = await importOriginal<any>();
   return {
     ...mod,
