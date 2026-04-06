@@ -293,6 +293,17 @@ async function flush() {
   await new Promise((resolve) => window.setTimeout(resolve, 0));
 }
 
+function clearLocalStorageState() {
+  if (typeof localStorage.clear === "function") {
+    localStorage.clear();
+    return;
+  }
+
+  for (const key of Object.keys(localStorage)) {
+    delete (localStorage as Record<string, unknown>)[key];
+  }
+}
+
 describe("Routines page", () => {
   let container: HTMLDivElement;
 
@@ -304,7 +315,7 @@ describe("Routines page", () => {
     routinesListMock.mockReset();
     issuesListMock.mockReset();
     issuesListRenderMock.mockClear();
-    localStorage.clear();
+    clearLocalStorageState();
   });
 
   afterEach(() => {

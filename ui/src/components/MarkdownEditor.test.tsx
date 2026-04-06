@@ -77,7 +77,7 @@ vi.mock("@mdxeditor/editor", async () => {
   };
 });
 
-vi.mock("../lib/mention-deletion", () => ({
+vi.mock("../lib/mention-deletion-plugin", () => ({
   mentionDeletionPlugin: () => ({}),
 }));
 

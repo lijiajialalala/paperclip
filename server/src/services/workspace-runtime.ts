@@ -66,6 +66,73 @@ function isPowerShellShell(shell: string): boolean {
   return basename === "powershell" || basename === "powershell.exe" || basename === "pwsh" || basename === "pwsh.exe";
 }
 
+async function fileExists(value: string): Promise<boolean> {
+  return fs.access(value).then(() => true).catch(() => false);
+}
+
+async function resolveWindowsPosixShellExecutable(commandName: "bash" | "sh", env: NodeJS.ProcessEnv): Promise<string | null> {
+  const pathValue = env.PATH ?? env.Path ?? process.env.PATH ?? process.env.Path ?? "";
+  for (const dir of pathValue.split(";").filter(Boolean)) {
+    const candidate = path.join(dir, `${commandName}.exe`);
+    if (await fileExists(candidate)) return candidate;
+  }
+
+  const programFilesDirs = [
+    process.env["ProgramFiles"],
+    process.env["ProgramFiles(x86)"],
+    env["ProgramFiles"],
+    env["ProgramFiles(x86)"],
+  ].filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+
+  for (const baseDir of programFilesDirs) {
+    for (const relative of [
+      path.join("Git", "bin", `${commandName}.exe`),
+      path.join("Git", "usr", "bin", `${commandName}.exe`),
+    ]) {
+      const candidate = path.join(baseDir, relative);
+      if (await fileExists(candidate)) return candidate;
+    }
+  }
+
+  return null;
+}
+
+async function buildWorkspaceCommandLaunch(
+  command: string,
+  shell: string,
+  env: NodeJS.ProcessEnv,
+): Promise<{ command: string; args: string[] }> {
+  if (process.platform !== "win32" || !isCmdShell(shell)) {
+    return {
+      command: shell,
+      args: buildShellArgs(command, { shell }),
+    };
+  }
+
+  const trimmedStart = command.trimStart();
+  const match = /^(bash|sh)(?=\s|$)/i.exec(trimmedStart);
+  if (!match) {
+    return {
+      command: shell,
+      args: buildShellArgs(command, { shell }),
+    };
+  }
+
+  const resolvedShell = await resolveWindowsPosixShellExecutable(match[1].toLowerCase() as "bash" | "sh", env);
+  if (!resolvedShell) {
+    return {
+      command: shell,
+      args: buildShellArgs(command, { shell }),
+    };
+  }
+
+  const shellCommand = trimmedStart.slice(match[0].length).trimStart();
+  return {
+    command: resolvedShell,
+    args: shellCommand.length > 0 ? ["-lc", shellCommand] : [],
+  };
+}
+
 export function buildShellArgs(
   command: string,
   input?: { login?: boolean; shell?: string },
@@ -446,9 +513,10 @@ async function runWorkspaceCommand(input: {
   label: string;
 }) {
   const shell = resolveShell();
+  const launch = await buildWorkspaceCommandLaunch(input.command, shell, input.env);
   const proc = await executeProcess({
-    command: shell,
-    args: buildShellArgs(input.command, { shell }),
+    command: launch.command,
+    args: launch.args,
     cwd: input.cwd,
     env: input.env,
   });
@@ -543,9 +611,10 @@ async function recordWorkspaceCommandOperation(
     metadata: input.metadata ?? null,
     run: async () => {
       const shell = resolveShell();
+      const launch = await buildWorkspaceCommandLaunch(input.command, shell, input.env);
       const result = await executeProcess({
-        command: shell,
-        args: buildShellArgs(input.command),
+        command: launch.command,
+        args: launch.args,
         cwd: input.cwd,
         env: input.env,
       });

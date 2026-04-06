@@ -3,6 +3,13 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ThemeProvider } from "../context/ThemeContext";
+
+import { vi } from "vitest";
+
+vi.mock("../components/MarkdownEditor", () => ({
+  MarkdownEditor: () => null,
+}));
+
 import { RunInvocationCard } from "../pages/AgentDetail";
 
 describe("RunInvocationCard", () => {

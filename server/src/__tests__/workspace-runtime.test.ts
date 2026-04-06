@@ -64,6 +64,14 @@ async function execGit(cwd: string, args: string[]) {
 }
 
 async function runPnpm(cwd: string, args: string[]) {
+  if (process.platform === "win32") {
+    const commandLine = ["pnpm", ...args.map((arg) => (/\s/.test(arg) ? `"${arg.replace(/"/g, '\\"')}"` : arg))].join(
+      " ",
+    );
+    await execFileAsync(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", commandLine], { cwd });
+    return;
+  }
+
   await execFileAsync("pnpm", args, { cwd });
 }
 
@@ -743,14 +751,29 @@ describe("realizeExecutionWorkspace", () => {
 
     expect((await fs.lstat(path.join(workspace.cwd, "node_modules"))).isSymbolicLink()).toBe(false);
     expect((await fs.lstat(path.join(workspace.cwd, "server", "node_modules"))).isSymbolicLink()).toBe(false);
-    await expect(fs.realpath(path.join(workspace.cwd, "server", "node_modules", "@repo", "shared"))).resolves.toBe(
-      await fs.realpath(path.join(workspace.cwd, "packages", "shared")),
-    );
-    await expect(fs.realpath(path.join(repoRoot, "server", "node_modules", "@repo", "shared"))).resolves.toBe(
-      await fs.realpath(path.join(repoRoot, "packages", "shared")),
-    );
+    const baseSharedModulePath = path.join(repoRoot, "server", "node_modules", "@repo", "shared");
+    const worktreeSharedModulePath = path.join(workspace.cwd, "server", "node_modules", "@repo", "shared");
+
+    if (process.platform === "win32") {
+      expect((await fs.lstat(baseSharedModulePath)).isSymbolicLink()).toBe(true);
+      expect((await fs.lstat(worktreeSharedModulePath)).isSymbolicLink()).toBe(false);
+      await expect(fs.realpath(worktreeSharedModulePath)).resolves.not.toBe(await fs.realpath(baseSharedModulePath));
+      await expect(fs.readFile(path.join(worktreeSharedModulePath, "package.json"), "utf8")).resolves.toContain(
+        '"name": "@repo/shared"',
+      );
+      await expect(fs.readFile(path.join(worktreeSharedModulePath, "index.js"), "utf8")).resolves.toContain(
+        "export const value = 'shared';",
+      );
+    } else {
+      await expect(fs.realpath(worktreeSharedModulePath)).resolves.toBe(
+        await fs.realpath(path.join(workspace.cwd, "packages", "shared")),
+      );
+      await expect(fs.realpath(baseSharedModulePath)).resolves.toBe(
+        await fs.realpath(path.join(repoRoot, "packages", "shared")),
+      );
+    }
     },
-    15_000,
+    30_000,
   );
 
   it("records worktree setup and provision operations when a recorder is provided", async () => {

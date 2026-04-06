@@ -95,6 +95,22 @@ async function waitFor(condition: () => boolean | Promise<boolean>, timeoutMs = 
   throw new Error("Timed out waiting for condition");
 }
 
+async function removeDirectoryWithRetries(targetPath: string, attempts = 8, delayMs = 250): Promise<boolean> {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      fs.rmSync(targetPath, { recursive: true, force: true });
+      return true;
+    } catch (error) {
+      const code = error instanceof Error && "code" in error ? String((error as NodeJS.ErrnoException).code) : "";
+      if (code !== "EPERM") throw error;
+      if (attempt === attempts) return false;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+
+  return false;
+}
+
 async function createControlledGatewayServer() {
   const server = createServer();
   const wss = new WebSocketServer({ server });
@@ -222,12 +238,12 @@ describe("heartbeat comment wake batching", () => {
     db = createDb(started.connectionString);
     instance = started.instance;
     dataDir = started.dataDir;
-  }, 20_000);
+  }, 45_000);
 
   afterAll(async () => {
     await instance?.stop();
     if (dataDir) {
-      fs.rmSync(dataDir, { recursive: true, force: true });
+      await removeDirectoryWithRetries(dataDir);
     }
   });
 

@@ -495,6 +495,12 @@ function windowsPathExts(env: NodeJS.ProcessEnv): string[] {
   return (env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";").filter(Boolean);
 }
 
+function windowsCommandCandidates(commandPath: string, env: NodeJS.ProcessEnv): string[] {
+  if (process.platform !== "win32") return [commandPath];
+  if (path.extname(commandPath).length > 0) return [commandPath];
+  return [commandPath, ...windowsPathExts(env).map((ext) => `${commandPath}${ext}`)];
+}
+
 async function pathExists(candidate: string) {
   try {
     await fs.access(candidate, process.platform === "win32" ? fsConstants.F_OK : fsConstants.X_OK);
@@ -508,7 +514,10 @@ async function resolveCommandPath(command: string, cwd: string, env: NodeJS.Proc
   const hasPathSeparator = command.includes("/") || command.includes("\\");
   if (hasPathSeparator) {
     const absolute = path.isAbsolute(command) ? command : path.resolve(cwd, command);
-    return (await pathExists(absolute)) ? absolute : null;
+    for (const candidate of windowsCommandCandidates(absolute, env)) {
+      if (await pathExists(candidate)) return candidate;
+    }
+    return null;
   }
 
   const pathValue = env.PATH ?? env.Path ?? "";
@@ -542,6 +551,39 @@ function quoteForCmd(arg: string) {
   return /[\s"&<>|^()]/.test(escaped) ? `"${escaped}"` : escaped;
 }
 
+function resolveWindowsCmdShimCandidate(rawPath: string, executableDir: string): string {
+  const shimDirWithSeparator = `${executableDir}${path.sep}`;
+  const expanded = rawPath
+    .replace(/%~dp0/gi, shimDirWithSeparator)
+    .replace(/%dp0%/gi, shimDirWithSeparator)
+    .replace(/%dp0/gi, shimDirWithSeparator)
+    .replace(/[\\/]+/g, path.sep);
+  return path.isAbsolute(expanded) ? expanded : path.resolve(executableDir, expanded);
+}
+
+async function resolveNodeScriptFromWindowsCmdShim(executable: string): Promise<string | null> {
+  const executableDir = path.dirname(executable);
+  const executableBase = path.basename(executable, path.extname(executable));
+
+  for (const ext of [".js", ".cjs", ".mjs"]) {
+    const sibling = path.join(executableDir, `${executableBase}${ext}`);
+    if (await pathExists(sibling)) return sibling;
+  }
+
+  const contents = await fs.readFile(executable, "utf8").catch(() => null);
+  if (!contents) return null;
+
+  const matches = contents.matchAll(/"([^"]+\.(?:cjs|mjs|js))"/gi);
+  for (const match of matches) {
+    const rawPath = match[1];
+    if (/node(?:\.exe)?$/i.test(rawPath.replace(/\\/g, "/"))) continue;
+    const candidate = resolveWindowsCmdShimCandidate(rawPath, executableDir);
+    if (await pathExists(candidate)) return candidate;
+  }
+
+  return null;
+}
+
 async function resolveSpawnTarget(
   command: string,
   args: string[],
@@ -556,6 +598,13 @@ async function resolveSpawnTarget(
   }
 
   if (/\.(cmd|bat)$/i.test(executable)) {
+    const shimScript = await resolveNodeScriptFromWindowsCmdShim(executable);
+    if (shimScript) {
+      return {
+        command: process.execPath,
+        args: [shimScript, ...args],
+      };
+    }
     const shell = env.ComSpec || process.env.ComSpec || "cmd.exe";
     const commandLine = [quoteForCmd(executable), ...args.map(quoteForCmd)].join(" ");
     return {
