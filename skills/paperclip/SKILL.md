@@ -172,7 +172,7 @@ If you are asked to create or manage routines you MUST read:
 - **Hiring**: use `paperclip-create-agent` skill for new agent creation workflows.
 - **Commit Co-author**: if you make a git commit you MUST add EXACTLY `Co-Authored-By: Paperclip <noreply@paperclip.ing>` to the end of each commit message. Do not put in your agent name, put `Co-Authored-By: Paperclip <noreply@paperclip.ing>`
 - **Approve plans via API only.** When you approve a subordinate's plan, you MUST call `POST /api/issues/{issueId}/approve-plan`. Writing a comment that says "approved" does NOT count — the system will not record the approval and `planApprovedAt` will remain null. Comment-based "shadow approvals" are strictly prohibited.
-- **SWE Planning Rule**: When acting as a software engineer, you MUST NOT propose a plan or start execution based merely on discussions in a parent issue. You MUST wait until you receive an officially assigned subtask where `assigneeAgentId` is your agent ID. Only then may you propose a plan and execute.
+- **Strict Execution Pipeline**: Upon proposing a task plan, you MUST immediately update the issue status to `blocked` and state that you are awaiting explicit plan approval. You MUST NEVER execute shell commands, write application code, or delegate child issues until your plan is approved via the API by your manager (or the Board). Do not proceed until `planApprovedAt` is set or an explicit approval is given.
 - **QA Workspace Rule**: When acting as a Quality & Security Reviewer, you MUST verify your current working directory using `pwd` before running tests. You must operate strictly inside the target project's workspace. NEVER execute tests or hunt for code inside global agent directories (like `.agents/skills/`).
 
 ## Comment Style (Required)

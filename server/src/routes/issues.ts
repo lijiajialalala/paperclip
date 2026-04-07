@@ -1655,6 +1655,7 @@ export function issueRoutes(
 
     // Authorization: Board, tasks:assign managers, or parent issue assignee. Explicitly forbid self-approval.
     let canApprove = false;
+    let authErrorMsg = "Only Board, Parent issue assignee, or manager agent can approve this plan (self-approval forbidden)";
     
     // First, verify if the actor has base management rights (Board or Agent with tasks:assign)
     try {
@@ -1677,8 +1678,14 @@ export function issueRoutes(
       canApprove = false;
     }
 
+    if (!issue.parentId && actor.actorType !== "user") {
+      // Strict G1 Option A: Root issues MUST be approved by a human Board member.
+      canApprove = false;
+      authErrorMsg = "Option A Strict Enforcement: Root issue plans MUST be approved by a human Board member, not an agent.";
+    }
+
     if (!canApprove) {
-      res.status(403).json({ error: "Only Board, Parent issue assignee, or manager agent can approve this plan (self-approval forbidden)" });
+      res.status(403).json({ error: authErrorMsg });
       return;
     }
 
