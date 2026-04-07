@@ -1582,7 +1582,7 @@ export function issueRoutes(
       const agentName = actor.agentId
         ? (await agentsSvc.getById(actor.agentId))?.name ?? "Agent"
         : "User";
-      const summarySnippet = planText.length > 200 ? planText.slice(0, 200) + "..." : planText;
+      const summarySnippet = planText.length > 1500 ? planText.slice(0, 1500) + "..." : planText;
       await svc.addComment(rootAncestor.id, `📋 [${agentName} on ${issue.identifier ?? id}] **Plan:**\n${summarySnippet}`, {
         agentId: actor.agentId ?? undefined,
         userId: actor.actorType === "user" ? actor.actorId : undefined,
