@@ -139,6 +139,7 @@ let scanInFlight = false;
 let restartInFlight = false;
 let shuttingDown = false;
 let childExitWasExpected = false;
+let crashCount = 0;
 let child: ReturnType<typeof spawn> | null = null;
 let childExitPromise: Promise<{ code: number; signal: NodeJS.Signals | null }> | null = null;
 let scanTimer: ReturnType<typeof setInterval> | null = null;
@@ -541,6 +542,20 @@ async function startServerChild() {
       if (signal) {
         exitForSignal(signal);
         return;
+      }
+      if (code !== 0) {
+        crashCount++;
+        if (crashCount <= 3) {
+          process.stderr.write(`[dev-runner] Child crashed with code ${code}. Auto-restarting (${crashCount}/3) in 3s...\n`);
+          setTimeout(() => {
+            void startServerChild();
+          }, 3000);
+          return;
+        } else {
+          process.stderr.write(`[dev-runner] Child crashed 3 times locally. Exiting dev-runner.\n`);
+        }
+      } else {
+        crashCount = 0;
       }
       process.exit(code ?? 0);
     });

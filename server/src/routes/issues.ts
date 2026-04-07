@@ -1582,7 +1582,7 @@ export function issueRoutes(
       const agentName = actor.agentId
         ? (await agentsSvc.getById(actor.agentId))?.name ?? "Agent"
         : "User";
-      const summarySnippet = planText.length > 200 ? planText.slice(0, 200) + "..." : planText;
+      const summarySnippet = planText.length > 1500 ? planText.slice(0, 1500) + "..." : planText;
       await svc.addComment(rootAncestor.id, `📋 [${agentName} on ${issue.identifier ?? id}] **Plan:**\n${summarySnippet}`, {
         agentId: actor.agentId ?? undefined,
         userId: actor.actorType === "user" ? actor.actorId : undefined,
@@ -1655,6 +1655,7 @@ export function issueRoutes(
 
     // Authorization: Board, tasks:assign managers, or parent issue assignee. Explicitly forbid self-approval.
     let canApprove = false;
+    let authErrorMsg = "Only Board, Parent issue assignee, or manager agent can approve this plan (self-approval forbidden)";
     
     // First, verify if the actor has base management rights (Board or Agent with tasks:assign)
     try {
@@ -1677,8 +1678,9 @@ export function issueRoutes(
       canApprove = false;
     }
 
+
     if (!canApprove) {
-      res.status(403).json({ error: "Only Board, Parent issue assignee, or manager agent can approve this plan (self-approval forbidden)" });
+      res.status(403).json({ error: authErrorMsg });
       return;
     }
 
