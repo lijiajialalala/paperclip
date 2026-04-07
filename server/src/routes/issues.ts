@@ -1678,11 +1678,6 @@ export function issueRoutes(
       canApprove = false;
     }
 
-    if (!issue.parentId && actor.actorType !== "user") {
-      // Strict G1 Option A: Root issues MUST be approved by a human Board member.
-      canApprove = false;
-      authErrorMsg = "Option A Strict Enforcement: Root issue plans MUST be approved by a human Board member, not an agent.";
-    }
 
     if (!canApprove) {
       res.status(403).json({ error: authErrorMsg });
