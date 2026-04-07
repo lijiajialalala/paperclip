@@ -171,6 +171,7 @@ If you are asked to create or manage routines you MUST read:
 - **Escalate** via `chainOfCommand` when stuck. Reassign to manager or create a task for them.
 - **Hiring**: use `paperclip-create-agent` skill for new agent creation workflows.
 - **Commit Co-author**: if you make a git commit you MUST add EXACTLY `Co-Authored-By: Paperclip <noreply@paperclip.ing>` to the end of each commit message. Do not put in your agent name, put `Co-Authored-By: Paperclip <noreply@paperclip.ing>`
+- **Approve plans via API only.** When you approve a subordinate's plan, you MUST call `POST /api/issues/{issueId}/approve-plan`. Writing a comment that says "approved" does NOT count — the system will not record the approval and `planApprovedAt` will remain null. Comment-based "shadow approvals" are strictly prohibited.
 
 ## Comment Style (Required)
 
@@ -212,9 +213,15 @@ Submitted CTO hire request and linked it for board review.
 - Depends on: [PAP-224](/PAP/issues/PAP-224)
 ```
 
-## Planning (Required when planning requested)
+## Planning (REQUIRED BY DEFAULT)
 
-If you're asked to make a plan, create or update the issue document with key `plan`. Do not append plans into the issue description anymore. If you're asked for plan revisions, update that same `plan` document. In both cases, leave a comment as you normally would and mention that you updated the plan document.
+As a strict company policy, you MUST propose a plan before executing any task, unless the user explicitly bypasses this requirement. This applies to ALL types of work — including delegation, task decomposition, and architecture decisions, not only code changes. If your work is to break a task into subtasks and delegate them, that is still "execution" and requires a plan first.
+
+Workflow:
+1. Checkout the task to become the assignee.
+2. If you have not proposed a plan yet, use the `propose-plan` endpoint to submit one.
+3. Wait for the plan to be approved. Do not write any code, create any subtasks, or delegate any work.
+4. Once the plan is approved (you will be woken up), proceed to execute the task normally.
 
 When you mention a plan or another issue document in a comment, include a direct document link using the key:
 
@@ -223,21 +230,17 @@ When you mention a plan or another issue document in a comment, include a direct
 
 If the issue identifier is available, prefer the document deep link over a plain issue link so the reader lands directly on the updated document.
 
-If you're asked to make a plan, _do not mark the issue as done_. Re-assign the issue to whomever asked you to make the plan and leave it in progress.
-
 Recommended API flow:
 
 ```bash
-PUT /api/issues/{issueId}/documents/plan
+POST /api/issues/{issueId}/propose-plan
+Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
 {
-  "title": "Plan",
-  "format": "markdown",
-  "body": "# Plan\n\n[your plan here]",
-  "baseRevisionId": null
+  "plan": "# Plan\n\n[your markdown plan here]"
 }
 ```
 
-If `plan` already exists, fetch the current document first and send its latest `baseRevisionId` when you update it.
+This endpoint will automatically transition the issue to `in_review`. You MUST then wait for a human or manager to explicitly approve your plan (which will transition the issue back to `todo`) before you begin executing the work. **Do not reassign the issue yourself, do not mark it done, do not checkout, do not create subtasks, and do not execute until the plan is approved.**
 
 ## Setting Agent Instructions Path
 
@@ -280,6 +283,8 @@ PATCH /api/agents/{agentId}/instructions-path
 | Get issue document                        | `GET /api/issues/:issueId/documents/:key`                                                  |
 | Create/update issue document              | `PUT /api/issues/:issueId/documents/:key`                                                  |
 | Get issue document revisions              | `GET /api/issues/:issueId/documents/:key/revisions`                                        |
+| Propose a plan                            | `POST /api/issues/:issueId/propose-plan`                                                   |
+| Approve a plan                            | `POST /api/issues/:issueId/approve-plan`                                                   |
 | Get compact heartbeat context             | `GET /api/issues/:issueId/heartbeat-context`                                               |
 | Get comments                              | `GET /api/issues/:issueId/comments`                                                        |
 | Get comment delta                         | `GET /api/issues/:issueId/comments?after=:commentId&order=asc`                             |
