@@ -583,6 +583,9 @@ export function issueService(db: Db) {
           eq(heartbeatRuns.companyId, companyId),
           eq(sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'issueId'`, issueId),
           inArray(heartbeatRuns.status, [...TERMINAL_HEARTBEAT_RUN_STATUSES]),
+          // Platform-failure runs (process_lost) are not product verdicts and
+          // must not block the done gate.
+          or(isNull(heartbeatRuns.errorCode), ne(heartbeatRuns.errorCode, "process_lost")),
         ),
       )
       .orderBy(desc(heartbeatRuns.finishedAt), desc(heartbeatRuns.createdAt))

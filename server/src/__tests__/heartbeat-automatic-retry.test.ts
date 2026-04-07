@@ -133,16 +133,16 @@ describe("resolveRunnableAutomaticRetryPlan", () => {
     expect(resolveRunnableAutomaticRetryPlan(delayedPlan, false)).toBeNull();
   });
 
-  it("keeps immediate retries runnable even when the heartbeat scheduler is disabled", () => {
+  it("keeps delayed process_lost retries runnable when the heartbeat scheduler is enabled", () => {
     const immediatePlan = {
       reason: "process_lost" as const,
       attempt: 1,
-      maxAttempts: 1,
-      retryAfterMs: 0,
-      retryNotBeforeAt: null,
+      maxAttempts: 2,
+      retryAfterMs: 5_000,
+      retryNotBeforeAt: new Date("2026-04-05T10:00:05.000Z"),
     };
 
-    expect(resolveRunnableAutomaticRetryPlan(immediatePlan, false)).toEqual(immediatePlan);
+    expect(resolveRunnableAutomaticRetryPlan(immediatePlan, true)).toEqual(immediatePlan);
   });
 });
 

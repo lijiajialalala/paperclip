@@ -749,7 +749,14 @@ describe("realizeExecutionWorkspace", () => {
       },
     });
 
-    expect((await fs.lstat(path.join(workspace.cwd, "node_modules"))).isSymbolicLink()).toBe(false);
+    const workspaceInstallRoot = await fs
+      .lstat(path.join(workspace.cwd, "node_modules"))
+      .then(() => path.join(workspace.cwd, "node_modules"))
+      .catch(async () => {
+        await expect(fs.access(path.join(workspace.cwd, ".pnpm"))).resolves.toBeUndefined();
+        return path.join(workspace.cwd, ".pnpm");
+      });
+    expect((await fs.lstat(workspaceInstallRoot)).isSymbolicLink()).toBe(false);
     expect((await fs.lstat(path.join(workspace.cwd, "server", "node_modules"))).isSymbolicLink()).toBe(false);
     const baseSharedModulePath = path.join(repoRoot, "server", "node_modules", "@repo", "shared");
     const worktreeSharedModulePath = path.join(workspace.cwd, "server", "node_modules", "@repo", "shared");

@@ -120,7 +120,7 @@ export function classifyAutomaticRetry(input: {
   if (errorCode === "process_lost") {
     return {
       reason: "process_lost",
-      maxAttempts: 1,
+      maxAttempts: 2,
     };
   }
 
@@ -182,7 +182,7 @@ export function getRetryChainAttempt(input: {
 export function resolveAutomaticRetryDelayMs(reason: AutomaticRetryReason, attempt: number) {
   switch (reason) {
     case "process_lost":
-      return 0;
+      return attempt >= 2 ? 10_000 : 5_000;
     case "rate_limited":
       return attempt >= 2 ? 120_000 : 30_000;
     case "auth_file_transient":

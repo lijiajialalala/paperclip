@@ -49,6 +49,15 @@ export function deriveHeartbeatRunBusinessVerdict(
   const status = readNonEmptyString(input.status)?.toLowerCase() ?? null;
 
   if (errorCode || error) {
+    if (errorCode === "process_lost") {
+      return {
+        kind: "unknown",
+        rawVerdict: null,
+        source: "run_error",
+        reasonCode: "process_lost",
+        message: "Platform process lost",
+      };
+    }
     return {
       kind: "blocked",
       rawVerdict: null,
