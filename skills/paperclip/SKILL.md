@@ -218,17 +218,12 @@ Submitted CTO hire request and linked it for board review.
 As a strict company policy, you MUST propose a plan before executing any task, unless the user explicitly bypasses this requirement. This applies to ALL types of work — including delegation, task decomposition, and architecture decisions, not only code changes. If your work is to break a task into subtasks and delegate them, that is still "execution" and requires a plan first.
 
 Workflow:
-1. Checkout the task to become the assignee.
-2. If you have not proposed a plan yet, use the `propose-plan` endpoint to submit one.
-3. Wait for the plan to be approved. Do not write any code, create any subtasks, or delegate any work.
-4. Once the plan is approved (you will be woken up), proceed to execute the task normally.
 
-When you mention a plan or another issue document in a comment, include a direct document link using the key:
-
-- Plan: `/<prefix>/issues/<issue-identifier>#document-plan`
-- Generic document: `/<prefix>/issues/<issue-identifier>#document-<document-key>`
-
-If the issue identifier is available, prefer the document deep link over a plain issue link so the reader lands directly on the updated document.
+1. **Checkout** the task (`POST /api/issues/{issueId}/checkout`) to become the assignee. This is required because `propose-plan` only allows the checked-out assignee to call it.
+2. **Propose your plan** using the endpoint below. This transitions the issue to `in_review` and posts your plan as a comment.
+3. **Stop all execution.** After proposing, do NOT write code, create subtasks, delegate work, or re-checkout. The system blocks further checkouts while the plan is pending review (`in_review` + `planProposedAt` set + `planApprovedAt` null → checkout returns 409).
+4. **Wait for approval.** A human, board user, or manager agent will call `POST /api/issues/{issueId}/approve-plan`, which transitions the issue back to `todo` and wakes you.
+5. **Re-checkout and execute.** On the approval wake, checkout the task again and proceed with normal execution.
 
 Recommended API flow:
 
@@ -240,7 +235,7 @@ Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
 }
 ```
 
-This endpoint will automatically transition the issue to `in_review`. You MUST then wait for a human or manager to explicitly approve your plan (which will transition the issue back to `todo`) before you begin executing the work. **Do not reassign the issue yourself, do not mark it done, do not checkout, do not create subtasks, and do not execute until the plan is approved.**
+**Note:** The plan is posted as an issue **comment** (not a document). Do not reference `#document-plan` deep links for plans submitted via this endpoint — they will not resolve. If you need to link to the plan, link to the comment directly using `/<prefix>/issues/<issue-identifier>#comment-<comment-id>`.
 
 ## Setting Agent Instructions Path
 
