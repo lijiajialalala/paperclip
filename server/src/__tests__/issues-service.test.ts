@@ -915,10 +915,13 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       createdAt?: Date;
     }) {
       const createdAt = input.createdAt ?? new Date("2026-04-05T16:00:00.000Z");
-      const finishedAt = input.finishedAt ?? (input.status === "succeeded" ? createdAt : null);
+      const finishedAt = input.finishedAt ?? (
+        input.status === "queued" || input.status === "running" ? null : createdAt
+      );
+      const runId = input.runId ?? randomUUID();
 
       await db.insert(heartbeatRuns).values({
-        id: input.runId ?? randomUUID(),
+        id: runId,
         companyId: input.companyId,
         agentId: input.agentId,
         invocationSource: "assignment",
@@ -933,6 +936,8 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
         createdAt,
         updatedAt: createdAt,
       });
+
+      return runId;
     }
 
     it("allows board-driven done transitions even when the latest terminal run requested changes", async () => {
@@ -1002,6 +1007,69 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
         status: 422,
         details: expect.objectContaining({
           code: "issue_done_blocked_by_negative_run_verdict",
+          verdict: "changes_requested",
+        }),
+      });
+    });
+
+    it("allows agent-driven done transitions when the latest terminal run failed without an explicit verdict", async () => {
+      const { companyId, agentId, issueId } = await seedDoneGuardFixture();
+
+      await insertIssueRun({
+        companyId,
+        agentId,
+        issueId,
+        status: "failed",
+        errorCode: "adapter_failed",
+        error: "Too Many Requests",
+        createdAt: new Date("2026-04-05T16:05:00.000Z"),
+      });
+
+      await expect(
+        svc.assertCanTransitionIssueToDone({
+          issueId,
+          companyId,
+          actorType: "agent",
+          actorAgentId: agentId,
+          actorRunId: null,
+        }),
+      ).resolves.toBeUndefined();
+    });
+
+    it("keeps blocking done when the latest authoritative verdict still requests changes", async () => {
+      const { companyId, agentId, issueId } = await seedDoneGuardFixture();
+
+      const reviewRunId = await insertIssueRun({
+        companyId,
+        agentId,
+        issueId,
+        status: "succeeded",
+        verdict: "changes_requested",
+        createdAt: new Date("2026-04-05T16:00:00.000Z"),
+      });
+      await insertIssueRun({
+        companyId,
+        agentId,
+        issueId,
+        status: "failed",
+        errorCode: "adapter_failed",
+        error: "Too Many Requests",
+        createdAt: new Date("2026-04-05T16:05:00.000Z"),
+      });
+
+      await expect(
+        svc.assertCanTransitionIssueToDone({
+          issueId,
+          companyId,
+          actorType: "agent",
+          actorAgentId: agentId,
+          actorRunId: null,
+        }),
+      ).rejects.toMatchObject({
+        status: 422,
+        details: expect.objectContaining({
+          code: "issue_done_blocked_by_negative_run_verdict",
+          runId: reviewRunId,
           verdict: "changes_requested",
         }),
       });
@@ -1105,6 +1173,134 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
           actorRunId,
         }),
       ).resolves.toBeUndefined();
+    });
+
+    it("allows a newer explicit pass to clear an older changes_requested verdict", async () => {
+      const { companyId, agentId, issueId } = await seedDoneGuardFixture();
+
+      await insertIssueRun({
+        companyId,
+        agentId,
+        issueId,
+        status: "succeeded",
+        verdict: "changes_requested",
+        createdAt: new Date("2026-04-05T16:00:00.000Z"),
+      });
+      await insertIssueRun({
+        companyId,
+        agentId,
+        issueId,
+        status: "succeeded",
+        verdict: "passed",
+        createdAt: new Date("2026-04-05T16:05:00.000Z"),
+      });
+
+      await expect(
+        svc.assertCanTransitionIssueToDone({
+          issueId,
+          companyId,
+          actorType: "agent",
+          actorAgentId: agentId,
+          actorRunId: null,
+        }),
+      ).resolves.toBeUndefined();
+    });
+  });
+
+  describe("ancestor status recomputation", () => {
+    async function seedAncestorFixture(input?: {
+      rootStatus?: "backlog" | "todo" | "in_progress" | "blocked" | "done";
+      parentStatus?: "backlog" | "todo" | "in_progress" | "blocked" | "done";
+      childStatus?: "todo" | "in_progress" | "in_review" | "blocked" | "done";
+    }) {
+      const companyId = randomUUID();
+      const agentId = randomUUID();
+      const rootId = randomUUID();
+      const parentId = randomUUID();
+      const childId = randomUUID();
+      const prefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
+
+      await db.insert(companies).values({
+        id: companyId,
+        name: "Paperclip",
+        issuePrefix: prefix,
+        requireBoardApprovalForNewAgents: false,
+      });
+
+      await db.insert(agents).values({
+        id: agentId,
+        companyId,
+        name: "TreeWorker",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      });
+
+      await db.insert(issues).values([
+        {
+          id: rootId,
+          companyId,
+          title: "Root issue",
+          status: input?.rootStatus ?? "blocked",
+          priority: "medium",
+          issueNumber: 1,
+          identifier: `${prefix}-1`,
+        },
+        {
+          id: parentId,
+          companyId,
+          parentId: rootId,
+          title: "Parent issue",
+          status: input?.parentStatus ?? "blocked",
+          priority: "medium",
+          issueNumber: 2,
+          identifier: `${prefix}-2`,
+        },
+        {
+          id: childId,
+          companyId,
+          parentId,
+          title: "Child issue",
+          status: input?.childStatus ?? "todo",
+          priority: "medium",
+          assigneeAgentId: agentId,
+          issueNumber: 3,
+          identifier: `${prefix}-3`,
+        },
+      ]);
+
+      return { companyId, agentId, rootId, parentId, childId };
+    }
+
+    it("recomputes blocked ancestors back to in_progress when a child resumes execution", async () => {
+      const { agentId, rootId, parentId, childId } = await seedAncestorFixture();
+
+      await svc.checkout(childId, agentId, ["todo"], null);
+
+      const parent = await svc.getById(parentId);
+      const root = await svc.getById(rootId);
+
+      expect(parent?.status).toBe("in_progress");
+      expect(root?.status).toBe("in_progress");
+    });
+
+    it("marks ancestors done when their only child branch is completed", async () => {
+      const { rootId, parentId, childId } = await seedAncestorFixture({
+        rootStatus: "in_progress",
+        parentStatus: "in_progress",
+        childStatus: "in_review",
+      });
+
+      await svc.update(childId, { status: "done" });
+
+      const parent = await svc.getById(parentId);
+      const root = await svc.getById(rootId);
+
+      expect(parent?.status).toBe("done");
+      expect(root?.status).toBe("done");
     });
   });
 });

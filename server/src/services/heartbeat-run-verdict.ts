@@ -47,6 +47,18 @@ export function deriveHeartbeatRunBusinessVerdict(
   const errorCode = readNonEmptyString(input.errorCode);
   const error = readNonEmptyString(input.error);
   const status = readNonEmptyString(input.status)?.toLowerCase() ?? null;
+  const rawVerdict = readExplicitVerdict(input.resultJson);
+  const kind = normalizeVerdict(rawVerdict);
+
+  if (rawVerdict) {
+    return {
+      kind,
+      rawVerdict,
+      source: "result_json",
+      reasonCode: kind === "unknown" ? "verdict_unrecognized" : "explicit_verdict",
+      message: null,
+    };
+  }
 
   if (errorCode || error) {
     if (errorCode === "process_lost") {
@@ -59,7 +71,7 @@ export function deriveHeartbeatRunBusinessVerdict(
       };
     }
     return {
-      kind: "blocked",
+      kind: "unknown",
       rawVerdict: null,
       source: "run_error",
       reasonCode: "run_error",
@@ -69,22 +81,10 @@ export function deriveHeartbeatRunBusinessVerdict(
 
   if (status === "failed" || status === "cancelled" || status === "timed_out") {
     return {
-      kind: "blocked",
+      kind: "unknown",
       rawVerdict: null,
       source: "run_status",
       reasonCode: "run_not_successful",
-      message: null,
-    };
-  }
-
-  const rawVerdict = readExplicitVerdict(input.resultJson);
-  const kind = normalizeVerdict(rawVerdict);
-  if (rawVerdict) {
-    return {
-      kind,
-      rawVerdict,
-      source: "result_json",
-      reasonCode: kind === "unknown" ? "verdict_unrecognized" : "explicit_verdict",
       message: null,
     };
   }

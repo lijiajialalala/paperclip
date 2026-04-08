@@ -135,6 +135,8 @@ function sameRunLock(checkoutRunId: string | null, actorRunId: string | null) {
 }
 
 const TERMINAL_HEARTBEAT_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
+const AUTO_RECOMPUTED_ANCESTOR_STATUSES = new Set(["backlog", "todo", "in_progress", "blocked", "done"]);
+const ACTIVE_CHILD_ISSUE_STATUSES = new Set(["in_progress", "in_review"]);
 
 function escapeLikePattern(value: string): string {
   return value.replace(/[\\%_]/g, "\\$&");
@@ -174,6 +176,76 @@ async function getWorkspaceInheritanceIssue(
     throw notFound("Workspace inheritance issue not found");
   }
   return issue;
+}
+
+function isAuthoritativeBusinessVerdict(
+  verdict: ReturnType<typeof deriveHeartbeatRunBusinessVerdict>,
+) {
+  return verdict.source === "result_json" && verdict.kind !== "unknown";
+}
+
+function deriveAncestorStatusFromChildren(children: Array<{ status: string }>) {
+  const relevantChildren = children.filter((child) => child.status !== "cancelled");
+  if (relevantChildren.length === 0) return null;
+  if (relevantChildren.every((child) => child.status === "done")) return "done";
+  if (relevantChildren.some((child) => ACTIVE_CHILD_ISSUE_STATUSES.has(child.status))) return "in_progress";
+  if (relevantChildren.some((child) => child.status === "done")) return "in_progress";
+  if (relevantChildren.some((child) => child.status === "blocked")) return "blocked";
+  if (relevantChildren.every((child) => child.status === "backlog")) return "backlog";
+  return "todo";
+}
+
+async function recomputeAncestorStatuses(
+  dbOrTx: any,
+  startingParentIds: Array<string | null | undefined>,
+) {
+  const queue = [...new Set(startingParentIds.filter((parentId): parentId is string => Boolean(parentId)))];
+  const visited = new Set<string>();
+
+  while (queue.length > 0) {
+    const issueId = queue.shift();
+    if (!issueId || visited.has(issueId)) continue;
+    visited.add(issueId);
+
+    const parent = await dbOrTx
+      .select({
+        id: issues.id,
+        parentId: issues.parentId,
+        status: issues.status,
+      })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows: Array<{ id: string; parentId: string | null; status: string }>) => rows[0] ?? null);
+    if (!parent) continue;
+
+    const children = await dbOrTx
+      .select({ status: issues.status })
+      .from(issues)
+      .where(and(eq(issues.parentId, issueId), isNull(issues.hiddenAt)));
+    const nextStatus = deriveAncestorStatusFromChildren(children);
+
+    if (
+      nextStatus &&
+      AUTO_RECOMPUTED_ANCESTOR_STATUSES.has(parent.status) &&
+      nextStatus !== parent.status
+    ) {
+      const patch: Partial<typeof issues.$inferInsert> = {
+        status: nextStatus,
+        updatedAt: new Date(),
+      };
+      applyStatusSideEffects(nextStatus, patch);
+      if (nextStatus !== "done") patch.completedAt = null;
+      patch.cancelledAt = null;
+      if (nextStatus !== "in_progress") patch.checkoutRunId = null;
+
+      await dbOrTx
+        .update(issues)
+        .set(patch)
+        .where(eq(issues.id, issueId));
+    }
+
+    if (parent.parentId) queue.push(parent.parentId);
+  }
 }
 
 function touchedByUserCondition(companyId: string, userId: string) {
@@ -565,8 +637,11 @@ export function issueService(db: Db) {
     return enriched;
   }
 
-  async function getLatestTerminalRunForIssue(companyId: string, issueId: string): Promise<IssueDoneGuardRunRow | null> {
-    return db
+  async function getLatestAuthoritativeRunForIssue(
+    companyId: string,
+    issueId: string,
+  ): Promise<{ run: IssueDoneGuardRunRow; verdict: ReturnType<typeof deriveHeartbeatRunBusinessVerdict> } | null> {
+    const runs = await db
       .select({
         id: heartbeatRuns.id,
         agentId: heartbeatRuns.agentId,
@@ -583,14 +658,23 @@ export function issueService(db: Db) {
           eq(heartbeatRuns.companyId, companyId),
           eq(sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'issueId'`, issueId),
           inArray(heartbeatRuns.status, [...TERMINAL_HEARTBEAT_RUN_STATUSES]),
+          sql<boolean>`nullif(btrim(${heartbeatRuns.resultJson} ->> 'verdict'), '') is not null`,
           // Platform-failure runs (process_lost) are not product verdicts and
           // must not block the done gate.
           or(isNull(heartbeatRuns.errorCode), ne(heartbeatRuns.errorCode, "process_lost")),
         ),
       )
       .orderBy(desc(heartbeatRuns.finishedAt), desc(heartbeatRuns.createdAt))
-      .limit(1)
-      .then((rows) => rows[0] ?? null);
+      .limit(20);
+
+    for (const run of runs) {
+      const verdict = deriveHeartbeatRunBusinessVerdict(run);
+      if (isAuthoritativeBusinessVerdict(verdict)) {
+        return { run, verdict };
+      }
+    }
+
+    return null;
   }
 
   async function getRunByIdForIssue(companyId: string, issueId: string, runId: string): Promise<IssueDoneGuardRunRow | null> {
@@ -1149,15 +1233,17 @@ export function issueService(db: Db) {
     }) => {
       // Layer 1: Check the latest terminal run for an explicit negative verdict.
       // Board users can override (governance principle) — only agents are blocked.
-      const latestTerminalRun = await getLatestTerminalRunForIssue(input.companyId, input.issueId);
-      if (latestTerminalRun && input.actorType !== "board") {
-        const latestVerdict = deriveHeartbeatRunBusinessVerdict(latestTerminalRun);
-        if (latestVerdict.kind === "changes_requested" || latestVerdict.kind === "blocked") {
+      const latestAuthoritativeRun = await getLatestAuthoritativeRunForIssue(input.companyId, input.issueId);
+      if (latestAuthoritativeRun && input.actorType !== "board") {
+        if (
+          latestAuthoritativeRun.verdict.kind === "changes_requested" ||
+          latestAuthoritativeRun.verdict.kind === "blocked"
+        ) {
           throw unprocessable("Issue cannot be marked done because the latest run did not pass", {
             code: "issue_done_blocked_by_negative_run_verdict",
-            runId: latestTerminalRun.id,
-            verdict: latestVerdict.kind,
-            rawVerdict: latestVerdict.rawVerdict,
+            runId: latestAuthoritativeRun.run.id,
+            verdict: latestAuthoritativeRun.verdict.kind,
+            rawVerdict: latestAuthoritativeRun.verdict.rawVerdict,
           });
         }
       }
@@ -1174,7 +1260,10 @@ export function issueService(db: Db) {
           TERMINAL_HEARTBEAT_RUN_STATUSES.has(actorRun.status)
         ) {
           const actorVerdict = deriveHeartbeatRunBusinessVerdict(actorRun);
-          if (actorVerdict.kind === "changes_requested" || actorVerdict.kind === "blocked") {
+          if (
+            isAuthoritativeBusinessVerdict(actorVerdict) &&
+            (actorVerdict.kind === "changes_requested" || actorVerdict.kind === "blocked")
+          ) {
             throw unprocessable("Issue cannot be marked done because the actor run did not pass", {
               code: "issue_done_blocked_by_negative_run_verdict",
               runId: actorRun.id,
@@ -1333,6 +1422,7 @@ export function issueService(db: Db) {
         if (inputLabelIds) {
           await syncIssueLabels(issue.id, companyId, inputLabelIds, tx);
         }
+        await recomputeAncestorStatuses(tx, [issue.parentId]);
         const [enriched] = await withIssueLabels(tx, [issue]);
         return enriched;
       });
@@ -1438,6 +1528,9 @@ export function issueService(db: Db) {
         if (nextLabelIds !== undefined) {
           await syncIssueLabels(updated.id, existing.companyId, nextLabelIds, tx);
         }
+        if (issueData.status !== undefined || issueData.parentId !== undefined) {
+          await recomputeAncestorStatuses(tx, [existing.parentId, updated.parentId]);
+        }
         const [enriched] = await withIssueLabels(tx, [updated]);
         return enriched;
       });
@@ -1473,6 +1566,7 @@ export function issueService(db: Db) {
         }
 
         if (!removedIssue) return null;
+        await recomputeAncestorStatuses(tx, [removedIssue.parentId]);
         const [enriched] = await withIssueLabels(tx, [removedIssue]);
         return enriched;
       }),
@@ -1519,6 +1613,7 @@ export function issueService(db: Db) {
         .then((rows) => rows[0] ?? null);
 
       if (updated) {
+        await recomputeAncestorStatuses(db, [updated.parentId]);
         const [enriched] = await withIssueLabels(db, [updated]);
         return enriched;
       }
@@ -1562,7 +1657,10 @@ export function issueService(db: Db) {
           )
           .returning()
           .then((rows) => rows[0] ?? null);
-        if (adopted) return adopted;
+        if (adopted) {
+          await recomputeAncestorStatuses(db, [adopted.parentId]);
+          return adopted;
+        }
       }
 
       if (
@@ -1697,6 +1795,7 @@ export function issueService(db: Db) {
         .returning()
         .then((rows) => rows[0] ?? null);
       if (!updated) return null;
+      await recomputeAncestorStatuses(db, [updated.parentId]);
       const [enriched] = await withIssueLabels(db, [updated]);
       return enriched;
     },
