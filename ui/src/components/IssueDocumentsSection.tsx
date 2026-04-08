@@ -18,6 +18,14 @@ import { MarkdownBody } from "./MarkdownBody";
 import { MarkdownEditor, type MentionOption } from "./MarkdownEditor";
 import { OutputFeedbackButtons } from "./OutputFeedbackButtons";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import {
   DropdownMenu,
@@ -44,6 +52,16 @@ type DocumentConflictState = {
   serverDocument: IssueDocument;
   localDraft: DraftState;
   showRemote: boolean;
+};
+
+type PublishTargetMode = "parent" | "ancestors" | "siblings";
+
+type PublishDialogState = {
+  key: string;
+  title: string;
+  targetMode: PublishTargetMode;
+  requiredAction: string;
+  docsPath: string;
 };
 
 const DOCUMENT_AUTOSAVE_DEBOUNCE_MS = 900;
@@ -93,6 +111,10 @@ function downloadDocumentFile(key: string, body: string) {
   anchor.click();
   anchor.remove();
   URL.revokeObjectURL(url);
+}
+
+function getDefaultProjectDocsPath(key: string) {
+  return `docs/${key}.md`;
 }
 
 function getRevisionActorLabel(revision: DocumentRevision) {
@@ -156,10 +178,12 @@ export function IssueDocumentsSection({
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState<DraftState | null>(null);
   const [documentConflict, setDocumentConflict] = useState<DocumentConflictState | null>(null);
+  const [publishDraft, setPublishDraft] = useState<PublishDialogState | null>(null);
   const [foldedDocumentKeys, setFoldedDocumentKeys] = useState<string[]>(() => loadFoldedDocumentKeys(issue.id));
   const [autosaveDocumentKey, setAutosaveDocumentKey] = useState<string | null>(null);
   const [copiedDocumentKey, setCopiedDocumentKey] = useState<string | null>(null);
   const [highlightDocumentKey, setHighlightDocumentKey] = useState<string | null>(null);
+  const [publishMessage, setPublishMessage] = useState<string | null>(null);
   const [revisionMenuOpenKey, setRevisionMenuOpenKey] = useState<string | null>(null);
   const [selectedRevisionIds, setSelectedRevisionIds] = useState<Record<string, string | null>>({});
   const autosaveDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -240,6 +264,30 @@ export function IssueDocumentsSection({
       }),
   });
 
+  const publishDocument = useMutation({
+    mutationFn: async (currentPublishDraft: PublishDialogState) =>
+      issuesApi.publishArtifact(issue.id, {
+        artifact: { kind: "document", key: currentPublishDraft.key },
+        target: { mode: currentPublishDraft.targetMode },
+        requiredAction: currentPublishDraft.requiredAction.trim() || null,
+        syncToProjectDocs: currentPublishDraft.docsPath.trim()
+          ? { path: currentPublishDraft.docsPath.trim() }
+          : null,
+      }),
+    onSuccess: (result, variables) => {
+      const targetCount = result.publishedTo.length;
+      setPublishDraft(null);
+      setPublishMessage(
+        `Published ${variables.key} to ${targetCount} ${targetCount === 1 ? "issue" : "issues"}.`,
+      );
+      setError(null);
+      invalidateIssueDocuments();
+    },
+    onError: (err) => {
+      setError(err instanceof Error ? err.message : "Failed to publish handoff");
+    },
+  });
+
   const deleteDocument = useMutation({
     mutationFn: (key: string) => issuesApi.deleteDocument(issue.id, key),
     onSuccess: () => {
@@ -288,6 +336,18 @@ export function IssueDocumentsSection({
 
   const hasRealPlan = sortedDocuments.some((doc) => doc.key === "plan");
   const isEmpty = sortedDocuments.length === 0 && !issue.legacyPlanDocument;
+  const publishTargetOptions = useMemo(() => {
+    const options: Array<{ value: PublishTargetMode; label: string }> = [];
+    if (issue.parentId) {
+      options.push({ value: "parent", label: "Direct parent" });
+      options.push({ value: "siblings", label: "Sibling issues" });
+    }
+    if ((issue.ancestors?.length ?? 0) > 1) {
+      options.push({ value: "ancestors", label: "All ancestors" });
+    }
+    return options;
+  }, [issue.ancestors, issue.parentId]);
+  const canPublishDocuments = publishTargetOptions.length > 0;
   const newDocumentKeyError =
     draft?.isNew && draft.key.trim().length > 0 && !DOCUMENT_KEY_PATTERN.test(draft.key.trim())
       ? "Use lowercase letters, numbers, -, or _, and start with a letter or number."
@@ -342,6 +402,20 @@ export function IssueDocumentsSection({
     setDraft(null);
     setError(null);
   };
+
+  const openPublishDialog = useCallback((document: IssueDocument) => {
+    const defaultTarget = publishTargetOptions[0]?.value;
+    if (!defaultTarget) return;
+    setPublishDraft({
+      key: document.key,
+      title: document.title ?? document.key,
+      targetMode: defaultTarget,
+      requiredAction: "",
+      docsPath: getDefaultProjectDocsPath(document.key),
+    });
+    setPublishMessage(null);
+    setError(null);
+  }, [publishTargetOptions]);
 
   const commitDraft = useCallback(async (
     currentDraft: DraftState | null,
@@ -704,6 +778,7 @@ export function IssueDocumentsSection({
       )}
 
       {error && <p className="text-xs text-destructive">{error}</p>}
+      {publishMessage && <p className="text-xs text-muted-foreground">{publishMessage}</p>}
 
       {draft?.isNew && (
         <div
@@ -920,6 +995,12 @@ export function IssueDocumentsSection({
                         <DropdownMenuItem onClick={() => beginEdit(doc.key)}>
                           <FilePenLine className="h-3.5 w-3.5" />
                           Edit document
+                        </DropdownMenuItem>
+                      ) : null}
+                      {!isHistoricalPreview && canPublishDocuments ? (
+                        <DropdownMenuItem onClick={() => openPublishDialog(doc)}>
+                          <FileText className="h-3.5 w-3.5" />
+                          Publish handoff...
                         </DropdownMenuItem>
                       ) : null}
                       {!isHistoricalPreview ? <DropdownMenuSeparator /> : null}
@@ -1174,6 +1255,101 @@ export function IssueDocumentsSection({
           );
         })}
       </div>
+
+      <Dialog
+        open={Boolean(publishDraft)}
+        onOpenChange={(open) => {
+          if (!open && !publishDocument.isPending) {
+            setPublishDraft(null);
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Publish document handoff</DialogTitle>
+            <DialogDescription>
+              Publish {publishDraft?.title ?? "this document"} to structurally related issues without copying the source document itself.
+            </DialogDescription>
+          </DialogHeader>
+          {publishDraft ? (
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <label className="text-sm font-medium" htmlFor="publish-target-mode">Target issues</label>
+                <select
+                  id="publish-target-mode"
+                  className="border-input dark:bg-input/30 flex h-9 w-full rounded-md border bg-transparent px-3 py-2 text-sm shadow-xs outline-none"
+                  value={publishDraft.targetMode}
+                  onChange={(event) =>
+                    setPublishDraft((current) =>
+                      current
+                        ? { ...current, targetMode: event.target.value as PublishTargetMode }
+                        : current,
+                    )
+                  }
+                >
+                  {publishTargetOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium" htmlFor="publish-required-action">Required action</label>
+                <Input
+                  id="publish-required-action"
+                  value={publishDraft.requiredAction}
+                  onChange={(event) =>
+                    setPublishDraft((current) =>
+                      current
+                        ? { ...current, requiredAction: event.target.value }
+                        : current,
+                    )
+                  }
+                  placeholder="Optional: what should the receiving issue do next?"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium" htmlFor="publish-docs-path">Project docs path</label>
+                <Input
+                  id="publish-docs-path"
+                  value={publishDraft.docsPath}
+                  onChange={(event) =>
+                    setPublishDraft((current) =>
+                      current
+                        ? { ...current, docsPath: event.target.value }
+                        : current,
+                    )
+                  }
+                  placeholder="docs/prd.md"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Leave blank to skip syncing this document into the linked project workspace.
+                </p>
+              </div>
+            </div>
+          ) : null}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setPublishDraft(null)}
+              disabled={publishDocument.isPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                if (publishDraft) {
+                  publishDocument.mutate(publishDraft);
+                }
+              }}
+              disabled={publishDocument.isPending}
+            >
+              {publishDocument.isPending ? "Publishing..." : "Publish handoff"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

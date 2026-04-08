@@ -18,6 +18,42 @@ export type IssueUpdateResponse = Issue & {
   comment?: IssueComment | null;
 };
 
+export type PublishIssueArtifactTarget =
+  | { mode: "parent" }
+  | { mode: "ancestors" }
+  | { mode: "siblings"; includeSourceIssue?: boolean }
+  | { mode: "issues"; issueIds: string[] };
+
+export type PublishIssueArtifactRequest = {
+  artifact:
+    | { kind: "document"; key: string }
+    | { kind: "work_product"; workProductId: string };
+  target: PublishIssueArtifactTarget;
+  summary?: string | null;
+  requiredAction?: string | null;
+  syncToProjectDocs?: { path: string } | null;
+  wakeTargets?: boolean;
+};
+
+export type PublishIssueArtifactResponse = {
+  ok: true;
+  artifact: {
+    kind: "document" | "work_product";
+    title: string;
+    summary: string | null;
+  };
+  syncedProjectDocs: {
+    relativePath: string;
+    workspaceRoot: string;
+  } | null;
+  publishedTo: Array<{
+    issueId: string;
+    identifier: string | null;
+    workProductId: string;
+    commentId: string;
+  }>;
+};
+
 export const issuesApi = {
   list: (
     companyId: string,
@@ -112,6 +148,8 @@ export const issuesApi = {
   getDocument: (id: string, key: string) => api.get<IssueDocument>(`/issues/${id}/documents/${encodeURIComponent(key)}`),
   upsertDocument: (id: string, key: string, data: UpsertIssueDocument) =>
     api.put<IssueDocument>(`/issues/${id}/documents/${encodeURIComponent(key)}`, data),
+  publishArtifact: (id: string, data: PublishIssueArtifactRequest) =>
+    api.post<PublishIssueArtifactResponse>(`/issues/${id}/publish-artifact`, data),
   listDocumentRevisions: (id: string, key: string) =>
     api.get<DocumentRevision[]>(`/issues/${id}/documents/${encodeURIComponent(key)}/revisions`),
   restoreDocumentRevision: (id: string, key: string, revisionId: string) =>

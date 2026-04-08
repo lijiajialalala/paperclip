@@ -14,6 +14,7 @@ const mockIssuesApi = vi.hoisted(() => ({
   listDocumentRevisions: vi.fn(),
   restoreDocumentRevision: vi.fn(),
   upsertDocument: vi.fn(),
+  publishArtifact: vi.fn(),
   deleteDocument: vi.fn(),
   getDocument: vi.fn(),
 }));
@@ -73,6 +74,15 @@ vi.mock("@/components/ui/button", () => ({
   Button: ({ children, onClick, type = "button", ...props }: ComponentProps<"button">) => (
     <button type={type} onClick={onClick} {...props}>{children}</button>
   ),
+}));
+
+vi.mock("@/components/ui/dialog", () => ({
+  Dialog: ({ open, children }: { open?: boolean; children: React.ReactNode }) => (open ? <div>{children}</div> : null),
+  DialogContent: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  DialogHeader: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  DialogTitle: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  DialogDescription: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  DialogFooter: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
 }));
 
 vi.mock("@/components/ui/input", () => ({
@@ -202,7 +212,7 @@ function createRevision(overrides: Partial<DocumentRevision> = {}): DocumentRevi
   };
 }
 
-function createIssue(): Issue {
+function createIssue(overrides: Partial<Issue> = {}): Issue {
   return {
     id: "issue-1",
     identifier: "PAP-807",
@@ -241,6 +251,7 @@ function createIssue(): Issue {
     legacyPlanDocument: null,
     createdAt: new Date("2026-03-31T12:00:00.000Z"),
     updatedAt: new Date("2026-03-31T12:05:00.000Z"),
+    ...overrides,
   };
 }
 
@@ -375,6 +386,100 @@ describe("IssueDocumentsSection", () => {
 
     expect(container.textContent).toContain("Loaded plan body");
     expect(container.textContent).not.toContain("Markdown body");
+
+    await act(async () => {
+      root.unmount();
+    });
+    queryClient.clear();
+  });
+
+  it("publishes a document handoff from the document actions menu", async () => {
+    const document = createIssueDocument({
+      key: "prd",
+      title: "PRD",
+      body: "Product requirements",
+      latestRevisionId: "revision-prd",
+    });
+    const issue = createIssue({
+      parentId: "issue-parent",
+      ancestors: [
+        {
+          id: "issue-parent",
+          identifier: "PAP-800",
+          title: "Parent issue",
+          description: null,
+          status: "in_progress",
+          priority: "medium",
+          assigneeAgentId: null,
+          assigneeUserId: null,
+          projectId: null,
+          goalId: null,
+          project: null,
+          goal: null,
+        },
+      ],
+      planDocument: null,
+      documentSummaries: [document],
+    });
+    const root = createRoot(container);
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+        mutations: { retry: false },
+      },
+    });
+
+    mockIssuesApi.listDocuments.mockResolvedValue([document]);
+    mockIssuesApi.publishArtifact.mockResolvedValue({
+      ok: true,
+      artifact: { kind: "document", title: "PRD", summary: "Product requirements" },
+      syncedProjectDocs: { relativePath: "docs/prd.md", workspaceRoot: "C:/repo" },
+      publishedTo: [
+        {
+          issueId: "issue-parent",
+          identifier: "PAP-800",
+          workProductId: "wp-1",
+          commentId: "comment-1",
+        },
+      ],
+    });
+
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <IssueDocumentsSection issue={issue} canDeleteDocuments={false} />
+        </QueryClientProvider>,
+      );
+    });
+
+    await flush();
+    await flush();
+
+    const openPublishButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Publish handoff..."));
+    expect(openPublishButton).toBeTruthy();
+
+    await act(async () => {
+      openPublishButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    const publishButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.trim() === "Publish handoff");
+    expect(publishButton).toBeTruthy();
+
+    await act(async () => {
+      publishButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(mockIssuesApi.publishArtifact).toHaveBeenCalledWith(
+      "issue-1",
+      expect.objectContaining({
+        artifact: { kind: "document", key: "prd" },
+        target: { mode: "parent" },
+        syncToProjectDocs: { path: "docs/prd.md" },
+      }),
+    );
+    expect(container.textContent).toContain("Published prd to 1 issue.");
 
     await act(async () => {
       root.unmount();

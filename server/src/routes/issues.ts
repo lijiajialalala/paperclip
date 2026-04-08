@@ -1,3 +1,5 @@
+import fs from "node:fs/promises";
+import path from "node:path";
 import { Router, type Request, type Response } from "express";
 import multer from "multer";
 import { z } from "zod";
@@ -54,6 +56,40 @@ const MAX_ISSUE_COMMENT_LIMIT = 500;
 const updateIssueRouteSchema = updateIssueSchema.extend({
   interrupt: z.boolean().optional(),
 });
+const publishArtifactTargetSchema = z.discriminatedUnion("mode", [
+  z.object({ mode: z.literal("parent") }),
+  z.object({ mode: z.literal("ancestors") }),
+  z.object({
+    mode: z.literal("siblings"),
+    includeSourceIssue: z.boolean().optional().default(false),
+  }),
+  z.object({
+    mode: z.literal("issues"),
+    issueIds: z.array(z.string().uuid()).min(1),
+  }),
+]);
+const publishIssueArtifactSchema = z.object({
+  artifact: z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("document"),
+      key: issueDocumentKeySchema,
+    }),
+    z.object({
+      kind: z.literal("work_product"),
+      workProductId: z.string().uuid(),
+    }),
+  ]),
+  target: publishArtifactTargetSchema,
+  summary: z.string().trim().max(4000).optional().nullable(),
+  requiredAction: z.string().trim().max(1000).optional().nullable(),
+  syncToProjectDocs: z
+    .object({
+      path: z.string().trim().min(1).max(500),
+    })
+    .optional()
+    .nullable(),
+  wakeTargets: z.boolean().optional().default(true),
+});
 
 export function issueRoutes(
   db: Db,
@@ -84,6 +120,7 @@ export function issueRoutes(
   const documentsSvc = documentService(db);
   const routinesSvc = routineService(db);
   const feedbackExportService = opts?.feedbackExportService;
+  type IssueRecord = NonNullable<Awaited<ReturnType<typeof svc.getById>>>;
   const upload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: MAX_ATTACHMENT_BYTES, files: 1 },
@@ -107,6 +144,285 @@ export function issueRoutes(
       throw new HttpError(400, `Invalid ${field} query value`);
     }
     return parsed;
+  }
+
+  function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+
+  function normalizeProjectDocsRelativePath(rawPath: string) {
+    const trimmed = rawPath.trim().replace(/\\/g, "/");
+    if (!trimmed) {
+      throw new HttpError(400, "Project docs path is required.");
+    }
+    if (path.posix.isAbsolute(trimmed) || /^[a-zA-Z]:/.test(trimmed)) {
+      throw new HttpError(400, "Project docs path must be relative and stay under docs/.");
+    }
+    const normalized = path.posix.normalize(trimmed).replace(/^(\.\/)+/, "");
+    if (!normalized || normalized === "." || normalized === ".." || normalized.startsWith("../")) {
+      throw new HttpError(400, "Project docs path must stay under docs/.");
+    }
+    if (normalized.toLowerCase() === "docs" || !normalized.toLowerCase().startsWith("docs/")) {
+      throw new HttpError(400, "Project docs path must stay under docs/.");
+    }
+    return normalized;
+  }
+
+  function sanitizeSummaryText(value: string | null | undefined, fallback: string) {
+    const trimmed = value?.trim();
+    if (trimmed) return trimmed;
+    const compact = fallback.replace(/\s+/g, " ").trim();
+    if (!compact) return null;
+    return compact.length > 320 ? `${compact.slice(0, 320)}...` : compact;
+  }
+
+  function formatIssueReference(issue: {
+    identifier?: string | null;
+    id: string;
+    title?: string | null;
+  }) {
+    const reference = issue.identifier?.trim() || issue.id;
+    return issue.title ? `${reference} ${issue.title}` : reference;
+  }
+
+  function buildArtifactPublicationComment(input: {
+    sourceIssue: IssueRecord;
+    artifact:
+      | {
+          kind: "document";
+          title: string;
+          key: string;
+          revisionNumber: number;
+        }
+      | {
+          kind: "work_product";
+          title: string;
+          type: string;
+          sourceWorkProductId: string;
+        };
+    summary: string | null;
+    requiredAction: string | null;
+    syncedProjectDocsPath: string | null;
+  }) {
+    const lines = [
+      "## Artifact handoff",
+      "",
+      `- Source issue: ${formatIssueReference(input.sourceIssue)}`,
+      `- Artifact: ${input.artifact.title}`,
+      input.artifact.kind === "document"
+        ? `- Source document: key=${input.artifact.key}, revision=${input.artifact.revisionNumber}`
+        : `- Source work product: id=${input.artifact.sourceWorkProductId}, type=${input.artifact.type}`,
+    ];
+    if (input.requiredAction) {
+      lines.push(`- Required action: ${input.requiredAction}`);
+    }
+    if (input.syncedProjectDocsPath) {
+      lines.push(`- Project docs path: ${input.syncedProjectDocsPath}`);
+    }
+    lines.push("", "Summary:");
+    lines.push(input.summary ?? "No summary provided.");
+    lines.push(
+      "",
+      "Use the source issue reference above to read the full artifact before acting on this handoff.",
+    );
+    return lines.join("\n");
+  }
+
+  async function resolveProjectDocsRoot(issue: IssueRecord) {
+    if (issue.projectId) {
+      const project = await projectsSvc.getById(issue.projectId);
+      const workspaceFromIssue =
+        issue.projectWorkspaceId && project?.workspaces
+          ? project.workspaces.find(
+              (workspace) =>
+                workspace.id === issue.projectWorkspaceId
+                && typeof workspace.cwd === "string"
+                && workspace.cwd.trim().length > 0,
+            ) ?? null
+          : null;
+      const primaryWorkspace = project?.workspaces?.find(
+        (workspace) => workspace.isPrimary && typeof workspace.cwd === "string" && workspace.cwd.trim().length > 0,
+      ) ?? null;
+      const anyWorkspace = project?.workspaces?.find(
+        (workspace) => typeof workspace.cwd === "string" && workspace.cwd.trim().length > 0,
+      ) ?? null;
+      const projectCwd = workspaceFromIssue?.cwd ?? primaryWorkspace?.cwd ?? anyWorkspace?.cwd ?? null;
+      if (typeof projectCwd === "string" && projectCwd.trim().length > 0) {
+        return projectCwd.trim();
+      }
+    }
+
+    if (issue.executionWorkspaceId) {
+      const executionWorkspace = await executionWorkspacesSvc.getById(issue.executionWorkspaceId);
+      if (typeof executionWorkspace?.cwd === "string" && executionWorkspace.cwd.trim().length > 0) {
+        return executionWorkspace.cwd.trim();
+      }
+    }
+
+    return null;
+  }
+
+  async function syncDocumentToProjectDocs(input: {
+    issue: IssueRecord;
+    title: string | null;
+    body: string;
+    relativePath: string;
+  }) {
+    const normalizedRelativePath = normalizeProjectDocsRelativePath(input.relativePath);
+    const workspaceRoot = await resolveProjectDocsRoot(input.issue);
+    if (!workspaceRoot) {
+      throw new HttpError(
+        409,
+        "No local project workspace is available for docs sync. Link the issue to a project workspace first.",
+      );
+    }
+
+    const resolvedRoot = path.resolve(workspaceRoot);
+    const targetPath = path.resolve(resolvedRoot, ...normalizedRelativePath.split("/"));
+    const relativeFromRoot = path.relative(resolvedRoot, targetPath);
+    if (
+      !relativeFromRoot
+      || relativeFromRoot === "."
+      || relativeFromRoot.startsWith("..")
+      || path.isAbsolute(relativeFromRoot)
+    ) {
+      throw new HttpError(400, "Project docs path must stay under docs/.");
+    }
+
+    await fs.mkdir(path.dirname(targetPath), { recursive: true });
+    const content = input.body.endsWith("\n") ? input.body : `${input.body}\n`;
+    await fs.writeFile(targetPath, content, "utf8");
+
+    return {
+      workspaceRoot: resolvedRoot,
+      relativePath: normalizedRelativePath,
+      absolutePath: targetPath,
+      title: input.title ?? null,
+    };
+  }
+
+  async function resolvePublicationTargets(
+    sourceIssue: IssueRecord,
+    target: z.infer<typeof publishArtifactTargetSchema>,
+  ): Promise<IssueRecord[]> {
+    let candidates: IssueRecord[] = [];
+
+    if (target.mode === "parent") {
+      if (sourceIssue.parentId) {
+        const parentIssue = await svc.getById(sourceIssue.parentId);
+        if (parentIssue) candidates = [parentIssue];
+      }
+    } else if (target.mode === "ancestors") {
+      const ancestorSummaries = await svc.getAncestors(sourceIssue.id);
+      const resolvedAncestors = await Promise.all(ancestorSummaries.map((ancestor) => svc.getById(ancestor.id)));
+      candidates = resolvedAncestors.filter((candidate): candidate is IssueRecord => Boolean(candidate));
+    } else if (target.mode === "siblings") {
+      if (sourceIssue.parentId) {
+        const siblingSummaries = await svc.list(sourceIssue.companyId, { parentId: sourceIssue.parentId });
+        const resolvedSiblings = await Promise.all(siblingSummaries.map((sibling) => svc.getById(sibling.id)));
+        candidates = resolvedSiblings.filter((candidate): candidate is IssueRecord => Boolean(candidate));
+      }
+      if (target.includeSourceIssue !== true) {
+        candidates = candidates.filter((candidate) => candidate.id !== sourceIssue.id);
+      }
+    } else {
+      const resolved = await Promise.all(target.issueIds.map((issueId) => svc.getById(issueId)));
+      candidates = resolved.filter((candidate): candidate is IssueRecord => Boolean(candidate));
+      const missingIds = target.issueIds.filter((issueId) => !candidates.some((candidate) => candidate.id === issueId));
+      if (missingIds.length > 0) {
+        throw new HttpError(404, `Target issue not found: ${missingIds[0]}`);
+      }
+    }
+
+    const deduped = new Map<string, IssueRecord>();
+    for (const candidate of candidates) {
+      if (!candidate || candidate.companyId !== sourceIssue.companyId) {
+        throw new HttpError(422, "All publication targets must belong to the same company.");
+      }
+      if (candidate.id === sourceIssue.id) continue;
+      if (!deduped.has(candidate.id)) deduped.set(candidate.id, candidate);
+    }
+
+    const targets = Array.from(deduped.values());
+    if (targets.length === 0) {
+      throw new HttpError(422, "No publication targets were resolved from the requested target mode.");
+    }
+    return targets;
+  }
+
+  async function assertAgentArtifactPublicationAccess(
+    req: Request,
+    res: Response,
+    sourceIssue: IssueRecord,
+    target: z.infer<typeof publishArtifactTargetSchema>,
+    targetIssues: IssueRecord[],
+  ) {
+    if (req.actor.type !== "agent") return true;
+    const actorAgentId = req.actor.agentId;
+    if (!actorAgentId) {
+      res.status(403).json({ error: "Agent authentication required" });
+      return false;
+    }
+    if (sourceIssue.assigneeAgentId !== actorAgentId) {
+      res.status(403).json({ error: "Only the assigned agent can publish artifacts from this issue" });
+      return false;
+    }
+    if (!(await assertAgentRunCheckoutOwnership(req, res, sourceIssue))) return false;
+    if (target.mode !== "issues") return true;
+
+    const allowedTargetIds = new Set<string>();
+    if (sourceIssue.parentId) {
+      allowedTargetIds.add(sourceIssue.parentId);
+      const siblingSummaries = await svc.list(sourceIssue.companyId, { parentId: sourceIssue.parentId });
+      for (const sibling of siblingSummaries) {
+        if (sibling.id !== sourceIssue.id) {
+          allowedTargetIds.add(sibling.id);
+        }
+      }
+    }
+
+    const ancestorSummaries = await svc.getAncestors(sourceIssue.id);
+    for (const ancestor of ancestorSummaries) {
+      allowedTargetIds.add(ancestor.id);
+    }
+
+    const disallowedTarget = targetIssues.find((candidate) => !allowedTargetIds.has(candidate.id)) ?? null;
+    if (disallowedTarget) {
+      res.status(403).json({
+        error: "Agents can only publish artifacts to parent, ancestor, or sibling issues",
+      });
+      return false;
+    }
+    return true;
+  }
+
+  function extractHandoffMetadata(value: unknown) {
+    if (!isRecord(value)) return null;
+    const handoff = isRecord(value.handoff) ? value.handoff : null;
+    if (!handoff) return null;
+    return {
+      sourceIssueId: typeof handoff.sourceIssueId === "string" ? handoff.sourceIssueId : null,
+      artifactKind: typeof handoff.artifactKind === "string" ? handoff.artifactKind : null,
+      documentKey: typeof handoff.documentKey === "string" ? handoff.documentKey : null,
+      sourceWorkProductId: typeof handoff.sourceWorkProductId === "string" ? handoff.sourceWorkProductId : null,
+    };
+  }
+
+  function matchesHandoffProduct(
+    product: { metadata: Record<string, unknown> | null; provider: string; type: string },
+    input:
+      | { kind: "document"; sourceIssueId: string; documentKey: string }
+      | { kind: "work_product"; sourceIssueId: string; sourceWorkProductId: string },
+  ) {
+    if (product.provider !== "paperclip" || product.type !== "artifact") return false;
+    const metadata = extractHandoffMetadata(product.metadata);
+    if (!metadata || metadata.sourceIssueId !== input.sourceIssueId || metadata.artifactKind !== input.kind) {
+      return false;
+    }
+    if (input.kind === "document") {
+      return metadata.documentKey === input.documentKey;
+    }
+    return metadata.sourceWorkProductId === input.sourceWorkProductId;
   }
 
   async function runSingleFileUpload(req: Request, res: Response) {
@@ -631,6 +947,259 @@ export function issueRoutes(
     });
 
     res.status(result.created ? 201 : 200).json(doc);
+  });
+
+  router.post("/issues/:id/publish-artifact", validate(publishIssueArtifactSchema), async (req, res) => {
+    const id = req.params.id as string;
+    const sourceIssue = await svc.getById(id);
+    if (!sourceIssue) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+    assertCompanyAccess(req, sourceIssue.companyId);
+
+    const actor = getActorInfo(req);
+    const requestedSummary = req.body.summary?.trim() || null;
+    const requiredAction = req.body.requiredAction?.trim() || null;
+    const wakeTargets = req.body.wakeTargets !== false;
+    const targetIssues = await resolvePublicationTargets(sourceIssue, req.body.target);
+    if (!(await assertAgentArtifactPublicationAccess(req, res, sourceIssue, req.body.target, targetIssues))) {
+      return;
+    }
+
+    let syncedProjectDocs: Awaited<ReturnType<typeof syncDocumentToProjectDocs>> | null = null;
+    let artifactSummary: string | null = null;
+    let artifactTitle = "";
+    let artifactIdentity: { kind: "document"; sourceIssueId: string; documentKey: string } | { kind: "work_product"; sourceIssueId: string; sourceWorkProductId: string };
+    let artifactCommentDescriptor:
+      | {
+          kind: "document";
+          title: string;
+          key: string;
+          revisionNumber: number;
+        }
+      | {
+          kind: "work_product";
+          title: string;
+          type: string;
+          sourceWorkProductId: string;
+        };
+    let artifactUrl: string | null = null;
+    let artifactHealthStatus: "unknown" | "healthy" | "unhealthy" = "unknown";
+
+    if (req.body.artifact.kind === "document") {
+      const document = await documentsSvc.getIssueDocumentByKey(sourceIssue.id, req.body.artifact.key);
+      if (!document) {
+        res.status(404).json({ error: "Document not found" });
+        return;
+      }
+      if (req.body.syncToProjectDocs?.path) {
+        syncedProjectDocs = await syncDocumentToProjectDocs({
+          issue: sourceIssue,
+          title: document.title ?? null,
+          body: document.body ?? "",
+          relativePath: req.body.syncToProjectDocs.path,
+        });
+      }
+      artifactTitle = document.title ?? `Document: ${document.key}`;
+      artifactSummary = sanitizeSummaryText(requestedSummary, document.body ?? "");
+      artifactIdentity = {
+        kind: "document",
+        sourceIssueId: sourceIssue.id,
+        documentKey: document.key,
+      };
+      artifactCommentDescriptor = {
+        kind: "document",
+        title: artifactTitle,
+        key: document.key,
+        revisionNumber: document.latestRevisionNumber,
+      };
+    } else {
+      if (req.body.syncToProjectDocs?.path) {
+        res.status(400).json({ error: "Only document artifacts can be synced into project docs." });
+        return;
+      }
+      const workProduct = await workProductsSvc.getById(req.body.artifact.workProductId);
+      if (!workProduct || workProduct.issueId !== sourceIssue.id || workProduct.companyId !== sourceIssue.companyId) {
+        res.status(404).json({ error: "Work product not found on this issue" });
+        return;
+      }
+      artifactTitle = workProduct.title;
+      artifactSummary = sanitizeSummaryText(requestedSummary, workProduct.summary ?? workProduct.title);
+      artifactIdentity = {
+        kind: "work_product",
+        sourceIssueId: sourceIssue.id,
+        sourceWorkProductId: workProduct.id,
+      };
+      artifactCommentDescriptor = {
+        kind: "work_product",
+        title: workProduct.title,
+        type: workProduct.type,
+        sourceWorkProductId: workProduct.id,
+      };
+      artifactUrl = workProduct.url ?? null;
+      artifactHealthStatus = workProduct.healthStatus;
+    }
+
+    const publicationDetails: Array<{
+      issueId: string;
+      identifier: string | null;
+      workProductId: string;
+      commentId: string;
+    }> = [];
+
+    for (const targetIssue of targetIssues) {
+      const handoffMetadata = {
+        handoff: {
+          sourceIssueId: sourceIssue.id,
+          sourceIssueIdentifier: sourceIssue.identifier ?? null,
+          sourceIssueTitle: sourceIssue.title,
+          artifactKind: artifactIdentity.kind,
+          documentKey: artifactIdentity.kind === "document" ? artifactIdentity.documentKey : null,
+          sourceWorkProductId:
+            artifactIdentity.kind === "work_product" ? artifactIdentity.sourceWorkProductId : null,
+          requiredAction,
+          summary: artifactSummary,
+          syncedProjectDocsPath: syncedProjectDocs?.relativePath ?? null,
+          publishedBy: {
+            actorType: actor.actorType,
+            actorId: actor.actorId,
+            agentId: actor.agentId ?? null,
+            runId: actor.runId ?? null,
+          },
+          publishedAt: new Date().toISOString(),
+        },
+      };
+
+      const existingProducts = await workProductsSvc.listForIssue(targetIssue.id);
+      const existing = existingProducts.find((product) => matchesHandoffProduct(product, artifactIdentity)) ?? null;
+      const workProductPayload = {
+        projectId: targetIssue.projectId ?? sourceIssue.projectId ?? null,
+        executionWorkspaceId: null,
+        runtimeServiceId: null,
+        type: "artifact" as const,
+        provider: "paperclip",
+        externalId:
+          artifactIdentity.kind === "document"
+            ? `document:${sourceIssue.id}:${artifactIdentity.documentKey}:${targetIssue.id}`
+            : `work_product:${sourceIssue.id}:${artifactIdentity.sourceWorkProductId}:${targetIssue.id}`,
+        title: `Handoff: ${artifactTitle}`,
+        url: artifactUrl,
+        status: "ready_for_review" as const,
+        reviewState: "none" as const,
+        isPrimary: false,
+        healthStatus: artifactHealthStatus,
+        summary: artifactSummary,
+        metadata: handoffMetadata,
+        createdByRunId: actor.runId ?? null,
+      };
+      const publishedProduct = existing
+        ? await workProductsSvc.update(existing.id, workProductPayload)
+        : await workProductsSvc.createForIssue(targetIssue.id, targetIssue.companyId, workProductPayload);
+      if (!publishedProduct) {
+        res.status(422).json({ error: "Failed to create handoff work product" });
+        return;
+      }
+
+      const comment = await svc.addComment(
+        targetIssue.id,
+        buildArtifactPublicationComment({
+          sourceIssue,
+          artifact: artifactCommentDescriptor,
+          summary: artifactSummary,
+          requiredAction,
+          syncedProjectDocsPath: syncedProjectDocs?.relativePath ?? null,
+        }),
+        {
+          agentId: actor.agentId ?? undefined,
+          userId: actor.actorType === "user" ? actor.actorId : undefined,
+          runId: actor.runId,
+        },
+      );
+
+      await logActivity(db, {
+        companyId: targetIssue.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        action: existing ? "issue.artifact_handoff_updated" : "issue.artifact_handoff_created",
+        entityType: "issue",
+        entityId: targetIssue.id,
+        details: {
+          sourceIssueId: sourceIssue.id,
+          sourceIssueIdentifier: sourceIssue.identifier ?? null,
+          artifactKind: artifactIdentity.kind,
+          workProductId: publishedProduct.id,
+          commentId: comment.id,
+          syncedProjectDocsPath: syncedProjectDocs?.relativePath ?? null,
+        },
+      });
+
+      if (wakeTargets && targetIssue.assigneeAgentId) {
+        heartbeat
+          .wakeup(targetIssue.assigneeAgentId, {
+            source: "automation",
+            triggerDetail: "system",
+            reason: "artifact_published",
+            payload: {
+              issueId: targetIssue.id,
+              commentId: comment.id,
+              sourceIssueId: sourceIssue.id,
+              artifactKind: artifactIdentity.kind,
+            },
+            requestedByActorType: actor.actorType,
+            requestedByActorId: actor.actorId,
+            contextSnapshot: {
+              issueId: targetIssue.id,
+              sourceIssueId: sourceIssue.id,
+              artifactKind: artifactIdentity.kind,
+              wakeReason: "artifact_published",
+            },
+          })
+          .catch((err) => logger.warn({ err, targetIssueId: targetIssue.id }, "failed to wake assignee on artifact publication"));
+      }
+
+      publicationDetails.push({
+        issueId: targetIssue.id,
+        identifier: targetIssue.identifier ?? null,
+        workProductId: publishedProduct.id,
+        commentId: comment.id,
+      });
+    }
+
+    await logActivity(db, {
+      companyId: sourceIssue.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "issue.artifact_published",
+      entityType: "issue",
+      entityId: sourceIssue.id,
+      details: {
+        artifactKind: artifactIdentity.kind,
+        targetIssueIds: publicationDetails.map((entry) => entry.issueId),
+        syncedProjectDocsPath: syncedProjectDocs?.relativePath ?? null,
+      },
+    });
+
+    res.json({
+      ok: true,
+      artifact: {
+        kind: artifactIdentity.kind,
+        title: artifactTitle,
+        summary: artifactSummary,
+      },
+      syncedProjectDocs:
+        syncedProjectDocs
+          ? {
+              relativePath: syncedProjectDocs.relativePath,
+              workspaceRoot: syncedProjectDocs.workspaceRoot,
+            }
+          : null,
+      publishedTo: publicationDetails,
+    });
   });
 
   router.get("/issues/:id/documents/:key/revisions", async (req, res) => {
