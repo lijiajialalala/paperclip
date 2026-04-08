@@ -29,7 +29,7 @@ import { resolveCodexDesiredSkillNames } from "./skills.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const CODEX_ROLLOUT_NOISE_RE =
-  /^\d{4}-\d{2}-\d{2}T[^\s]+\s+ERROR\s+codex_core::rollout::list:\s+state db missing rollout path for thread\s+[a-z0-9-]+$/i;
+  /^\d{4}-\d{2}-\d{2}T[^\s]+\s+ERROR\s+codex_(core|rollout)::(?:rollout::)?list:\s+(?:state db (?:missing|returned stale) rollout path for thread|no rollout found for thread)\s+[a-z0-9-]+$/i;
 
 function stripCodexRolloutNoise(text: string): string {
   const parts = text.split(/\r?\n/);
@@ -130,7 +130,7 @@ async function pruneBrokenUnavailablePaperclipSkillSymlinks(
       continue;
     }
 
-    await fs.unlink(target).catch(() => {});
+    await fs.unlink(target).catch(() => { });
     await onLog(
       "stdout",
       `[paperclip] Removed stale Codex skill "${entry.name}" from ${skillsHome}\n`,
@@ -245,18 +245,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const agentHome = asString(workspaceContext.agentHome, "");
   const workspaceHints = Array.isArray(context.paperclipWorkspaces)
     ? context.paperclipWorkspaces.filter(
-        (value): value is Record<string, unknown> => typeof value === "object" && value !== null,
-      )
+      (value): value is Record<string, unknown> => typeof value === "object" && value !== null,
+    )
     : [];
   const runtimeServiceIntents = Array.isArray(context.paperclipRuntimeServiceIntents)
     ? context.paperclipRuntimeServiceIntents.filter(
-        (value): value is Record<string, unknown> => typeof value === "object" && value !== null,
-      )
+      (value): value is Record<string, unknown> => typeof value === "object" && value !== null,
+    )
     : [];
   const runtimeServices = Array.isArray(context.paperclipRuntimeServices)
     ? context.paperclipRuntimeServices.filter(
-        (value): value is Record<string, unknown> => typeof value === "object" && value !== null,
-      )
+      (value): value is Record<string, unknown> => typeof value === "object" && value !== null,
+    )
     : [];
   const runtimePrimaryUrl = asString(context.paperclipRuntimePrimaryUrl, "");
   const configuredCwd = asString(config.cwd, "");
