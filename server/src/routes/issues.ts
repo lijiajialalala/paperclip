@@ -2,8 +2,9 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { Router, type Request, type Response } from "express";
 import multer from "multer";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
-import type { Db } from "@paperclipai/db";
+import { activityLog, type Db } from "@paperclipai/db";
 import {
   addIssueCommentSchema,
   createIssueAttachmentMetadataSchema,
@@ -51,6 +52,8 @@ import { assertCompanyAccess, getActorInfo } from "./authz.js";
 import { shouldWakeAssigneeOnCheckout } from "./issues-checkout-wakeup.js";
 import { isAllowedContentType, MAX_ATTACHMENT_BYTES } from "../attachment-types.js";
 import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
+import { platformUnblockService } from "../services/platform-unblock.js";
+import { qaIssueStateService } from "../services/qa-issue-state.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
 const updateIssueRouteSchema = updateIssueSchema.extend({
@@ -119,7 +122,10 @@ export function issueRoutes(
   const workProductsSvc = workProductService(db);
   const documentsSvc = documentService(db);
   const routinesSvc = routineService(db);
+  const qaIssueState = qaIssueStateService(db);
+  const platformUnblock = platformUnblockService(db);
   const feedbackExportService = opts?.feedbackExportService;
+  const canQueryDb = typeof (db as { select?: unknown }).select === "function";
   type IssueRecord = NonNullable<Awaited<ReturnType<typeof svc.getById>>>;
   const upload = multer({
     storage: multer.memoryStorage(),
@@ -148,6 +154,29 @@ export function issueRoutes(
 
   function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+
+  async function getLatestCommentDeltaActivity(issueId: string) {
+    if (!canQueryDb) return null;
+    return db
+      .select({
+        action: activityLog.action,
+        createdAt: activityLog.createdAt,
+      })
+      .from(activityLog)
+      .where(
+        and(
+          eq(activityLog.entityType, "issue"),
+          eq(activityLog.entityId, issueId),
+          inArray(activityLog.action, [
+            "issue.comment_delta_read_succeeded",
+            "issue.comment_delta_read_failed",
+          ]),
+        ),
+      )
+      .orderBy(desc(activityLog.createdAt))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
   }
 
   function normalizeProjectDocsRelativePath(rawPath: string) {
@@ -798,11 +827,13 @@ export function issueRoutes(
         ? req.query.wakeCommentId.trim()
         : null;
 
-    const [{ project, goal }, ancestors, commentCursor, wakeComment] = await Promise.all([
+    const [{ project, goal }, ancestors, commentCursor, wakeComment, qaSummary, platformUnblockSummary] = await Promise.all([
       resolveIssueProjectAndGoal(issue),
       svc.getAncestors(issue.id),
       svc.getCommentCursor(issue.id),
       wakeCommentId ? svc.getComment(wakeCommentId) : null,
+      canQueryDb ? qaIssueState.getIssueQaSummary(issue.id) : Promise.resolve(null),
+      canQueryDb ? platformUnblock.getIssuePlatformUnblockSummary(issue.id) : Promise.resolve(null),
     ]);
 
     res.json({
@@ -847,10 +878,51 @@ export function issueRoutes(
           }
         : null,
       commentCursor,
+      qaSummary,
+      platformUnblockSummary,
       wakeComment:
         wakeComment && wakeComment.issueId === issue.id
           ? wakeComment
           : null,
+    });
+  });
+
+  router.get("/issues/:id/qa-summary", async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await svc.getById(id);
+    if (!issue) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+    assertCompanyAccess(req, issue.companyId);
+
+    const [qaSummary, platformUnblockSummary] = await Promise.all([
+      canQueryDb ? qaIssueState.getIssueQaSummary(issue.id) : Promise.resolve(null),
+      canQueryDb ? platformUnblock.getIssuePlatformUnblockSummary(issue.id) : Promise.resolve(null),
+    ]);
+
+    res.json({
+      issueId: issue.id,
+      qaSummary,
+      platformUnblockSummary,
+    });
+  });
+
+  router.get("/issues/:id/platform-unblock-summary", async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await svc.getById(id);
+    if (!issue) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+    assertCompanyAccess(req, issue.companyId);
+
+    const summary = canQueryDb
+      ? await platformUnblock.getIssuePlatformUnblockSummary(issue.id)
+      : null;
+    res.json({
+      issueId: issue.id,
+      platformUnblockSummary: summary,
     });
   });
 
@@ -2378,12 +2450,84 @@ export function issueRoutes(
       limitRaw && Number.isFinite(limitRaw) && limitRaw > 0
         ? Math.min(Math.floor(limitRaw), MAX_ISSUE_COMMENT_LIMIT)
         : null;
-    const comments = await svc.listComments(id, {
-      afterCommentId,
-      order,
-      limit,
-    });
-    res.json(comments);
+    const actor = getActorInfo(req);
+    const previousDeltaActivity =
+      afterCommentId
+        ? await getLatestCommentDeltaActivity(issue.id)
+        : null;
+
+    try {
+      const comments = await svc.listComments(id, {
+        afterCommentId,
+        order,
+        limit,
+      });
+
+      if (afterCommentId) {
+        const latestReturnedComment = order === "asc" ? (comments.at(-1) ?? null) : (comments[0] ?? null);
+        await logActivity(db, {
+          companyId: issue.companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+          action: "issue.comment_delta_read_succeeded",
+          entityType: "issue",
+          entityId: issue.id,
+          details: {
+            identifier: issue.identifier,
+            afterCommentId,
+            order,
+            limit,
+            returnedCount: comments.length,
+            latestReturnedCommentId: latestReturnedComment?.id ?? null,
+          },
+        });
+
+        if (previousDeltaActivity?.action === "issue.comment_delta_read_failed") {
+          await logActivity(db, {
+            companyId: issue.companyId,
+            actorType: "system",
+            actorId: "paperclip",
+            agentId: actor.agentId,
+            runId: actor.runId,
+            action: "issue.platform_recovered",
+            entityType: "issue",
+            entityId: issue.id,
+            details: {
+              identifier: issue.identifier,
+              recoveryKind: "comment_visibility_recovered",
+              recoveredBy: "comment_delta_read",
+              afterCommentId,
+            },
+          });
+        }
+      }
+
+      res.json(comments);
+    } catch (err) {
+      if (afterCommentId) {
+        await logActivity(db, {
+          companyId: issue.companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+          action: "issue.comment_delta_read_failed",
+          entityType: "issue",
+          entityId: issue.id,
+          details: {
+            identifier: issue.identifier,
+            afterCommentId,
+            order,
+            limit,
+            error: err instanceof Error ? err.message : String(err),
+          },
+        }).catch((logErr) =>
+          logger.warn({ err: logErr, issueId: issue.id }, "failed to log comment delta read failure"));
+      }
+      throw err;
+    }
   });
 
   router.get("/issues/:id/comments/:commentId", async (req, res) => {

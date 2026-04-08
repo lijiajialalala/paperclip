@@ -70,6 +70,8 @@ import {
   resolveDefaultAgentInstructionsBundleRole,
 } from "../services/default-agent-instructions.js";
 import { getTelemetryClient } from "../telemetry.js";
+import { platformUnblockService } from "../services/platform-unblock.js";
+import { qaIssueStateService } from "../services/qa-issue-state.js";
 
 export function agentRoutes(db: Db) {
   const DEFAULT_INSTRUCTIONS_PATH_KEYS: Record<string, string> = {
@@ -104,6 +106,9 @@ export function agentRoutes(db: Db) {
   const companySkills = companySkillService(db);
   const workspaceOperations = workspaceOperationService(db);
   const instanceSettings = instanceSettingsService(db);
+  const qaIssueState = qaIssueStateService(db);
+  const platformUnblock = platformUnblockService(db);
+  const canQueryDb = typeof (db as { select?: unknown }).select === "function";
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
 
   async function getCurrentUserRedactionOptions() {
@@ -2274,7 +2279,15 @@ export function agentRoutes(db: Db) {
       return;
     }
     assertCompanyAccess(req, run.companyId);
-    res.json(redactCurrentUserValue(run, await getCurrentUserRedactionOptions()));
+    const [issueWriteback, platformHint] = await Promise.all([
+      canQueryDb ? qaIssueState.getRunIssueWriteback(run.id) : Promise.resolve(null),
+      canQueryDb ? platformUnblock.getRunPlatformHint(run.id) : Promise.resolve(null),
+    ]);
+    res.json({
+      ...redactCurrentUserValue(run, await getCurrentUserRedactionOptions()),
+      issueWriteback,
+      platformHint,
+    });
   });
 
   router.post("/heartbeat-runs/:runId/cancel", async (req, res) => {

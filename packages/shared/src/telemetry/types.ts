@@ -41,4 +41,7 @@ export type TelemetryEventName =
   | "agent.first_heartbeat"
   | "agent.task_completed"
   | "error.handler_crash"
+  | "qa_terminal_runs_total"
+  | "qa_writeback_alerts_total"
+  | "qa_writebacks_total"
   | `plugin.${string}`;

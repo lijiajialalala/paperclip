@@ -33,6 +33,7 @@ import { budgetService, type BudgetEnforcementScope } from "./budgets.js";
 import { secretService } from "./secrets.js";
 import { resolveDefaultAgentWorkspaceDir, resolveManagedProjectWorkspaceDir } from "../home-paths.js";
 import { buildHeartbeatRunIssueComment, summarizeHeartbeatRunResultJson } from "./heartbeat-run-summary.js";
+import { qaWritebackService } from "./qa-writeback.js";
 import {
   buildWorkspaceReadyComment,
   cleanupExecutionWorkspaceArtifacts,
@@ -1293,6 +1294,7 @@ export function heartbeatService(db: Db) {
   const secretsSvc = secretService(db);
   const companySkills = companySkillService(db);
   const issuesSvc = issueService(db);
+  const qaWriteback = qaWritebackService(db);
   const executionWorkspacesSvc = executionWorkspaceService(db);
   const workspaceOperationsSvc = workspaceOperationService(db);
   const activeRunExecutions = new Set<string>();
@@ -1300,6 +1302,33 @@ export function heartbeatService(db: Db) {
     cancelWorkForScope: cancelBudgetScopeWork,
   };
   const budgets = budgetService(db, budgetHooks);
+
+  async function settleTerminalQaRunIfNeeded(input: {
+    run: typeof heartbeatRuns.$inferSelect;
+    agent: typeof agents.$inferSelect;
+    issueId: string | null;
+    skip?: boolean;
+  }) {
+    if (input.skip || !input.issueId || input.agent.role !== "qa") return null;
+    try {
+      return await qaWriteback.settleTerminalQaRun({
+        run: input.run,
+        runAgent: input.agent,
+        issueId: input.issueId,
+      });
+    } catch (err) {
+      logger.warn(
+        {
+          err,
+          runId: input.run.id,
+          issueId: input.issueId,
+          agentId: input.agent.id,
+        },
+        "failed to settle terminal QA run writeback",
+      );
+      return null;
+    }
+  }
 
   async function getAgent(agentId: string) {
     return db
@@ -3404,6 +3433,12 @@ export function heartbeatService(db: Db) {
             );
           }
         }
+        await settleTerminalQaRunIfNeeded({
+          run: finalizedRun,
+          agent,
+          issueId,
+          skip: retryResult.action === "retried",
+        });
         await releaseIssueExecutionAndPromote(finalizedRun);
       }
 
@@ -3504,6 +3539,12 @@ export function heartbeatService(db: Db) {
             ...(retryResult.retryEnqueueFailed ? { retryEnqueueFailed: true } : {}),
           },
         });
+        await settleTerminalQaRunIfNeeded({
+          run: failedRun,
+          agent,
+          issueId,
+          skip: retryResult.action === "retried",
+        });
 
         await updateRuntimeState(agent, failedRun, {
           exitCode: null,
@@ -3592,6 +3633,16 @@ export function heartbeatService(db: Db) {
                 ...(retryResult?.retryEnqueueFailed ? { retryEnqueueFailed: true } : {}),
               },
             }).catch(() => undefined);
+            const settlementAgent = retryAgent ?? await getAgent(run.agentId).catch(() => null);
+            if (settlementAgent) {
+              const failedRunContext = parseObject(failedRun.contextSnapshot);
+              await settleTerminalQaRunIfNeeded({
+                run: failedRun,
+                agent: settlementAgent,
+                issueId: readNonEmptyString(failedRunContext.issueId),
+                skip: retryResult?.action === "retried",
+              });
+            }
           }
           // Ensure the agent is not left stuck in "running" if the inner catch handler's
           // DB calls threw (e.g. a transient DB error in finalizeAgentStatus).
