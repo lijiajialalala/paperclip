@@ -183,6 +183,7 @@ When posting issue comments or writing issue descriptions, use concise markdown 
 - a short status line
 - bullets for what changed / what is blocked
 - links to related entities when available
+- **Language**: You MUST write all issue comments, descriptions, proposed plans, and user-facing communications entirely in **Chinese (简体中文)**. Your internal reasoning or code can remain in English, but any text posted to the Paperclip platform must be Chinese.
 
 **Ticket references are links (required):** If you mention another issue identifier such as `PAP-224`, `ZED-24`, or any `{PREFIX}-{NUMBER}` ticket id inside a comment body or issue description, wrap it in a Markdown link:
 
