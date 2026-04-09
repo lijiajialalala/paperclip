@@ -20,6 +20,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { instanceSettingsService } from "../services/instance-settings.ts";
+import { issueStatusTruthService } from "../services/issue-status-truth.ts";
 import { issueService } from "../services/issues.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
@@ -911,6 +912,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       verdict?: string | null;
       errorCode?: string | null;
       error?: string | null;
+      processLossRetryCount?: number;
       finishedAt?: Date | null;
       createdAt?: Date;
     }) {
@@ -931,6 +933,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
         resultJson: input.verdict ? { verdict: input.verdict } : {},
         errorCode: input.errorCode ?? null,
         error: input.error ?? null,
+        processLossRetryCount: input.processLossRetryCount ?? 0,
         startedAt: new Date(createdAt.getTime() - 60_000),
         finishedAt,
         createdAt,
@@ -1205,6 +1208,133 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
         }),
       ).resolves.toBeUndefined();
     });
+
+    it("blocks agent-driven done transitions when status truth is drifted", async () => {
+      const { companyId, agentId, issueId } = await seedDoneGuardFixture();
+
+      await db
+        .update(issues)
+        .set({
+          status: "in_progress",
+          updatedAt: new Date("2026-04-05T16:10:00.000Z"),
+        })
+        .where(eq(issues.id, issueId));
+
+      await db.insert(activityLog).values({
+        companyId,
+        actorType: "system",
+        actorId: "paperclip",
+        action: "issue.updated",
+        entityType: "issue",
+        entityId: issueId,
+        createdAt: new Date("2026-04-05T16:05:00.000Z"),
+        details: {
+          status: "blocked",
+          _previous: { status: "todo" },
+        },
+      });
+
+      await expect(
+        svc.assertCanTransitionIssueToDone({
+          issueId,
+          companyId,
+          actorType: "agent",
+          actorAgentId: agentId,
+          actorRunId: null,
+        }),
+      ).rejects.toMatchObject({
+        status: 422,
+        details: expect.objectContaining({
+          code: "issue_done_blocked_by_status_truth",
+          effectiveStatus: "blocked",
+          persistedStatus: "in_progress",
+          authoritativeStatus: "blocked",
+          consistency: "drifted",
+        }),
+      });
+    });
+
+    it("blocks agent-driven done transitions when QA writeback still forbids close-out", async () => {
+      const { companyId, agentId, issueId } = await seedDoneGuardFixture();
+      const qaAgentId = randomUUID();
+      const qaRunId = randomUUID();
+
+      await db.insert(agents).values({
+        id: qaAgentId,
+        companyId,
+        name: "QA Agent",
+        role: "qa",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      });
+
+      await insertIssueRun({
+        companyId,
+        agentId: qaAgentId,
+        issueId,
+        runId: qaRunId,
+        status: "failed",
+        errorCode: null,
+        error: "qa fail",
+        verdict: "fail",
+        createdAt: new Date("2026-04-05T16:05:00.000Z"),
+      });
+
+      await expect(
+        svc.assertCanTransitionIssueToDone({
+          issueId,
+          companyId,
+          actorType: "agent",
+          actorAgentId: agentId,
+          actorRunId: null,
+        }),
+      ).rejects.toMatchObject({
+        status: 422,
+        details: expect.objectContaining({
+          code: "issue_done_blocked_by_qa_writeback",
+          latestRunId: qaRunId,
+          verdict: "fail",
+          canCloseUpstream: false,
+        }),
+      });
+    });
+
+    it("blocks agent-driven done transitions when a runtime platform unblock is active", async () => {
+      const { companyId, agentId, issueId } = await seedDoneGuardFixture();
+      const actorRunId = randomUUID();
+
+      await insertIssueRun({
+        companyId,
+        agentId,
+        issueId,
+        runId: actorRunId,
+        status: "failed",
+        errorCode: "process_lost",
+        error: "process lost",
+        processLossRetryCount: 1,
+        createdAt: new Date("2026-04-05T16:05:00.000Z"),
+      });
+
+      await expect(
+        svc.assertCanTransitionIssueToDone({
+          issueId,
+          companyId,
+          actorType: "agent",
+          actorAgentId: agentId,
+          actorRunId,
+        }),
+      ).rejects.toMatchObject({
+        status: 422,
+        details: expect.objectContaining({
+          code: "issue_done_blocked_by_platform_unblock",
+          primaryCategory: "runtime_process",
+          canRetryEngineering: false,
+        }),
+      });
+    });
   });
 
   describe("ancestor status recomputation", () => {
@@ -1301,6 +1431,76 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
 
       expect(parent?.status).toBe("done");
       expect(root?.status).toBe("done");
+    });
+
+    it("records status activity for recomputed ancestors so status truth stays consistent", async () => {
+      const { companyId, rootId, parentId, childId } = await seedAncestorFixture({
+        rootStatus: "blocked",
+        parentStatus: "blocked",
+        childStatus: "in_review",
+      });
+
+      await db.insert(activityLog).values([
+        {
+          companyId,
+          actorType: "system",
+          actorId: "paperclip",
+          action: "issue.updated",
+          entityType: "issue",
+          entityId: rootId,
+          createdAt: new Date("2026-04-05T16:00:00.000Z"),
+          details: {
+            status: "blocked",
+            _previous: { status: "todo" },
+          },
+        },
+        {
+          companyId,
+          actorType: "system",
+          actorId: "paperclip",
+          action: "issue.updated",
+          entityType: "issue",
+          entityId: parentId,
+          createdAt: new Date("2026-04-05T16:00:00.000Z"),
+          details: {
+            status: "blocked",
+            _previous: { status: "todo" },
+          },
+        },
+      ]);
+
+      await svc.update(childId, { status: "done" });
+
+      const parentSummary = await issueStatusTruthService(db).getIssueStatusTruthSummary(parentId);
+      const rootSummary = await issueStatusTruthService(db).getIssueStatusTruthSummary(rootId);
+      const recomputeActivities = await db
+        .select({
+          entityId: activityLog.entityId,
+          status: activityLog.details,
+        })
+        .from(activityLog)
+        .where(eq(activityLog.action, "issue.updated"));
+
+      expect(parentSummary).toEqual(expect.objectContaining({
+        effectiveStatus: "done",
+        persistedStatus: "done",
+        authoritativeStatus: "done",
+        consistency: "consistent",
+      }));
+      expect(rootSummary).toEqual(expect.objectContaining({
+        effectiveStatus: "done",
+        persistedStatus: "done",
+        authoritativeStatus: "done",
+        consistency: "consistent",
+      }));
+      expect(
+        recomputeActivities.filter((entry) => {
+          const details = entry.status as Record<string, unknown> | null;
+          return (entry.entityId === parentId || entry.entityId === rootId)
+            && details?.source === "ancestor_recompute"
+            && details?.status === "done";
+        }),
+      ).toHaveLength(2);
     });
   });
 });

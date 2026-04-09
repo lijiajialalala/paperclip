@@ -185,4 +185,85 @@ describe("issue QA summary routes", () => {
       primaryCategory: "qa_writeback_gate",
     }));
   });
+
+  it("surfaces qa summary and platform summary in issue detail", async () => {
+    const res = await request(createApp()).get(`/api/issues/${issueId}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("blocked");
+    expect(res.body.statusTruthSummary).toEqual(expect.objectContaining({
+      effectiveStatus: "blocked",
+      consistency: "drifted",
+    }));
+    expect(res.body.qaSummary).toEqual(expect.objectContaining({
+      verdict: "fail",
+      latestRunId: "run-qa-1",
+    }));
+    expect(res.body.platformUnblockSummary).toEqual(expect.objectContaining({
+      primaryCategory: "qa_writeback_gate",
+      canRetryEngineering: false,
+    }));
+  });
+
+  it("adds platform summaries to issue lists when requested", async () => {
+    const res = await request(createApp()).get(`/api/companies/${companyId}/issues?includePlatformUnblock=true`);
+
+    expect(res.status).toBe(200);
+    expect(mockIssueService.list).toHaveBeenCalledWith(companyId, expect.objectContaining({
+      status: undefined,
+      assigneeAgentId: undefined,
+      participantAgentId: undefined,
+      q: undefined,
+    }));
+    expect(mockPlatformUnblock.listIssuePlatformUnblockSummaries).toHaveBeenCalledWith([issueId]);
+    expect(res.body).toEqual([
+      expect.objectContaining({
+        id: issueId,
+        statusTruthSummary: expect.objectContaining({
+          effectiveStatus: "blocked",
+          consistency: "drifted",
+        }),
+        platformUnblockSummary: expect.objectContaining({
+          primaryCategory: "qa_writeback_gate",
+          canRetryEngineering: false,
+        }),
+      }),
+    ]);
+  });
+
+  it("filters issue lists by effective status instead of persisted row status", async () => {
+    mockIssueService.list.mockResolvedValueOnce([
+      {
+        id: issueId,
+        companyId,
+        identifier: "CMPA-39",
+        title: "QA verification",
+        status: "in_progress",
+        priority: "high",
+        goalId: null,
+        parentId: null,
+        projectId: null,
+        assigneeAgentId: null,
+        assigneeUserId: null,
+        updatedAt: new Date("2026-04-08T00:00:00.000Z"),
+      },
+    ]);
+
+    const res = await request(createApp()).get(`/api/companies/${companyId}/issues?status=blocked`);
+
+    expect(res.status).toBe(200);
+    expect(mockIssueService.list).toHaveBeenCalledWith(companyId, expect.objectContaining({
+      status: undefined,
+    }));
+    expect(res.body).toEqual([
+      expect.objectContaining({
+        id: issueId,
+        status: "blocked",
+        statusTruthSummary: expect.objectContaining({
+          effectiveStatus: "blocked",
+          consistency: "drifted",
+        }),
+      }),
+    ]);
+  });
 });

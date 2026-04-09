@@ -666,6 +666,10 @@ export function issueRoutes(
   router.get("/companies/:companyId/issues", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
+    const includePlatformUnblock = parseBooleanQuery(req.query.includePlatformUnblock);
+    const requestedStatusFilter = typeof req.query.status === "string" && req.query.status.trim().length > 0
+      ? new Set(req.query.status.split(",").map((status) => status.trim()).filter(Boolean))
+      : null;
     const assigneeUserFilterRaw = req.query.assigneeUserId as string | undefined;
     const touchedByUserFilterRaw = req.query.touchedByUserId as string | undefined;
     const inboxArchivedByUserFilterRaw = req.query.inboxArchivedByUserId as string | undefined;
@@ -705,7 +709,7 @@ export function issueRoutes(
     }
 
     const result = await svc.list(companyId, {
-      status: req.query.status as string | undefined,
+      status: canQueryDb && requestedStatusFilter ? undefined : req.query.status as string | undefined,
       assigneeAgentId: req.query.assigneeAgentId as string | undefined,
       participantAgentId: req.query.participantAgentId as string | undefined,
       assigneeUserId,
@@ -722,7 +726,33 @@ export function issueRoutes(
         req.query.includeRoutineExecutions === "true" || req.query.includeRoutineExecutions === "1",
       q: req.query.q as string | undefined,
     });
-    res.json(result);
+
+    if (!canQueryDb || result.length === 0) {
+      res.json(result);
+      return;
+    }
+
+    const [statusSummaries, platformSummaries] = await Promise.all([
+      getStatusTruthSummaries(result.map((issue) => issue.id)),
+      includePlatformUnblock
+        ? platformUnblock.listIssuePlatformUnblockSummaries(result.map((issue) => issue.id))
+        : Promise.resolve(new Map()),
+    ]);
+
+    const serializedIssues = result.map((issue) => {
+      const serialized = applyEffectiveStatus(issue, statusSummaries.get(issue.id) ?? null);
+      if (!includePlatformUnblock) return serialized;
+      return {
+        ...serialized,
+        platformUnblockSummary: platformSummaries.get(issue.id) ?? null,
+      };
+    });
+
+    res.json(
+      requestedStatusFilter
+        ? serializedIssues.filter((issue) => requestedStatusFilter.has(issue.status))
+        : serializedIssues,
+    );
   });
 
   router.get("/companies/:companyId/labels", async (req, res) => {

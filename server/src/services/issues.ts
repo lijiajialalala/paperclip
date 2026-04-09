@@ -23,6 +23,7 @@ import {
 } from "@paperclipai/db";
 import { extractAgentMentionIds, extractProjectMentionIds, isUuidLike } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
+import { logActivity } from "./activity-log.js";
 import { deriveHeartbeatRunBusinessVerdict } from "./heartbeat-run-verdict.js";
 import {
   defaultIssueExecutionWorkspaceSettingsForProject,
@@ -30,7 +31,10 @@ import {
   issueExecutionWorkspaceModeForPersistedWorkspace,
   parseProjectExecutionWorkspacePolicy,
 } from "./execution-workspace-policy.js";
+import { issueStatusTruthService } from "./issue-status-truth.js";
 import { instanceSettingsService } from "./instance-settings.js";
+import { platformUnblockService } from "./platform-unblock.js";
+import { qaIssueStateService } from "./qa-issue-state.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { resolveIssueGoalId, resolveNextIssueGoalId } from "./issue-goal-fallback.js";
 import { getDefaultCompanyGoal } from "./goals.js";
@@ -210,12 +214,20 @@ async function recomputeAncestorStatuses(
     const parent = await dbOrTx
       .select({
         id: issues.id,
+        companyId: issues.companyId,
+        identifier: issues.identifier,
         parentId: issues.parentId,
         status: issues.status,
       })
       .from(issues)
       .where(eq(issues.id, issueId))
-      .then((rows: Array<{ id: string; parentId: string | null; status: string }>) => rows[0] ?? null);
+      .then((rows: Array<{
+        id: string;
+        companyId: string;
+        identifier: string | null;
+        parentId: string | null;
+        status: string;
+      }>) => rows[0] ?? null);
     if (!parent) continue;
 
     const children = await dbOrTx
@@ -242,6 +254,21 @@ async function recomputeAncestorStatuses(
         .update(issues)
         .set(patch)
         .where(eq(issues.id, issueId));
+
+      await logActivity(dbOrTx, {
+        companyId: parent.companyId,
+        actorType: "system",
+        actorId: "paperclip",
+        action: "issue.updated",
+        entityType: "issue",
+        entityId: issueId,
+        details: {
+          identifier: parent.identifier,
+          status: nextStatus,
+          source: "ancestor_recompute",
+          _previous: { status: parent.status },
+        },
+      });
     }
 
     if (parent.parentId) queue.push(parent.parentId);
@@ -614,6 +641,9 @@ function withActiveRuns(
 
 export function issueService(db: Db) {
   const instanceSettings = instanceSettingsService(db);
+  const statusTruth = issueStatusTruthService(db);
+  const qaIssueState = qaIssueStateService(db);
+  const platformUnblock = platformUnblockService(db);
 
   async function getIssueByUuid(id: string) {
     const row = await db
@@ -1271,6 +1301,42 @@ export function issueService(db: Db) {
               rawVerdict: actorVerdict.rawVerdict,
             });
           }
+        }
+      }
+
+      if (input.actorType !== "board") {
+        const statusSummary = await statusTruth.getIssueStatusTruthSummary(input.issueId);
+        if (statusSummary?.canClose === false) {
+          throw unprocessable("Issue cannot be marked done because status truth indicates it is not closable", {
+            code: "issue_done_blocked_by_status_truth",
+            effectiveStatus: statusSummary.effectiveStatus,
+            persistedStatus: statusSummary.persistedStatus,
+            authoritativeStatus: statusSummary.authoritativeStatus,
+            consistency: statusSummary.consistency,
+            driftCode: statusSummary.driftCode,
+          });
+        }
+
+        const qaSummary = await qaIssueState.getIssueQaSummary(input.issueId);
+        if (qaSummary?.canCloseUpstream === false) {
+          throw unprocessable("Issue cannot be marked done because QA writeback still blocks close-out", {
+            code: "issue_done_blocked_by_qa_writeback",
+            latestRunId: qaSummary.latestRunId,
+            verdict: qaSummary.verdict,
+            alertType: qaSummary.alertType,
+            canCloseUpstream: qaSummary.canCloseUpstream,
+          });
+        }
+
+        const platformSummary = await platformUnblock.getIssuePlatformUnblockSummary(input.issueId);
+        if (platformSummary?.canRetryEngineering === false) {
+          throw unprocessable("Issue cannot be marked done because a platform unblock is still active", {
+            code: "issue_done_blocked_by_platform_unblock",
+            primaryCategory: platformSummary.primaryCategory,
+            authoritativeSignalSource: platformSummary.authoritativeSignalSource,
+            authoritativeRunId: platformSummary.authoritativeRunId,
+            canRetryEngineering: platformSummary.canRetryEngineering,
+          });
         }
       }
     },
