@@ -382,6 +382,8 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
           completedAt: null,
           cancelledAt: null,
           hiddenAt: null,
+          planProposedAt: null,
+          planApprovedAt: null,
           createdAt: now,
           updatedAt: now,
         };

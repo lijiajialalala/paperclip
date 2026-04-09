@@ -32,7 +32,7 @@ import {
   type OptimisticIssueComment,
 } from "../lib/optimistic-issue-comments";
 import { useProjectOrder } from "../hooks/useProjectOrder";
-import { relativeTime, cn, formatTokens, visibleRunCostUsd } from "../lib/utils";
+import { relativeTime, cn, formatDateTime, formatTokens, visibleRunCostUsd } from "../lib/utils";
 import { InlineEditor } from "../components/InlineEditor";
 import { CommentThread } from "../components/CommentThread";
 import { IssueDocumentsSection } from "../components/IssueDocumentsSection";
@@ -57,6 +57,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Activity as ActivityIcon,
+  AlertTriangle,
   Check,
   ChevronDown,
   ChevronRight,
@@ -135,6 +136,142 @@ function usageNumber(usage: Record<string, unknown> | null, ...keys: string[]) {
     if (typeof value === "number" && Number.isFinite(value)) return value;
   }
   return 0;
+}
+
+function resolveTruthSummaryActorLabel(
+  summary: NonNullable<Issue["statusTruthSummary"]>,
+  agentMap: Map<string, Agent>,
+): string {
+  if (!summary.authoritativeActorType) return "Unknown";
+  if (summary.authoritativeActorType === "system") return "System";
+  if (summary.authoritativeActorType === "agent") {
+    if (!summary.authoritativeActorId) return "Agent";
+    return agentMap.get(summary.authoritativeActorId)?.name ?? `Agent ${summary.authoritativeActorId}`;
+  }
+  return summary.authoritativeActorId ?? "User";
+}
+
+export function IssueTruthfulnessBanner({
+  issue,
+  agentMap,
+}: {
+  issue: Issue;
+  agentMap: Map<string, Agent>;
+}) {
+  const summary = issue.statusTruthSummary;
+  if (!summary) return null;
+
+  const isDrifted = summary.consistency === "drifted";
+  const isGuarded = isDrifted || !summary.canExecute || !summary.canClose;
+  const actorLabel = resolveTruthSummaryActorLabel(summary, agentMap);
+  const evidence = summary.evidence ?? [];
+  const bannerTitle = isDrifted
+    ? "Status truth drift detected"
+    : isGuarded
+      ? "Status truth is blocking action"
+      : "Status truth is aligned";
+  const bannerSummary = isDrifted
+    ? "Current display has been corrected to the authoritative status rather than the persisted issue row."
+    : isGuarded
+      ? "This issue should not be treated as executable or closable until the authoritative status changes."
+      : "Current status, audit trail, and close/execute signals are aligned.";
+
+  return (
+    <div
+      data-testid="issue-truthfulness-banner"
+      className={cn(
+        "space-y-3 rounded-lg border px-4 py-3",
+        isGuarded
+          ? "border-amber-500/30 bg-amber-500/10"
+          : "border-emerald-500/30 bg-emerald-500/10",
+      )}
+    >
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            {isGuarded ? (
+              <AlertTriangle className="h-4 w-4 text-amber-600 dark:text-amber-300" />
+            ) : (
+              <Check className="h-4 w-4 text-emerald-600 dark:text-emerald-300" />
+            )}
+            <p className="text-sm font-semibold text-foreground">{bannerTitle}</p>
+          </div>
+          <p className="text-sm text-muted-foreground">{bannerSummary}</p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <span
+            className={cn(
+              "inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium",
+              summary.canExecute
+                ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
+                : "bg-amber-500/15 text-amber-700 dark:text-amber-300",
+            )}
+          >
+            {summary.canExecute ? "Execution allowed" : "Execution blocked"}
+          </span>
+          <span
+            className={cn(
+              "inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium",
+              summary.canClose
+                ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
+                : "bg-amber-500/15 text-amber-700 dark:text-amber-300",
+            )}
+          >
+            {summary.canClose ? "Close allowed" : "Close blocked"}
+          </span>
+        </div>
+      </div>
+
+      <div className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
+        <div className="space-y-1">
+          <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Effective status</p>
+          <StatusBadge status={issue.status} />
+        </div>
+        <div className="space-y-1">
+          <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Persisted status</p>
+          <StatusBadge status={summary.persistedStatus} />
+        </div>
+        <div className="space-y-1">
+          <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Consistency</p>
+          <p className="capitalize text-foreground">{summary.consistency}</p>
+        </div>
+        <div className="space-y-1">
+          <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Authoritative time</p>
+          <p className="text-foreground">
+            {summary.authoritativeAt
+              ? `${formatDateTime(summary.authoritativeAt)} (${relativeTime(summary.authoritativeAt)})`
+              : "Unknown"}
+          </p>
+        </div>
+        <div className="space-y-1">
+          <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Authoritative actor</p>
+          <p className="text-foreground">{actorLabel}</p>
+        </div>
+        <div className="space-y-1">
+          <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Reason summary</p>
+          <p className="text-foreground">{summary.reasonSummary ?? "No reason summary provided."}</p>
+        </div>
+      </div>
+
+      {evidence.length > 0 ? (
+        <div className="space-y-1">
+          <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Evidence</p>
+          <div className="flex flex-wrap gap-2">
+            {evidence.map((entry) => (
+              <Link
+                key={`${entry.kind}:${entry.href}:${entry.label}`}
+                to={entry.href}
+                className="inline-flex items-center rounded-full border border-border/70 bg-background/70 px-2 py-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
+                title={entry.at ? formatDateTime(entry.at) : undefined}
+              >
+                {entry.label}
+              </Link>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function truncate(text: string, max: number): string {
@@ -890,6 +1027,25 @@ export function IssueDetail() {
     },
   });
 
+  const approvePlan = useMutation({
+    mutationFn: () => issuesApi.approvePlan(issueId!),
+    onSuccess: (data) => {
+      invalidateIssue();
+      pushToast({ title: "Plan approved", tone: "success" });
+    },
+    onError: (err) => pushToast({ title: "Approval failed", body: err instanceof Error ? err.message : "Unknown error", tone: "error" }),
+  });
+
+  const rejectPlan = useMutation({
+    mutationFn: (feedback: string) => issuesApi.rejectPlan(issueId!, feedback),
+    onSuccess: (data) => {
+      invalidateIssue();
+      queryClient.invalidateQueries({ queryKey: queryKeys.issues.comments(issueId!) });
+      pushToast({ title: "Plan rejected", tone: "success" });
+    },
+    onError: (err) => pushToast({ title: "Rejection failed", body: err instanceof Error ? err.message : "Unknown error", tone: "error" }),
+  });
+
   const uploadAttachment = useMutation({
     mutationFn: async (file: File) => {
       if (!selectedCompanyId) throw new Error("No company selected");
@@ -1332,6 +1488,66 @@ export function IssueDetail() {
           }}
         />
       </div>
+
+      <IssueTruthfulnessBanner issue={issue} agentMap={agentMap} />
+
+      {issue.planProposedAt && !issue.planApprovedAt && (
+        <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 space-y-4">
+          <div className="flex items-start gap-3">
+            <Check className="mt-0.5 h-5 w-5 text-primary" />
+            <div className="space-y-1">
+              <h4 className="text-sm font-semibold text-foreground">Plan Pending Review</h4>
+              <p className="text-sm text-muted-foreground">
+                A plan has been proposed for this issue. Review the plan in the comments below.
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              onClick={() => approvePlan.mutate()}
+              disabled={approvePlan.isPending || rejectPlan.isPending}
+            >
+              Approve Plan
+            </Button>
+            <Popover>
+              <PopoverTrigger asChild>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={approvePlan.isPending || rejectPlan.isPending}
+                >
+                  Reject Plan
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent className="w-80 p-4" align="start">
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const formData = new FormData(e.currentTarget);
+                    const feedback = formData.get("feedback") as string;
+                    if (feedback.trim()) rejectPlan.mutate(feedback.trim());
+                  }}
+                  className="space-y-3"
+                >
+                  <div className="space-y-2">
+                    <h4 className="font-medium text-sm">Provide feedback</h4>
+                    <textarea
+                      name="feedback"
+                      className="w-full min-h-[100px] border rounded-md p-2 text-sm bg-background"
+                      placeholder="Why is this rejected? What should they change?"
+                      required
+                    />
+                  </div>
+                  <Button type="submit" size="sm" className="w-full" disabled={rejectPlan.isPending}>
+                    Submit Rejection
+                  </Button>
+                </form>
+              </PopoverContent>
+            </Popover>
+          </div>
+        </div>
+      )}
 
       <PluginSlotOutlet
         slotTypes={["toolbarButton", "contextMenuItem"]}

@@ -221,12 +221,21 @@ Submitted CTO hire request and linked it for board review.
 
 As a strict company policy, you MUST propose a plan before executing any task, unless the user explicitly bypasses this requirement. This applies to ALL types of work — including delegation, task decomposition, and architecture decisions, not only code changes. If your work is to break a task into subtasks and delegate them, that is still "execution" and requires a plan first.
 
-Workflow:
+### Proactive Clarification (Anti-Hallucination Rule)
+Before proposing a plan or attempting to execute a task, you MUST evaluate if the requirements are clear, structured, and complete. If the initial request is vague (e.g., "build a tetris game" with no mention of tech stack, styling rules, or mechanics), DO NOT guess or hallucinate requirements.
+Instead:
+1. **Identify your supervisor:** If your task is a subtask (has a `parentId`), your supervisor is the assignee of that parent issue. If you are at the top level, your supervisor is the human User (Board). **DO NOT ping the top-level User unless you are a top-level agent or your immediate manager failed to answer.**
+2. Set the issue status to `blocked` (with a comment like "Awaiting clarification on requirements from my manager").
+3. Ask a series of structured, clarifying questions directly in the issue comments, mentioning or addressing your supervisor.
+4. Your supervisor will reply directly in the comments. Once they answer, you will be woken up. Read their comment, and if everything is clear, you may transition out of `blocked` and propose your plan.
 
+### Planning Workflow
 1. **Checkout** the task (`POST /api/issues/{issueId}/checkout`) to become the assignee. This is required because `propose-plan` only allows the checked-out assignee to call it.
 2. **Propose your plan** using the endpoint below. This transitions the issue to `in_review` and posts your plan as a comment.
 3. **Stop all execution.** After proposing, do NOT write code, create subtasks, delegate work, or re-checkout. The system blocks further checkouts while the plan is pending review (`in_review` + `planProposedAt` set + `planApprovedAt` null → checkout returns 409).
-4. **Wait for approval.** A human, board user, or manager agent will call `POST /api/issues/{issueId}/approve-plan`, which transitions the issue back to `todo` and wakes you.
+4. **Wait for Approval or Rejection.** A human, board user, or manager agent will respond to the plan.
+   - If **Approved**, the issue transitions back to `todo` and wakes you. Proceed to step 5.
+   - If **Rejected**, the plan is cleared (`planProposedAt` set to null), and a feedback comment is posted. You MUST read the feedback and go back to step 2 to propose a revised plan.
 5. **Re-checkout and execute.** On the approval wake, checkout the task again and proceed with normal execution.
 
 Recommended API flow:

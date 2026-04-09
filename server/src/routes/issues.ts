@@ -514,7 +514,83 @@ export function issueRoutes(
     throw unauthorized();
   }
 
-  function requireAgentRunId(req: Request, res: Response) {
+  async function assertCanReviewPlan(req: Request, res: Response, issue: any, actionName: "approve" | "reject") {
+    const actor = getActorInfo(req);
+    let canReview = false;
+    try {
+      await assertCanAssignTasks(req, issue.companyId);
+      canReview = true;
+    } catch (e) {}
+
+    if (!canReview && actor.actorType === "agent" && issue.parentId) {
+      const svc = issueService(db);
+      const parent = await svc.getById(issue.parentId);
+      if (parent && parent.assigneeAgentId === actor.agentId) {
+        canReview = true;
+      }
+    }
+
+    if (actor.actorType === "agent" && actor.agentId === issue.assigneeAgentId) {
+      canReview = false;
+    }
+
+    if (!canReview) {
+      res.status(403).json({ error: `Only Board, Parent issue assignee, or manager agent can ${actionName} this plan (self-approval forbidden)` });
+      return false;
+    }
+    return true;
+  }
+
+  async function notifyPlanReview(req: Request, issue: any, action: "approved" | "rejected", feedback?: string) {
+    const actor = getActorInfo(req);
+    const actorName = actor.agentId ? (await agentsSvc.getById(actor.agentId))?.name ?? "Agent" : "Board";
+    const svc = issueService(db);
+    
+    const icon = action === "approved" ? "✅" : "❌";
+    const bodyAction = action === "approved" ? "approved" : "rejected";
+    const bodySuffix = action === "approved" ? "You may proceed." : `\n\n**Feedback:**\n${feedback}`;
+    
+    await svc.addComment(issue.id, `${icon} Plan ${bodyAction} by ${actorName}. ${bodySuffix}`, {
+      agentId: actor.agentId ?? undefined,
+      userId: actor.actorType === "user" ? actor.actorId : undefined,
+      runId: actor.runId,
+    });
+
+    const ancestors = await svc.getAncestors(issue.id);
+    const rootAncestor = ancestors.length > 0 ? ancestors[ancestors.length - 1] : null;
+    if (rootAncestor) {
+      await svc.addComment(rootAncestor.id, `${icon} [${actorName}] ${action === "approved" ? "Approved" : "Rejected"} plan for ${issue.identifier ?? issue.id}`, {
+        agentId: actor.agentId ?? undefined,
+        userId: actor.actorType === "user" ? actor.actorId : undefined,
+        runId: actor.runId,
+      });
+    }
+
+    await logActivity(db, {
+      companyId: issue.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: `issue.plan_${action}`,
+      entityType: "issue",
+      entityId: issue.id,
+    });
+
+    if (issue.assigneeAgentId) {
+      void heartbeat.wakeup(issue.assigneeAgentId, {
+        source: "automation",
+        triggerDetail: "system",
+        reason: `plan_${action}`,
+        payload: { issueId: issue.id },
+        requestedByActorType: actor.actorType,
+        requestedByActorId: actor.actorId,
+        contextSnapshot: { issueId: issue.id, source: `issue.plan_${action}`, wakeReason: `plan_${action}` },
+      }).catch((err) => logger.warn({ err, issueId: issue.id }, `failed to wake assignee on plan ${action}`));
+    }
+  }
+
+    function requireAgentRunId(req: Request, res: Response) {
     if (req.actor.type !== "agent") return null;
     const runId = req.actor.runId?.trim();
     if (runId) return runId;
@@ -2307,7 +2383,7 @@ export function issueRoutes(
 
   // ── Approve Plan ──────────────────────────────────────────────────────────
   router.post("/issues/:id/approve-plan", async (req, res) => {
-    const id = req.params.id as string;
+    const id = req.params.id;
     const issue = await svc.getById(id);
     if (!issue) {
       res.status(404).json({ error: "Issue not found" });
@@ -2324,97 +2400,53 @@ export function issueRoutes(
       return;
     }
 
-    const actor = getActorInfo(req);
+    if (!(await assertCanReviewPlan(req, res, issue, "approve"))) return;
 
-    // Authorization: Board, tasks:assign managers, or parent issue assignee. Explicitly forbid self-approval.
-    let canApprove = false;
-    let authErrorMsg = "Only Board, Parent issue assignee, or manager agent can approve this plan (self-approval forbidden)";
-    
-    // First, verify if the actor has base management rights (Board or Agent with tasks:assign)
-    try {
-      await assertCanAssignTasks(req, issue.companyId);
-      canApprove = true;
-    } catch (e) {
-      // Ignore: might be approved by parent assignee below
+    const updated = await svc.update(id, {
+      status: "todo",
+      planApprovedAt: new Date(),
+    });
+
+    await notifyPlanReview(req, issue, "approved");
+
+    res.json({ issue: updated });
+  });
+
+  // ── Reject Plan ──────────────────────────────────────────────────────────
+  router.post("/issues/:id/reject-plan", async (req, res) => {
+    const id = req.params.id;
+    const body = z.object({ feedback: z.string().min(1) }).safeParse(req.body);
+    if (!body.success) {
+      res.status(400).json({ error: "Missing or invalid feedback" });
+      return;
     }
+    const { feedback } = body.data;
 
-    if (!canApprove && actor.actorType === "agent" && issue.parentId) {
-      // Allow parent issue assignee to approve
-      const parent = await svc.getById(issue.parentId);
-      if (parent && parent.assigneeAgentId === actor.agentId) {
-        canApprove = true;
-      }
+    const issue = await svc.getById(id);
+    if (!issue) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
     }
+    assertCompanyAccess(req, issue.companyId);
 
-    if (actor.actorType === "agent" && actor.agentId === issue.assigneeAgentId) {
-      // Regardless of other roles, an assignee cannot approve their own plan
-      canApprove = false;
+    if (!issue.planProposedAt) {
+      res.status(409).json({ error: "No plan has been proposed yet" });
+      return;
     }
-
-
-    if (!canApprove) {
-      res.status(403).json({ error: authErrorMsg });
+    if (issue.planApprovedAt) {
+      res.status(409).json({ error: "Plan has already been approved" });
       return;
     }
 
-    const now = new Date();
+    if (!(await assertCanReviewPlan(req, res, issue, "reject"))) return;
 
-    // 1. Set planApprovedAt, status → todo
     const updated = await svc.update(id, {
       status: "todo",
-      planApprovedAt: now,
+      planProposedAt: null,
+      planApprovedAt: null,
     });
 
-    // 2. Post approval notice
-    const approverName = actor.agentId
-      ? (await agentsSvc.getById(actor.agentId))?.name ?? "Agent"
-      : "Board";
-    await svc.addComment(id, `✅ Plan approved by ${approverName}. You may proceed.`, {
-      agentId: actor.agentId ?? undefined,
-      userId: actor.actorType === "user" ? actor.actorId : undefined,
-      runId: actor.runId,
-    });
-
-    // 3. Bubble to root ancestor
-    const ancestors = await svc.getAncestors(id);
-    const rootAncestor = ancestors.length > 0 ? ancestors[ancestors.length - 1] : null;
-    if (rootAncestor) {
-      await svc.addComment(rootAncestor.id, `✅ [${approverName}] Approved plan for ${issue.identifier ?? id}`, {
-        agentId: actor.agentId ?? undefined,
-        userId: actor.actorType === "user" ? actor.actorId : undefined,
-        runId: actor.runId,
-      });
-    }
-
-    await logActivity(db, {
-      companyId: issue.companyId,
-      actorType: actor.actorType,
-      actorId: actor.actorId,
-      agentId: actor.agentId,
-      runId: actor.runId,
-      action: "issue.plan_approved",
-      entityType: "issue",
-      entityId: issue.id,
-    });
-
-    // 4. Wake the assignee so they know they can start
-    if (issue.assigneeAgentId) {
-      void heartbeat
-        .wakeup(issue.assigneeAgentId, {
-          source: "automation",
-          triggerDetail: "system",
-          reason: "plan_approved",
-          payload: { issueId: issue.id },
-          requestedByActorType: actor.actorType,
-          requestedByActorId: actor.actorId,
-          contextSnapshot: {
-            issueId: issue.id,
-            source: "issue.plan_approved",
-            wakeReason: "plan_approved",
-          },
-        })
-        .catch((err) => logger.warn({ err, issueId: issue.id }, "failed to wake assignee on plan approval"));
-    }
+    await notifyPlanReview(req, issue, "rejected", feedback);
 
     res.json({ issue: updated });
   });

@@ -51,6 +51,130 @@ export interface IssueAssigneeAdapterOverrides {
   useProjectWorkspace?: boolean;
 }
 
+export type QaVerdict = "pass" | "fail" | "inconclusive";
+
+export type QaIssueWritebackStatus =
+  | "agent_written"
+  | "platform_written"
+  | "platform_repaired_partial"
+  | "alerted_missing"
+  | "alerted_inconclusive";
+
+export type QaIssueWritebackAlertType =
+  | "partial_writeback_conflict"
+  | "missing_writeback"
+  | "inconclusive";
+
+export interface QaIssueWriteback {
+  status: QaIssueWritebackStatus;
+  verdict: QaVerdict | null;
+  source: "agent" | "platform" | "alert" | "none";
+  canCloseUpstream: boolean | null;
+  commentId: string | null;
+  writebackAt: string | null;
+  alertType: QaIssueWritebackAlertType | null;
+  latest: boolean;
+}
+
+export interface IssueQaSummary {
+  verdict: QaVerdict | null;
+  source: "agent" | "platform" | "alert" | "manual" | "none";
+  canCloseUpstream: boolean | null;
+  latestRunId: string;
+  latestRunFinishedAt: string | null;
+  writebackAt: string | null;
+  alertOpen: boolean;
+  alertType: string | null;
+  alertMessage: string | null;
+  latestLabel: string;
+}
+
+export type PlatformRecoveryKind =
+  | "runtime_recovered"
+  | "writeback_gate_repaired"
+  | "comment_visibility_recovered"
+  | "manual_override";
+
+export type PlatformUnblockCategory =
+  | "runtime_process"
+  | "qa_writeback_gate"
+  | "comment_visibility"
+  | "composite";
+
+export type PlatformOwnerRole =
+  | "runtime_owner"
+  | "qa_writeback_owner"
+  | "tech_lead"
+  | "cto"
+  | "board_operator";
+
+export type PlatformAuthoritativeSignalSource =
+  | "close_gate_block"
+  | "latest_terminal_run"
+  | "qa_summary"
+  | "comment_delta_health"
+  | "manual_override";
+
+export interface PlatformEvidenceRef {
+  kind: "activity" | "run" | "comment";
+  label: string;
+  href: string;
+  at: string | null;
+}
+
+export interface CommentVisibilityHealth {
+  state: "healthy" | "degraded";
+  lastDeltaSuccessAt: string | null;
+  lastDeltaFailureAt: string | null;
+  lastError: string | null;
+  fallbackSignals: string[];
+}
+
+export interface IssuePlatformUnblockSummary {
+  mode: "product" | "platform";
+  primaryCategory: PlatformUnblockCategory | null;
+  secondaryCategories: PlatformUnblockCategory[];
+  primaryOwnerRole: PlatformOwnerRole | null;
+  primaryOwnerAgentId: string | null;
+  escalationOwnerRole: PlatformOwnerRole | null;
+  escalationOwnerAgentId: string | null;
+  authoritativeSignalSource: PlatformAuthoritativeSignalSource | null;
+  authoritativeSignalAt: string | null;
+  authoritativeRunId: string | null;
+  recommendedNextAction: string | null;
+  recoveryCriteria: string | null;
+  nextCheckpointAt: string | null;
+  canRetryEngineering: boolean;
+  canCloseUpstream: boolean | null;
+  recoveryKind: PlatformRecoveryKind | null;
+  commentVisibility: CommentVisibilityHealth | null;
+  evidence: PlatformEvidenceRef[];
+}
+
+export interface RunPlatformHint {
+  latestForIssue: boolean;
+  processLost: boolean;
+  processLossRetryCount: number;
+  writebackAlertType: string | null;
+  closeGateBlocked: boolean;
+}
+
+export interface IssueStatusTruthSummary {
+  effectiveStatus: IssueStatus;
+  persistedStatus: IssueStatus;
+  authoritativeStatus: IssueStatus;
+  consistency: "consistent" | "drifted";
+  authoritativeAt: string | null;
+  authoritativeSource: "status_activity" | "issue_row" | "bootstrap";
+  authoritativeActorType: "agent" | "user" | "system" | null;
+  authoritativeActorId: string | null;
+  reasonSummary: string | null;
+  canExecute: boolean;
+  canClose: boolean;
+  driftCode: "status_mismatch" | "blocked_checkout_reopen" | null;
+  evidence: PlatformEvidenceRef[];
+}
+
 export type DocumentFormat = "markdown";
 
 export interface IssueDocumentSummary {
@@ -131,6 +255,8 @@ export interface Issue {
   completedAt: Date | null;
   cancelledAt: Date | null;
   hiddenAt: Date | null;
+  planProposedAt?: string | Date | null;
+  planApprovedAt?: string | Date | null;
   labelIds?: string[];
   labels?: IssueLabel[];
   planDocument?: IssueDocument | null;
@@ -138,6 +264,9 @@ export interface Issue {
   legacyPlanDocument?: LegacyPlanDocument | null;
   project?: Project | null;
   goal?: Goal | null;
+  statusTruthSummary?: IssueStatusTruthSummary | null;
+  qaSummary?: IssueQaSummary | null;
+  platformUnblockSummary?: IssuePlatformUnblockSummary | null;
   currentExecutionWorkspace?: ExecutionWorkspace | null;
   workProducts?: IssueWorkProduct[];
   mentionedProjects?: Project[];

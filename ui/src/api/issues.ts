@@ -114,6 +114,8 @@ export const issuesApi = {
       expectedStatuses: ["todo", "backlog", "blocked"],
     }),
   release: (id: string) => api.post<Issue>(`/issues/${id}/release`, {}),
+  approvePlan: (id: string) => api.post<{ issue: IssueUpdateResponse }>(`/issues/${id}/approve-plan`, {}),
+  rejectPlan: (id: string, feedback: string) => api.post<{ issue: IssueUpdateResponse }>(`/issues/${id}/reject-plan`, { feedback }),
   listComments: (id: string) => api.get<IssueComment[]>(`/issues/${id}/comments`),
   listFeedbackVotes: (id: string) => api.get<FeedbackVote[]>(`/issues/${id}/feedback-votes`),
   listFeedbackTraces: (id: string, filters?: Record<string, string | boolean | undefined>) => {

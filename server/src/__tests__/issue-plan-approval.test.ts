@@ -283,4 +283,80 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
     expect(res.status).toBe(200);
     expect(res.body.issue.status).toBe("todo");
   });
+
+
+  // 1. Rejection enforces feedback
+  it("reject-plan returns 400 when feedback body is missing", async () => {
+    const res = await request(makeApp(boardActor()))
+      .post(`/api/issues/${ISSUE_ID}/reject-plan`)
+      .send({});
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Missing or invalid feedback/);
+  });
+
+  // 2. Rejection enforces status logic
+  it("reject-plan returns todo status and clears planProposedAt timeframe", async () => {
+    const issue = makeIssue({
+      assigneeAgentId: AGENT_ASSIGNEE,
+      status: "in_review",
+      planProposedAt: new Date(),
+    });
+    const updated = { ...issue, status: "todo", planProposedAt: null, planApprovedAt: null };
+
+    mockIssueSvc.getById.mockResolvedValue(issue);
+    mockIssueSvc.update.mockResolvedValue(updated);
+
+    const res = await request(makeApp(boardActor()))
+      .post(`/api/issues/${ISSUE_ID}/reject-plan`)
+      .send({ feedback: "This is terrible, do it again." });
+
+    expect(res.status).toBe(200);
+    expect(res.body.issue.status).toBe("todo");
+    expect(res.body.issue.planProposedAt).toBeNull();
+  });
+
+  // 3. Rejection prohibits self-action
+  it("forbids an assignee from self-rejecting their own plan", async () => {
+    const issue = makeIssue({
+      assigneeAgentId: AGENT_ASSIGNEE,
+      status: "in_review",
+      planProposedAt: new Date(),
+    });
+    mockIssueSvc.getById.mockResolvedValue(issue);
+    mockAgentSvc.getById.mockResolvedValue({
+      id: AGENT_ASSIGNEE,
+      companyId: COMPANY_ID,
+      permissions: {},
+    });
+
+    const res = await request(makeApp(agentActor(AGENT_ASSIGNEE)))
+      .post(`/api/issues/${ISSUE_ID}/reject-plan`)
+      .send({ feedback: "I hate my own work" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatch(/self-approval forbidden/);
+  });
+
+  // 4. Rejection triggers Wakeup Event
+  it("reject-plan properly triggers wakeup system with rejection reason", async () => {
+    const issue = makeIssue({
+      assigneeAgentId: AGENT_ASSIGNEE,
+      status: "in_review",
+      planProposedAt: new Date(),
+    });
+    const updated = { ...issue, status: "todo", planProposedAt: null, planApprovedAt: null };
+
+    mockIssueSvc.getById.mockResolvedValue(issue);
+    mockIssueSvc.update.mockResolvedValue(updated);
+
+    const res = await request(makeApp(boardActor()))
+      .post(`/api/issues/${ISSUE_ID}/reject-plan`)
+      .send({ feedback: "Try again" });
+
+    expect(res.status).toBe(200);
+    expect(mockHeartbeat.wakeup).toHaveBeenCalledWith(AGENT_ASSIGNEE, expect.objectContaining({
+      reason: "plan_rejected"
+    }));
+  });
 });
+
