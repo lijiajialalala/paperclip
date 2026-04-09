@@ -8,6 +8,7 @@ const COPIED_SHARED_FILES = ["config.json", "config.toml", "instructions.md"] as
 const MIRRORED_SHARED_DIRS = ["agents"] as const;
 const SYMLINKED_SHARED_FILES = ["auth.json"] as const;
 const DEFAULT_PAPERCLIP_INSTANCE_ID = "default";
+const managedCodexHomeLocks = new Map<string, Promise<void>>();
 
 function nonEmpty(value: string | undefined): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
@@ -110,6 +111,32 @@ async function mirrorDirectory(target: string, source: string): Promise<void> {
   await fs.cp(source, target, { recursive: true, force: true });
 }
 
+async function withManagedCodexHomeLock<T>(
+  targetHome: string,
+  task: () => Promise<T>,
+): Promise<T> {
+  const previous = managedCodexHomeLocks.get(targetHome);
+  let releaseCurrent!: () => void;
+  const current = new Promise<void>((resolve) => {
+    releaseCurrent = resolve;
+  });
+  const chain = (previous ?? Promise.resolve())
+    .catch(() => undefined)
+    .then(() => current);
+  managedCodexHomeLocks.set(targetHome, chain);
+
+  await previous?.catch(() => undefined);
+
+  try {
+    return await task();
+  } finally {
+    releaseCurrent();
+    if (managedCodexHomeLocks.get(targetHome) === chain) {
+      managedCodexHomeLocks.delete(targetHome);
+    }
+  }
+}
+
 export async function prepareManagedCodexHome(
   env: NodeJS.ProcessEnv,
   onLog: AdapterExecutionContext["onLog"],
@@ -120,32 +147,34 @@ export async function prepareManagedCodexHome(
   const sourceHome = resolveSharedCodexHomeDir(env);
   if (path.resolve(sourceHome) === path.resolve(targetHome)) return targetHome;
 
-  await fs.mkdir(targetHome, { recursive: true });
+  await withManagedCodexHomeLock(targetHome, async () => {
+    await fs.mkdir(targetHome, { recursive: true });
 
-  for (const name of SYMLINKED_SHARED_FILES) {
-    const source = path.join(sourceHome, name);
-    if (!(await pathExists(source))) continue;
-    const target = path.join(targetHome, name);
-    const mode = await ensureSharedFileLinkOrCopy(target, source, { preferSymlink: true });
-    if (mode === "copy") {
-      await onLog(
-        "stdout",
-        `[paperclip] Mirroring Codex auth into "${target}" because this Windows session cannot create file symlinks.\n`,
-      );
+    for (const name of SYMLINKED_SHARED_FILES) {
+      const source = path.join(sourceHome, name);
+      if (!(await pathExists(source))) continue;
+      const target = path.join(targetHome, name);
+      const mode = await ensureSharedFileLinkOrCopy(target, source, { preferSymlink: true });
+      if (mode === "copy") {
+        await onLog(
+          "stdout",
+          `[paperclip] Mirroring Codex auth into "${target}" because this Windows session cannot create file symlinks.\n`,
+        );
+      }
     }
-  }
 
-  for (const name of COPIED_SHARED_FILES) {
-    const source = path.join(sourceHome, name);
-    if (!(await pathExists(source))) continue;
-    await ensureCopiedFile(path.join(targetHome, name), source);
-  }
+    for (const name of COPIED_SHARED_FILES) {
+      const source = path.join(sourceHome, name);
+      if (!(await pathExists(source))) continue;
+      await ensureCopiedFile(path.join(targetHome, name), source);
+    }
 
-  for (const name of MIRRORED_SHARED_DIRS) {
-    const source = path.join(sourceHome, name);
-    if (!(await pathExists(source))) continue;
-    await mirrorDirectory(path.join(targetHome, name), source);
-  }
+    for (const name of MIRRORED_SHARED_DIRS) {
+      const source = path.join(sourceHome, name);
+      if (!(await pathExists(source))) continue;
+      await mirrorDirectory(path.join(targetHome, name), source);
+    }
+  });
 
   await onLog(
     "stdout",
