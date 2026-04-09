@@ -52,6 +52,7 @@ import { assertCompanyAccess, getActorInfo } from "./authz.js";
 import { shouldWakeAssigneeOnCheckout } from "./issues-checkout-wakeup.js";
 import { isAllowedContentType, MAX_ATTACHMENT_BYTES } from "../attachment-types.js";
 import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
+import { applyEffectiveStatus, issueStatusTruthService } from "../services/issue-status-truth.js";
 import { platformUnblockService } from "../services/platform-unblock.js";
 import { qaIssueStateService } from "../services/qa-issue-state.js";
 
@@ -122,6 +123,7 @@ export function issueRoutes(
   const workProductsSvc = workProductService(db);
   const documentsSvc = documentService(db);
   const routinesSvc = routineService(db);
+  const statusTruth = issueStatusTruthService(db);
   const qaIssueState = qaIssueStateService(db);
   const platformUnblock = platformUnblockService(db);
   const feedbackExportService = opts?.feedbackExportService;
@@ -733,7 +735,7 @@ export function issueRoutes(
     }
 
     const [statusSummaries, platformSummaries] = await Promise.all([
-      getStatusTruthSummaries(result.map((issue) => issue.id)),
+      statusTruth.getIssueStatusTruthSummaries(result.map((issue) => issue.id)),
       includePlatformUnblock
         ? platformUnblock.listIssuePlatformUnblockSummaries(result.map((issue) => issue.id))
         : Promise.resolve(new Map()),

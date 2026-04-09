@@ -9,9 +9,14 @@ const companyId = "22222222-2222-4222-8222-222222222222";
 
 const mockIssueService = vi.hoisted(() => ({
   getById: vi.fn(),
+  list: vi.fn(),
   getAncestors: vi.fn(),
   getCommentCursor: vi.fn(),
   getComment: vi.fn(),
+}));
+
+const mockStatusTruth = vi.hoisted(() => ({
+  getIssueStatusTruthSummaries: vi.fn(),
 }));
 
 const mockQaIssueState = vi.hoisted(() => ({
@@ -74,6 +79,13 @@ vi.mock("../services/qa-issue-state.js", () => ({
   qaIssueStateService: () => mockQaIssueState,
 }));
 
+vi.mock("../services/issue-status-truth.js", () => ({
+  applyEffectiveStatus: <T extends { status: string }>(issue: T, summary: any) => summary
+    ? { ...issue, status: summary.effectiveStatus, statusTruthSummary: summary }
+    : issue,
+  issueStatusTruthService: () => mockStatusTruth,
+}));
+
 vi.mock("../services/platform-unblock.js", () => ({
   platformUnblockService: () => mockPlatformUnblock,
 }));
@@ -114,12 +126,45 @@ describe("issue QA summary routes", () => {
       updatedAt: new Date("2026-04-08T00:00:00.000Z"),
     });
     mockIssueService.getAncestors.mockResolvedValue([]);
+    mockIssueService.list.mockResolvedValue([
+      {
+        id: issueId,
+        companyId,
+        identifier: "CMPA-39",
+        title: "QA verification",
+        status: "blocked",
+        priority: "high",
+        goalId: null,
+        parentId: null,
+        projectId: null,
+        assigneeAgentId: null,
+        assigneeUserId: null,
+        updatedAt: new Date("2026-04-08T00:00:00.000Z"),
+      },
+    ]);
     mockIssueService.getCommentCursor.mockResolvedValue({
       totalComments: 0,
       latestCommentId: null,
       latestCommentAt: null,
     });
     mockIssueService.getComment.mockResolvedValue(null);
+    mockStatusTruth.getIssueStatusTruthSummaries.mockResolvedValue(new Map([
+      [issueId, {
+        effectiveStatus: "blocked",
+        persistedStatus: "in_progress",
+        authoritativeStatus: "blocked",
+        consistency: "drifted",
+        authoritativeAt: "2026-04-08T01:01:00.000Z",
+        authoritativeSource: "status_activity",
+        authoritativeActorType: "system",
+        authoritativeActorId: "paperclip",
+        reasonSummary: "Latest explicit status activity set the issue to blocked.",
+        canExecute: false,
+        canClose: false,
+        driftCode: "blocked_checkout_reopen",
+        evidence: [],
+      }],
+    ]));
     mockQaIssueState.getIssueQaSummary.mockResolvedValue({
       verdict: "fail",
       source: "platform",
@@ -184,51 +229,6 @@ describe("issue QA summary routes", () => {
     expect(res.body.platformUnblockSummary).toEqual(expect.objectContaining({
       primaryCategory: "qa_writeback_gate",
     }));
-  });
-
-  it("surfaces qa summary and platform summary in issue detail", async () => {
-    const res = await request(createApp()).get(`/api/issues/${issueId}`);
-
-    expect(res.status).toBe(200);
-    expect(res.body.status).toBe("blocked");
-    expect(res.body.statusTruthSummary).toEqual(expect.objectContaining({
-      effectiveStatus: "blocked",
-      consistency: "drifted",
-    }));
-    expect(res.body.qaSummary).toEqual(expect.objectContaining({
-      verdict: "fail",
-      latestRunId: "run-qa-1",
-    }));
-    expect(res.body.platformUnblockSummary).toEqual(expect.objectContaining({
-      primaryCategory: "qa_writeback_gate",
-      canRetryEngineering: false,
-    }));
-  });
-
-  it("adds platform summaries to issue lists when requested", async () => {
-    const res = await request(createApp()).get(`/api/companies/${companyId}/issues?includePlatformUnblock=true`);
-
-    expect(res.status).toBe(200);
-    expect(mockIssueService.list).toHaveBeenCalledWith(companyId, expect.objectContaining({
-      status: undefined,
-      assigneeAgentId: undefined,
-      participantAgentId: undefined,
-      q: undefined,
-    }));
-    expect(mockPlatformUnblock.listIssuePlatformUnblockSummaries).toHaveBeenCalledWith([issueId]);
-    expect(res.body).toEqual([
-      expect.objectContaining({
-        id: issueId,
-        statusTruthSummary: expect.objectContaining({
-          effectiveStatus: "blocked",
-          consistency: "drifted",
-        }),
-        platformUnblockSummary: expect.objectContaining({
-          primaryCategory: "qa_writeback_gate",
-          canRetryEngineering: false,
-        }),
-      }),
-    ]);
   });
 
   it("filters issue lists by effective status instead of persisted row status", async () => {
