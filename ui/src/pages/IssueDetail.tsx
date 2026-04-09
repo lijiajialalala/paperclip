@@ -1031,6 +1031,7 @@ export function IssueDetail() {
     mutationFn: () => issuesApi.approvePlan(issueId!),
     onSuccess: (data) => {
       invalidateIssue();
+      queryClient.invalidateQueries({ queryKey: queryKeys.issues.comments(issueId!) });
       pushToast({ title: "Plan approved", tone: "success" });
     },
     onError: (err) => pushToast({ title: "Approval failed", body: err instanceof Error ? err.message : "Unknown error", tone: "error" }),
