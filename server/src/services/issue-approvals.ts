@@ -92,6 +92,8 @@ export function issueApprovalService(db: Db) {
           identifier: issues.identifier,
           requestDepth: issues.requestDepth,
           billingCode: issues.billingCode,
+          planProposedAt: issues.planProposedAt,
+          planApprovedAt: issues.planApprovedAt,
           startedAt: issues.startedAt,
           completedAt: issues.completedAt,
           cancelledAt: issues.cancelledAt,

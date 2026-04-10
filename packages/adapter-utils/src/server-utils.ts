@@ -609,7 +609,7 @@ async function resolveSpawnTarget(
     const commandLine = [quoteForCmd(executable), ...args.map(quoteForCmd)].join(" ");
     return {
       command: shell,
-      args: ["/d", "/s", "/c", commandLine],
+      args: ["/d", "/s", "/c", `chcp 65001 >nul && ${commandLine}`],
     };
   }
 
@@ -1063,7 +1063,12 @@ export async function runChildProcess(
   const onLogError = opts.onLogError ?? ((err, id, msg) => console.warn({ err, runId: id }, msg));
 
   return new Promise<RunProcessResult>((resolve, reject) => {
-    const rawMerged: NodeJS.ProcessEnv = { ...process.env, ...opts.env };
+    const rawMerged: NodeJS.ProcessEnv = {
+      PYTHONIOENCODING: "utf-8",
+      PYTHONUTF8: "1",
+      ...process.env,
+      ...opts.env,
+    };
 
     // Strip Claude Code nesting-guard env vars so spawned `claude` processes
     // don't refuse to start with "cannot be launched inside another session".

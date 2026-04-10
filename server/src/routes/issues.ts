@@ -4,7 +4,7 @@ import { Router, type Request, type Response } from "express";
 import multer from "multer";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
-import { activityLog, type Db } from "@paperclipai/db";
+import { activityLog, approvals, type Db } from "@paperclipai/db";
 import {
   addIssueCommentSchema,
   createIssueAttachmentMetadataSchema,
@@ -33,6 +33,7 @@ import { validate } from "../middleware/validate.js";
 import {
   accessService,
   agentService,
+  approvalService,
   executionWorkspaceService,
   feedbackService,
   goalService,
@@ -1895,6 +1896,18 @@ export function issueRoutes(
     if (hiddenAtRaw !== undefined) {
       updateFields.hiddenAt = hiddenAtRaw ? new Date(hiddenAtRaw) : null;
     }
+
+    // Agents cannot manually change status while a plan is pending review
+    if (
+      req.actor.type === "agent" &&
+      updateFields.status !== undefined &&
+      updateFields.status !== existing.status &&
+      existing.planProposedAt &&
+      !existing.planApprovedAt
+    ) {
+      res.status(409).json({ error: "Cannot change issue status while a proposed plan is pending review. Status is locked to in_review." });
+      return;
+    }
     if (commentBody && reopenRequested === true && isClosed && updateFields.status === undefined) {
       updateFields.status = "todo";
     }
@@ -2324,7 +2337,53 @@ export function issueRoutes(
       planApprovedAt: null,
     });
 
-    // 3. Bubble summary to root ancestor issue
+    // 3. Create a formal Approval record so the plan appears in the Inbox
+    // 3. Create or Resubmit a formal Approval record so the plan appears in the Inbox
+    const approvalsSvc = approvalService(db);
+    const issueApprovalsSvc = issueApprovalService(db);
+
+    const payload = {
+      issueId: issue.id,
+      issueIdentifier: issue.identifier ?? issue.id,
+      issueTitle: issue.title,
+      planSnippet: planText.length > 2000 ? planText.slice(0, 2000) + "..." : planText,
+      commentId: comment.id,
+    };
+
+    const existingLinkedApprovals = await issueApprovalsSvc.listApprovalsForIssue(issue.id);
+    const existingPlanApproval = existingLinkedApprovals.find(
+      (a: any) => a.type === "work_plan" && a.status !== "approved" && a.status !== "cancelled"
+    );
+
+    let planApproval: any = null;
+
+    if (existingPlanApproval) {
+      if (existingPlanApproval.status === "revision_requested") {
+        await approvalsSvc.resubmit(existingPlanApproval.id, payload);
+      } else if (existingPlanApproval.status === "pending") {
+        // Technically not needed, but ensures payload aligns if overwriting quickly
+        await db.update(approvals).set({ payload, updatedAt: now }).where(eq(approvals.id, existingPlanApproval.id));
+      }
+      planApproval = await approvalsSvc.getById(existingPlanApproval.id);
+    } else {
+      planApproval = await approvalsSvc.create(issue.companyId, {
+        type: "work_plan",
+        requestedByAgentId: actor.agentId ?? null,
+        requestedByUserId: actor.actorType === "user" ? actor.actorId : null,
+        status: "pending",
+        payload,
+        decisionNote: null,
+        decidedByUserId: null,
+        decidedAt: null,
+        updatedAt: now,
+      });
+      await issueApprovalsSvc.linkManyForApproval(planApproval.id, [issue.id], {
+        agentId: actor.agentId,
+        userId: actor.actorType === "user" ? actor.actorId : null,
+      });
+    }
+
+    // 4. Bubble summary to root ancestor issue
     const ancestors = await svc.getAncestors(id);
     const rootAncestor = ancestors.length > 0 ? ancestors[ancestors.length - 1] : null;
     if (rootAncestor) {
@@ -2348,15 +2407,19 @@ export function issueRoutes(
       action: "issue.plan_proposed",
       entityType: "issue",
       entityId: issue.id,
-      details: { planSnippet: planText.slice(0, 120), commentId: comment.id },
+      details: { planSnippet: planText.slice(0, 120), commentId: comment.id, approvalId: planApproval.id },
     });
 
-    // 4. Wake parent issue assignee (for approval) + root issue assignee (for visibility)
+    // 5. Wake parent issue assignee (for approval) + root issue assignee (for visibility)
     void (async () => {
       const directParent = issue.parentId ? await svc.getById(issue.parentId) : null;
       const agentsToWake = new Set<string>();
-      if (directParent?.assigneeAgentId) agentsToWake.add(directParent.assigneeAgentId);
-      if (rootAncestor?.assigneeAgentId) agentsToWake.add(rootAncestor.assigneeAgentId);
+      if (directParent?.assigneeAgentId && directParent.assigneeAgentId !== issue.assigneeAgentId) {
+        agentsToWake.add(directParent.assigneeAgentId);
+      }
+      if (rootAncestor?.assigneeAgentId && rootAncestor.assigneeAgentId !== issue.assigneeAgentId) {
+        agentsToWake.add(rootAncestor.assigneeAgentId);
+      }
 
       for (const agentId of agentsToWake) {
         heartbeat
@@ -2364,7 +2427,7 @@ export function issueRoutes(
             source: "automation",
             triggerDetail: "system",
             reason: "child_plan_proposed",
-            payload: { issueId: issue.parentId ?? issue.id, childIssueId: issue.id, commentId: comment.id },
+            payload: { issueId: issue.parentId ?? issue.id, childIssueId: issue.id, commentId: comment.id, approvalId: planApproval.id },
             requestedByActorType: actor.actorType,
             requestedByActorId: actor.actorId,
             contextSnapshot: {
@@ -2378,7 +2441,7 @@ export function issueRoutes(
       }
     })();
 
-    res.status(201).json({ issue: updated, comment });
+    res.status(201).json({ issue: updated, comment, approvalId: planApproval.id });
   });
 
   // ── Approve Plan ──────────────────────────────────────────────────────────
@@ -2406,6 +2469,21 @@ export function issueRoutes(
       status: "todo",
       planApprovedAt: new Date(),
     });
+
+    // Sync linked work_plan approval to approved
+    const issueApprovalsSvc = issueApprovalService(db);
+    const linkedApprovals = await issueApprovalsSvc.listApprovalsForIssue(id);
+    const pendingPlanApproval = linkedApprovals.find(
+      (a: any) => a.type === "work_plan" && (a.status === "pending" || a.status === "revision_requested"),
+    );
+    if (pendingPlanApproval) {
+      const approvalsSvc = approvalService(db);
+      await approvalsSvc.approve(
+        pendingPlanApproval.id,
+        req.actor.userId ?? "board",
+        "Plan approved via issue review",
+      ).catch((err) => logger.warn({ err, approvalId: pendingPlanApproval.id }, "failed to sync approval on plan approve"));
+    }
 
     await notifyPlanReview(req, issue, "approved");
 
@@ -2445,6 +2523,21 @@ export function issueRoutes(
       planProposedAt: null,
       planApprovedAt: null,
     });
+
+    // Sync linked work_plan approval to rejected
+    const issueApprovalsSvc = issueApprovalService(db);
+    const linkedApprovals = await issueApprovalsSvc.listApprovalsForIssue(id);
+    const pendingPlanApproval = linkedApprovals.find(
+      (a: any) => a.type === "work_plan" && (a.status === "pending" || a.status === "revision_requested"),
+    );
+    if (pendingPlanApproval) {
+      const approvalsSvc = approvalService(db);
+      await approvalsSvc.reject(
+        pendingPlanApproval.id,
+        req.actor.userId ?? "board",
+        feedback,
+      ).catch((err) => logger.warn({ err, approvalId: pendingPlanApproval.id }, "failed to sync approval on plan reject"));
+    }
 
     await notifyPlanReview(req, issue, "rejected", feedback);
 

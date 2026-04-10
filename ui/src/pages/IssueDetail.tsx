@@ -1032,6 +1032,7 @@ export function IssueDetail() {
     onSuccess: (data) => {
       invalidateIssue();
       queryClient.invalidateQueries({ queryKey: queryKeys.issues.comments(issueId!) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.issues.approvals(issueId!) });
       pushToast({ title: "Plan approved", tone: "success" });
     },
     onError: (err) => pushToast({ title: "Approval failed", body: err instanceof Error ? err.message : "Unknown error", tone: "error" }),
@@ -1042,6 +1043,7 @@ export function IssueDetail() {
     onSuccess: (data) => {
       invalidateIssue();
       queryClient.invalidateQueries({ queryKey: queryKeys.issues.comments(issueId!) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.issues.approvals(issueId!) });
       pushToast({ title: "Plan rejected", tone: "success" });
     },
     onError: (err) => pushToast({ title: "Rejection failed", body: err instanceof Error ? err.message : "Unknown error", tone: "error" }),
@@ -1500,6 +1502,18 @@ export function IssueDetail() {
               <h4 className="text-sm font-semibold text-foreground">Plan Pending Review</h4>
               <p className="text-sm text-muted-foreground">
                 A plan has been proposed for this issue. Review the plan in the comments below.
+                {(() => {
+                  const planApproval = (linkedApprovals ?? []).find((a: any) => a.type === "work_plan" && a.status === "pending");
+                  if (!planApproval) return null;
+                  return (
+                    <Link
+                      to={`/approvals/${planApproval.id}`}
+                      className="ml-1 text-primary hover:underline font-medium"
+                    >
+                      Open in Inbox →
+                    </Link>
+                  );
+                })()}
               </p>
             </div>
           </div>

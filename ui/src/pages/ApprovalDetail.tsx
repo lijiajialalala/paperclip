@@ -296,7 +296,7 @@ export function ApprovalDetail() {
               Request revision
             </Button>
           )}
-          {approval.status === "revision_requested" && (
+          {approval.status === "revision_requested" && approval.type !== "work_plan" && (
             <Button
               size="sm"
               variant="outline"

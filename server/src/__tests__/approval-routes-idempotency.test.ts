@@ -25,6 +25,10 @@ const mockIssueApprovalService = vi.hoisted(() => ({
   linkManyForApproval: vi.fn(),
 }));
 
+const mockIssueService = vi.hoisted(() => ({
+  update: vi.fn(),
+}));
+
 const mockSecretService = vi.hoisted(() => ({
   normalizeHireApprovalPayloadForPersistence: vi.fn(),
 }));
@@ -35,6 +39,7 @@ vi.mock("../services/index.js", () => ({
   approvalService: () => mockApprovalService,
   heartbeatService: () => mockHeartbeatService,
   issueApprovalService: () => mockIssueApprovalService,
+  issueService: () => mockIssueService,
   logActivity: mockLogActivity,
   secretService: () => mockSecretService,
 }));
@@ -62,6 +67,10 @@ describe("approval routes idempotent retries", () => {
     vi.clearAllMocks();
     mockHeartbeatService.wakeup.mockResolvedValue({ id: "wake-1" });
     mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([{ id: "issue-1" }]);
+    mockIssueService.update.mockImplementation(async (id: string, patch: Record<string, unknown>) => ({
+      id,
+      ...patch,
+    }));
     mockLogActivity.mockResolvedValue(undefined);
   });
 
@@ -106,5 +115,84 @@ describe("approval routes idempotent retries", () => {
 
     expect(res.status).toBe(200);
     expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
+  it("syncs linked work-plan issues when an approval is approved from the inbox", async () => {
+    const decidedAt = new Date("2026-04-10T05:00:00.000Z");
+    mockApprovalService.approve.mockResolvedValue({
+      approval: {
+        id: "approval-1",
+        companyId: "company-1",
+        type: "work_plan",
+        status: "approved",
+        payload: {},
+        requestedByAgentId: "agent-1",
+        decidedAt,
+      },
+      applied: true,
+    });
+    mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([
+      {
+        id: "issue-1",
+        status: "in_review",
+        planProposedAt: new Date("2026-04-10T04:55:00.000Z"),
+        planApprovedAt: null,
+      },
+    ]);
+
+    const res = await request(createApp())
+      .post("/api/approvals/approval-1/approve")
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(mockIssueService.update).toHaveBeenCalledWith(
+      "issue-1",
+      expect.objectContaining({
+        status: "todo",
+        planApprovedAt: decidedAt,
+      }),
+    );
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      "agent-1",
+      expect.objectContaining({
+        reason: "approval_approved",
+      }),
+    );
+  });
+
+  it("clears linked work-plan review state when an approval is rejected from the inbox", async () => {
+    mockApprovalService.reject.mockResolvedValue({
+      approval: {
+        id: "approval-1",
+        companyId: "company-1",
+        type: "work_plan",
+        status: "rejected",
+        payload: {},
+        requestedByAgentId: "agent-1",
+      },
+      applied: true,
+    });
+    mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([
+      {
+        id: "issue-1",
+        status: "in_review",
+        planProposedAt: new Date("2026-04-10T04:55:00.000Z"),
+        planApprovedAt: null,
+      },
+    ]);
+
+    const res = await request(createApp())
+      .post("/api/approvals/approval-1/reject")
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(mockIssueService.update).toHaveBeenCalledWith(
+      "issue-1",
+      expect.objectContaining({
+        status: "todo",
+        planProposedAt: null,
+        planApprovedAt: null,
+      }),
+    );
   });
 });

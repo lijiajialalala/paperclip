@@ -1,4 +1,4 @@
-import { Router } from "express";
+﻿import { Router } from "express";
 import type { Db } from "@paperclipai/db";
 import {
   addApprovalCommentSchema,
@@ -13,6 +13,7 @@ import {
   approvalService,
   heartbeatService,
   issueApprovalService,
+  issueService,
   logActivity,
   secretService,
 } from "../services/index.js";
@@ -31,8 +32,56 @@ export function approvalRoutes(db: Db) {
   const svc = approvalService(db);
   const heartbeat = heartbeatService(db);
   const issueApprovalsSvc = issueApprovalService(db);
+  const issuesSvc = issueService(db);
   const secretsSvc = secretService(db);
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
+
+  async function syncResolvedWorkPlanIssues(
+    approval: {
+      id: string;
+      type: string;
+      status: string;
+      decidedAt: Date | null;
+    },
+    linkedIssues: Array<{
+      id: string;
+      status: string;
+      planProposedAt?: Date | null;
+      planApprovedAt?: Date | null;
+    }>,
+  ) {
+    if (approval.type !== "work_plan") return;
+
+    const resolvedAt = approval.decidedAt ?? new Date();
+    for (const linkedIssue of linkedIssues) {
+      if (approval.status === "approved") {
+        const planStillPending =
+          !linkedIssue.planApprovedAt
+          && (Boolean(linkedIssue.planProposedAt) || linkedIssue.status === "in_review");
+        if (!planStillPending) continue;
+
+        await issuesSvc.update(linkedIssue.id, {
+          status: "todo",
+          planApprovedAt: resolvedAt,
+        });
+        continue;
+      }
+
+      if (approval.status === "rejected") {
+        const planNeedsReset =
+          linkedIssue.status === "in_review"
+          || Boolean(linkedIssue.planProposedAt)
+          || Boolean(linkedIssue.planApprovedAt);
+        if (!planNeedsReset) continue;
+
+        await issuesSvc.update(linkedIssue.id, {
+          status: "todo",
+          planProposedAt: null,
+          planApprovedAt: null,
+        });
+      }
+    }
+  }
 
   router.get("/companies/:companyId/approvals", async (req, res) => {
     const companyId = req.params.companyId as string;
@@ -65,10 +114,10 @@ export function approvalRoutes(db: Db) {
     const normalizedPayload =
       approvalInput.type === "hire_agent"
         ? await secretsSvc.normalizeHireApprovalPayloadForPersistence(
-            companyId,
-            approvalInput.payload,
-            { strictMode: strictSecretsMode },
-          )
+          companyId,
+          approvalInput.payload,
+          { strictMode: strictSecretsMode },
+        )
         : approvalInput.payload;
 
     const actor = getActorInfo(req);
@@ -129,6 +178,7 @@ export function approvalRoutes(db: Db) {
 
     if (applied) {
       const linkedIssues = await issueApprovalsSvc.listIssuesForApproval(approval.id);
+      await syncResolvedWorkPlanIssues(approval, linkedIssues);
       const linkedIssueIds = linkedIssues.map((issue) => issue.id);
       const primaryIssueId = linkedIssueIds[0] ?? null;
 
@@ -223,6 +273,9 @@ export function approvalRoutes(db: Db) {
     );
 
     if (applied) {
+      const linkedIssues = await issueApprovalsSvc.listIssuesForApproval(approval.id);
+      await syncResolvedWorkPlanIssues(approval, linkedIssues);
+
       await logActivity(db, {
         companyId: approval.companyId,
         actorType: "user",
@@ -280,10 +333,10 @@ export function approvalRoutes(db: Db) {
     const normalizedPayload = req.body.payload
       ? existing.type === "hire_agent"
         ? await secretsSvc.normalizeHireApprovalPayloadForPersistence(
-            existing.companyId,
-            req.body.payload,
-            { strictMode: strictSecretsMode },
-          )
+          existing.companyId,
+          req.body.payload,
+          { strictMode: strictSecretsMode },
+        )
         : req.body.payload
       : undefined;
     const approval = await svc.resubmit(id, normalizedPayload);
@@ -343,3 +396,4 @@ export function approvalRoutes(db: Db) {
 
   return router;
 }
+

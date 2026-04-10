@@ -1,10 +1,11 @@
-import { UserPlus, Lightbulb, ShieldAlert, ShieldCheck } from "lucide-react";
+import { UserPlus, Lightbulb, ShieldAlert, ShieldCheck, ClipboardCheck } from "lucide-react";
 import { formatCents } from "../lib/utils";
 
 export const typeLabel: Record<string, string> = {
   hire_agent: "Hire Agent",
   approve_ceo_strategy: "CEO Strategy",
   budget_override_required: "Budget Override",
+  work_plan: "Work Plan",
 };
 
 /** Build a contextual label for an approval, e.g. "Hire Agent: Designer" */
@@ -13,6 +14,9 @@ export function approvalLabel(type: string, payload?: Record<string, unknown> | 
   if (type === "hire_agent" && payload?.name) {
     return `${base}: ${String(payload.name)}`;
   }
+  if (type === "work_plan" && payload?.issueIdentifier) {
+    return `${base}: ${String(payload.issueIdentifier)}`;
+  }
   return base;
 }
 
@@ -20,6 +24,7 @@ export const typeIcon: Record<string, typeof UserPlus> = {
   hire_agent: UserPlus,
   approve_ceo_strategy: Lightbulb,
   budget_override_required: ShieldAlert,
+  work_plan: ClipboardCheck,
 };
 
 export const defaultTypeIcon = ShieldCheck;
@@ -127,8 +132,24 @@ export function BudgetOverridePayload({ payload }: { payload: Record<string, unk
   );
 }
 
+export function WorkPlanPayload({ payload }: { payload: Record<string, unknown> }) {
+  const snippet = payload.planSnippet ?? payload.plan ?? payload.text;
+  return (
+    <div className="mt-3 space-y-1.5 text-sm">
+      <PayloadField label="Issue" value={payload.issueIdentifier} />
+      <PayloadField label="Title" value={payload.issueTitle} />
+      {!!snippet && (
+        <div className="mt-2 rounded-md bg-muted/40 px-3 py-2 text-sm text-muted-foreground whitespace-pre-wrap font-mono text-xs max-h-48 overflow-y-auto">
+          {String(snippet)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ApprovalPayloadRenderer({ type, payload }: { type: string; payload: Record<string, unknown> }) {
   if (type === "hire_agent") return <HireAgentPayload payload={payload} />;
   if (type === "budget_override_required") return <BudgetOverridePayload payload={payload} />;
+  if (type === "work_plan") return <WorkPlanPayload payload={payload} />;
   return <CeoStrategyPayload payload={payload} />;
 }

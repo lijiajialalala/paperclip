@@ -24,7 +24,7 @@ export function parseCodexJsonl(stdout: string) {
     }
 
     if (type === "error") {
-      const msg = asString(event.message, "").trim();
+      const msg = asString(event.message, "").replace(/\0/g, "").trim();
       if (msg) errorMessage = msg;
       continue;
     }
@@ -33,7 +33,7 @@ export function parseCodexJsonl(stdout: string) {
       const item = parseObject(event.item);
       if (asString(item.type, "") === "agent_message") {
         const text = asString(item.text, "");
-        if (text) messages.push(text);
+        if (text) messages.push(text.replace(/\0/g, ""));
       }
       continue;
     }
@@ -48,7 +48,7 @@ export function parseCodexJsonl(stdout: string) {
 
     if (type === "turn.failed") {
       const err = parseObject(event.error);
-      const msg = asString(err.message, "").trim();
+      const msg = asString(err.message, "").replace(/\0/g, "").trim();
       if (msg) errorMessage = msg;
     }
   }

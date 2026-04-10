@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
+﻿import { and, asc, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   activityLog,
@@ -928,8 +928,15 @@ export function issueService(db: Db) {
         )
       `;
       if (filters?.status) {
-        const statuses = filters.status.split(",").map((s) => s.trim());
-        conditions.push(statuses.length === 1 ? eq(issues.status, statuses[0]) : inArray(issues.status, statuses));
+        const rawStatus: any = filters.status;
+        const statusArray = Array.isArray(rawStatus) ? rawStatus : [rawStatus];
+        const statuses = statusArray
+          .flatMap((s: string) => s.split(","))
+          .map((s: string) => s.trim())
+          .filter(Boolean);
+        if (statuses.length > 0) {
+          conditions.push(statuses.length === 1 ? eq(issues.status, statuses[0]) : inArray(issues.status, statuses));
+        }
       }
       if (filters?.assigneeAgentId) {
         conditions.push(eq(issues.assigneeAgentId, filters.assigneeAgentId));
@@ -1262,7 +1269,7 @@ export function issueService(db: Db) {
       actorRunId: string | null;
     }) => {
       // Layer 1: Check the latest terminal run for an explicit negative verdict.
-      // Board users can override (governance principle) — only agents are blocked.
+      // Board users can override (governance principle) �?only agents are blocked.
       const latestAuthoritativeRun = await getLatestAuthoritativeRunForIssue(input.companyId, input.issueId);
       if (latestAuthoritativeRun && input.actorType !== "board") {
         if (
@@ -1281,7 +1288,7 @@ export function issueService(db: Db) {
       // Layer 2: For agent callers with a known run, verify the actor's own
       // terminal run does not carry an explicit negative verdict.
       // Agents without a runId or whose run is still active are allowed
-      // through — Layer 1 already catches outstanding negative verdicts.
+      // through �?Layer 1 already catches outstanding negative verdicts.
       if (input.actorType === "agent" && input.actorAgentId && input.actorRunId) {
         const actorRun = await getRunByIdForIssue(input.companyId, input.issueId, input.actorRunId);
         if (
@@ -1925,12 +1932,12 @@ export function issueService(db: Db) {
         conditions.push(
           order === "asc"
             ? sql<boolean>`(
-                ${issueComments.createdAt} > ${anchor.createdAt}
-                OR (${issueComments.createdAt} = ${anchor.createdAt} AND ${issueComments.id} > ${anchor.id})
+                ${issueComments.createdAt} > ${anchor.createdAt.toISOString()}
+                OR (${issueComments.createdAt} = ${anchor.createdAt.toISOString()} AND ${issueComments.id} > ${anchor.id})
               )`
             : sql<boolean>`(
-                ${issueComments.createdAt} < ${anchor.createdAt}
-                OR (${issueComments.createdAt} = ${anchor.createdAt} AND ${issueComments.id} < ${anchor.id})
+                ${issueComments.createdAt} < ${anchor.createdAt.toISOString()}
+                OR (${issueComments.createdAt} = ${anchor.createdAt.toISOString()} AND ${issueComments.id} < ${anchor.id})
               )`,
         );
       }
@@ -2371,3 +2378,4 @@ export function issueService(db: Db) {
     },
   };
 }
+
