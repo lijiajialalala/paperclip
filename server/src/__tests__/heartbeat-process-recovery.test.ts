@@ -10,6 +10,7 @@ import {
   heartbeatRunEvents,
   heartbeatRuns,
   issues,
+  issueComments,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -67,6 +68,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       child.kill("SIGKILL");
     }
     childProcesses.clear();
+    await db.delete(issueComments); // Clean up issue comments manually
     await db.delete(issues);
     await db.delete(heartbeatRunEvents);
     await db.delete(heartbeatRuns);
@@ -74,6 +76,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     await db.delete(agents);
     await db.delete(companies);
   });
+
 
   afterAll(async () => {
     for (const child of childProcesses) {
@@ -320,4 +323,106 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       agentRole: "engineer",
     });
   });
+
+  it("posts a blocker comment to the issue when an engineering agent exhausts all process_lost retries", async () => {
+    // Fix #4 positive case: non-QA (engineer) agent exhausted process_lost → must write comment.
+    const { issueId } = await seedRunFixture({
+      processPid: 999_999_999,
+      processLossRetryCount: 2, // Already at max → no more retries
+    });
+    const heartbeat = heartbeatService(db);
+    const { activityLog, issueComments } = await import("@paperclipai/db");
+
+    await heartbeat.reapOrphanedRuns();
+
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    // Engineering agent exhausted → exactly one recovery comment
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.body).toContain("Platform Interruption");
+    expect(comments[0]?.body).toContain("Recommended action");
+  });
+
+  it("does NOT post a comment to the issue when a QA agent exhausts all process_lost retries", async () => {
+    // Fix #4 + Fix #2 contract: QA agent process_lost lifecycle is governed by
+    // qaWritebackService.settleTerminalQaRun which emits platform_interrupted
+    // (canCloseUpstream: null, no comment). Heartbeat must not dirty the thread.
+    const companyId = randomUUID();
+    const qaAgentId = randomUUID();
+    const runId = randomUUID();
+    const wakeupRequestId = randomUUID();
+    const issueId = randomUUID();
+    const now = new Date("2026-03-19T00:00:00.000Z");
+    const issuePrefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: qaAgentId,
+      companyId,
+      name: "QA Reviewer",
+      role: "qa",                     // ← QA role: must be excluded from blocker comment
+      status: "paused",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.insert(agentWakeupRequests).values({
+      id: wakeupRequestId,
+      companyId,
+      agentId: qaAgentId,
+      source: "assignment",
+      triggerDetail: "system",
+      reason: "issue_assigned",
+      payload: { issueId },
+      status: "claimed",
+      runId,
+      claimedAt: now,
+    });
+
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId: qaAgentId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "running",
+      wakeupRequestId,
+      contextSnapshot: { issueId },
+      processPid: 999_999_999,
+      processLossRetryCount: 2,       // Already at max → no more retries
+      startedAt: now,
+      updatedAt: new Date("2026-03-19T00:00:00.000Z"),
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "QA verification task",
+      status: "in_review",
+      priority: "medium",
+      assigneeAgentId: qaAgentId,
+      checkoutRunId: runId,
+      executionRunId: runId,
+      issueNumber: 2,
+      identifier: `${issuePrefix}-2`,
+    });
+
+    const heartbeat = heartbeatService(db);
+    const { issueComments } = await import("@paperclipai/db");
+
+    await heartbeat.reapOrphanedRuns();
+
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+
+    // QA agent → 0 comments. The QA writeback path owns this lifecycle.
+    expect(comments).toHaveLength(0);
+  });
 });
+
