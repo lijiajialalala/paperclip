@@ -639,7 +639,17 @@ export function issueRoutes(
           checkoutRunId: runId,
           reason: "stale_checkout_run",
         },
-      });
+      }).catch((err) =>
+        logger.warn(
+          {
+            err,
+            issueId: issue.id,
+            actorAgentId,
+            checkoutRunId: runId,
+            previousCheckoutRunId: ownership.adoptedFromRunId,
+          },
+          "failed to log checkout lock adoption",
+        ));
     }
     return true;
   }

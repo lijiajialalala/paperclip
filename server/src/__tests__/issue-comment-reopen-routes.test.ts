@@ -5,6 +5,8 @@ import { issueRoutes } from "../routes/issues.js";
 import { errorHandler } from "../middleware/index.js";
 
 const mockIssueService = vi.hoisted(() => ({
+  assertCanTransitionIssueToDone: vi.fn(),
+  assertCheckoutOwner: vi.fn(),
   getById: vi.fn(),
   update: vi.fn(),
   addComment: vi.fn(),
@@ -61,17 +63,19 @@ vi.mock("../services/index.js", () => ({
   workProductService: () => ({}),
 }));
 
-function createApp() {
+function createApp(
+  actor: Record<string, unknown> = {
+    type: "board",
+    userId: "local-board",
+    companyIds: ["company-1"],
+    source: "local_implicit",
+    isInstanceAdmin: false,
+  },
+) {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
-    (req as any).actor = {
-      type: "board",
-      userId: "local-board",
-      companyIds: ["company-1"],
-      source: "local_implicit",
-      isInstanceAdmin: false,
-    };
+    (req as any).actor = actor;
     next();
   });
   app.use("/api", issueRoutes({} as any, {} as any));
@@ -95,6 +99,14 @@ function makeIssue(status: "todo" | "done") {
 describe("issue comment reopen routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockIssueService.assertCanTransitionIssueToDone.mockResolvedValue(undefined);
+    mockIssueService.assertCheckoutOwner.mockResolvedValue({
+      id: "11111111-1111-4111-8111-111111111111",
+      status: "in_progress",
+      assigneeAgentId: "22222222-2222-4222-8222-222222222222",
+      checkoutRunId: "run-1",
+      adoptedFromRunId: null,
+    });
     mockIssueService.addComment.mockResolvedValue({
       id: "comment-1",
       issueId: "11111111-1111-4111-8111-111111111111",
@@ -199,6 +211,62 @@ describe("issue comment reopen routes", () => {
           source: "issue_comment_interrupt",
           issueId: "11111111-1111-4111-8111-111111111111",
         }),
+      }),
+    );
+  });
+
+  it("keeps agent closeout updates working when stale checkout adoption audit logging fails", async () => {
+    const issue = {
+      ...makeIssue("todo"),
+      status: "in_progress" as const,
+    };
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.assertCheckoutOwner.mockResolvedValue({
+      id: issue.id,
+      status: "in_progress",
+      assigneeAgentId: issue.assigneeAgentId,
+      checkoutRunId: "run-2",
+      adoptedFromRunId: "run-1",
+    });
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+      ...issue,
+      ...patch,
+    }));
+    mockLogActivity
+      .mockRejectedValueOnce(new Error("audit sink unavailable"))
+      .mockResolvedValue(undefined);
+
+    const res = await request(createApp({
+      type: "agent",
+      agentId: "22222222-2222-4222-8222-222222222222",
+      companyId: "company-1",
+      runId: "run-2",
+    }))
+      .patch("/api/issues/11111111-1111-4111-8111-111111111111")
+      .send({ status: "done", comment: "hello" });
+
+    expect(res.status).toBe(200);
+    expect(mockIssueService.assertCheckoutOwner).toHaveBeenCalledWith(
+      "11111111-1111-4111-8111-111111111111",
+      "22222222-2222-4222-8222-222222222222",
+      "run-2",
+    );
+    expect(mockIssueService.assertCanTransitionIssueToDone).toHaveBeenCalledWith({
+      issueId: "11111111-1111-4111-8111-111111111111",
+      companyId: "company-1",
+      actorType: "agent",
+      actorAgentId: "22222222-2222-4222-8222-222222222222",
+      actorRunId: "run-2",
+    });
+    expect(mockIssueService.update).toHaveBeenCalledWith("11111111-1111-4111-8111-111111111111", {
+      status: "done",
+    });
+    expect(mockIssueService.addComment).toHaveBeenCalledWith(
+      "11111111-1111-4111-8111-111111111111",
+      "hello",
+      expect.objectContaining({
+        agentId: "22222222-2222-4222-8222-222222222222",
+        runId: "run-2",
       }),
     );
   });
