@@ -247,6 +247,199 @@ describe("heartbeat comment wake batching", () => {
     }
   });
 
+  it("defers plan-approval wakes when the issue is already executing in a running run", async () => {
+    const gateway = await createControlledGatewayServer();
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    const issuePrefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
+    const heartbeat = heartbeatService(db);
+
+    try {
+      await db.insert(companies).values({
+        id: companyId,
+        name: "Paperclip",
+        issuePrefix,
+        requireBoardApprovalForNewAgents: false,
+      });
+
+      await db.insert(agents).values({
+        id: agentId,
+        companyId,
+        name: "Gateway Agent",
+        role: "engineer",
+        status: "idle",
+        adapterType: "openclaw_gateway",
+        adapterConfig: {
+          url: gateway.url,
+          headers: {
+            "x-openclaw-token": "gateway-token",
+          },
+          payloadTemplate: {
+            message: "wake now",
+          },
+          waitTimeoutMs: 2_000,
+        },
+        runtimeConfig: {},
+        permissions: {},
+      });
+
+      await db.insert(issues).values({
+        id: issueId,
+        companyId,
+        title: "Plan approval deferral",
+        status: "todo",
+        priority: "medium",
+        assigneeAgentId: agentId,
+        issueNumber: 1,
+        identifier: `${issuePrefix}-1`,
+      });
+
+      const initialComment = await db
+        .insert(issueComments)
+        .values({
+          companyId,
+          issueId,
+          authorUserId: "user-1",
+          body: "Initial issue comment",
+        })
+        .returning()
+        .then((rows) => rows[0]);
+
+      const firstRun = await heartbeat.wakeup(agentId, {
+        source: "automation",
+        triggerDetail: "system",
+        reason: "issue_commented",
+        payload: { issueId, commentId: initialComment.id },
+        contextSnapshot: {
+          issueId,
+          taskId: issueId,
+          commentId: initialComment.id,
+          wakeReason: "issue_commented",
+          source: "issue.comment",
+        },
+        requestedByActorType: "user",
+        requestedByActorId: "user-1",
+      });
+
+      expect(firstRun).not.toBeNull();
+      if (!firstRun) {
+        throw new Error("Expected the initial run to be created");
+      }
+
+      await waitFor(() => gateway.getAgentPayloads().length === 1);
+
+      const approvalComment = await db
+        .insert(issueComments)
+        .values({
+          companyId,
+          issueId,
+          authorUserId: "user-1",
+          body: "Plan approved. Proceed with the work.",
+        })
+        .returning()
+        .then((rows) => rows[0]);
+
+      const followupRun = await heartbeat.wakeup(agentId, {
+        source: "automation",
+        triggerDetail: "system",
+        reason: "plan_approved",
+        payload: { issueId, commentId: approvalComment.id },
+        contextSnapshot: {
+          issueId,
+          taskId: issueId,
+          commentId: approvalComment.id,
+          wakeCommentId: approvalComment.id,
+          wakeReason: "plan_approved",
+          source: "issue.plan_approved",
+        },
+        requestedByActorType: "user",
+        requestedByActorId: "user-1",
+      });
+
+      expect(followupRun).toBeNull();
+
+      await waitFor(async () => {
+        const deferred = await db
+          .select()
+          .from(agentWakeupRequests)
+          .where(
+            and(
+              eq(agentWakeupRequests.companyId, companyId),
+              eq(agentWakeupRequests.agentId, agentId),
+              eq(agentWakeupRequests.status, "deferred_issue_execution"),
+            ),
+          )
+          .then((rows) => rows[0] ?? null);
+        return Boolean(deferred);
+      });
+
+      const persistedFirstRun = await db
+        .select()
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, firstRun.id))
+        .then((rows) => rows[0] ?? null);
+      const persistedFirstContext = (persistedFirstRun?.contextSnapshot ?? null) as Record<string, unknown> | null;
+      expect(persistedFirstContext?.wakeReason).toBe("issue_commented");
+      expect(persistedFirstContext?.commentId).toBe(initialComment.id);
+
+      const deferredWake = await db
+        .select()
+        .from(agentWakeupRequests)
+        .where(
+          and(
+            eq(agentWakeupRequests.companyId, companyId),
+            eq(agentWakeupRequests.agentId, agentId),
+            eq(agentWakeupRequests.status, "deferred_issue_execution"),
+          ),
+        )
+        .then((rows) => rows[0] ?? null);
+
+      const deferredContext = (deferredWake?.payload as Record<string, unknown> | null)?._paperclipWakeContext as
+        | Record<string, unknown>
+        | undefined;
+      expect(deferredContext).toMatchObject({
+        wakeReason: "plan_approved",
+        commentId: approvalComment.id,
+        wakeCommentId: approvalComment.id,
+      });
+      expect(deferredContext?.wakeCommentIds).toEqual([approvalComment.id]);
+
+      const coalescedWakeups = await db
+        .select()
+        .from(agentWakeupRequests)
+        .where(
+          and(
+            eq(agentWakeupRequests.companyId, companyId),
+            eq(agentWakeupRequests.agentId, agentId),
+            eq(agentWakeupRequests.status, "coalesced"),
+          ),
+        );
+      expect(coalescedWakeups).toHaveLength(0);
+
+      gateway.releaseFirstWait();
+
+      await waitFor(() => gateway.getAgentPayloads().length === 2);
+      await waitFor(async () => {
+        const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+        return runs.length === 2 && runs.every((run) => run.status === "succeeded");
+      });
+
+      const secondPayload = gateway.getAgentPayloads()[1] ?? {};
+      expect(secondPayload.paperclip).toMatchObject({
+        wake: {
+          commentIds: [approvalComment.id],
+          latestCommentId: approvalComment.id,
+        },
+      });
+      expect(String(secondPayload.message ?? "")).toContain("Plan approved. Proceed with the work.");
+      expect(String(secondPayload.message ?? "")).not.toContain("Initial issue comment");
+    } finally {
+      gateway.releaseFirstWait();
+      await gateway.close();
+    }
+  }, 20_000);
+
   it("batches deferred comment wakes and forwards the ordered batch to the next run", async () => {
     const gateway = await createControlledGatewayServer();
     const companyId = randomUUID();

@@ -1041,6 +1041,13 @@ export function mergeCoalescedContextSnapshot(
   return merged;
 }
 
+function shouldDeferIssueWakeForRunningExecution(input: {
+  activeExecutionRun: Pick<typeof heartbeatRuns.$inferSelect, "status"> | null;
+  isSameExecutionAgent: boolean;
+}) {
+  return input.isSameExecutionAgent && input.activeExecutionRun?.status === "running";
+}
+
 async function buildPaperclipWakePayload(input: {
   db: Db;
   companyId: string;
@@ -4065,12 +4072,12 @@ export function heartbeatService(db: Db) {
             normalizeAgentNameKey(executionAgent?.name);
           const isSameExecutionAgent =
             Boolean(executionAgentNameKey) && executionAgentNameKey === agentNameKey;
-          const shouldQueueFollowupForCommentWake =
-            Boolean(wakeCommentId) &&
-            activeExecutionRun.status === "running" &&
-            isSameExecutionAgent;
+          const shouldDeferForRunningExecution = shouldDeferIssueWakeForRunningExecution({
+            activeExecutionRun,
+            isSameExecutionAgent,
+          });
 
-          if (isSameExecutionAgent && !shouldQueueFollowupForCommentWake) {
+          if (isSameExecutionAgent && !shouldDeferForRunningExecution) {
             const mergedContextSnapshot = mergeCoalescedContextSnapshot(
               activeExecutionRun.contextSnapshot,
               enrichedContextSnapshot,

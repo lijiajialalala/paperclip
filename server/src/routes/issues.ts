@@ -551,7 +551,7 @@ export function issueRoutes(
     const bodyAction = action === "approved" ? "approved" : "rejected";
     const bodySuffix = action === "approved" ? "You may proceed." : `\n\n**Feedback:**\n${feedback}`;
     
-    await svc.addComment(issue.id, `${icon} Plan ${bodyAction} by ${actorName}. ${bodySuffix}`, {
+    const reviewComment = await svc.addComment(issue.id, `${icon} Plan ${bodyAction} by ${actorName}. ${bodySuffix}`, {
       agentId: actor.agentId ?? undefined,
       userId: actor.actorType === "user" ? actor.actorId : undefined,
       runId: actor.runId,
@@ -583,10 +583,17 @@ export function issueRoutes(
         source: "automation",
         triggerDetail: "system",
         reason: `plan_${action}`,
-        payload: { issueId: issue.id },
+        payload: { issueId: issue.id, commentId: reviewComment.id },
         requestedByActorType: actor.actorType,
         requestedByActorId: actor.actorId,
-        contextSnapshot: { issueId: issue.id, source: `issue.plan_${action}`, wakeReason: `plan_${action}` },
+        contextSnapshot: {
+          issueId: issue.id,
+          taskId: issue.id,
+          commentId: reviewComment.id,
+          wakeCommentId: reviewComment.id,
+          source: `issue.plan_${action}`,
+          wakeReason: `plan_${action}`,
+        },
       }).catch((err) => logger.warn({ err, issueId: issue.id }, `failed to wake assignee on plan ${action}`));
     }
   }

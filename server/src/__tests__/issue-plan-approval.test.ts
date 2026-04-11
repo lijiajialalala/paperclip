@@ -242,6 +242,44 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
     expect(res.body.issue.planApprovedAt).toBeDefined();
   });
 
+  it("includes the approval comment when waking the assignee after plan approval", async () => {
+    const issue = makeIssue({
+      assigneeAgentId: AGENT_ASSIGNEE,
+      status: "in_review",
+      planProposedAt: new Date(),
+    });
+    const updated = makeIssue({ ...issue, status: "todo", planApprovedAt: new Date() });
+    const approvalCommentId = randomUUID();
+
+    mockIssueSvc.getById.mockResolvedValue(issue);
+    mockIssueSvc.update.mockResolvedValue(updated);
+    mockIssueSvc.addComment.mockResolvedValueOnce({ id: approvalCommentId });
+
+    const res = await request(makeApp(boardActor()))
+      .post(`/api/issues/${ISSUE_ID}/approve-plan`)
+      .send();
+
+    expect(res.status).toBe(200);
+    expect(mockHeartbeat.wakeup).toHaveBeenCalledWith(
+      AGENT_ASSIGNEE,
+      expect.objectContaining({
+        reason: "plan_approved",
+        payload: expect.objectContaining({
+          issueId: ISSUE_ID,
+          commentId: approvalCommentId,
+        }),
+        contextSnapshot: expect.objectContaining({
+          issueId: ISSUE_ID,
+          taskId: ISSUE_ID,
+          commentId: approvalCommentId,
+          wakeCommentId: approvalCommentId,
+          wakeReason: "plan_approved",
+          source: "issue.plan_approved",
+        }),
+      }),
+    );
+  });
+
   // 6. Parent issue's assignee can approve child plan
   it("allows parent issue assignee to approve a plan", async () => {
     const issue = makeIssue({
@@ -353,18 +391,35 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
       planProposedAt: new Date(),
     });
     const updated = { ...issue, status: "todo", planProposedAt: null, planApprovedAt: null };
+    const rejectionCommentId = randomUUID();
 
     mockIssueSvc.getById.mockResolvedValue(issue);
     mockIssueSvc.update.mockResolvedValue(updated);
+    mockIssueSvc.addComment.mockResolvedValueOnce({ id: rejectionCommentId });
 
     const res = await request(makeApp(boardActor()))
       .post(`/api/issues/${ISSUE_ID}/reject-plan`)
       .send({ feedback: "Try again" });
 
     expect(res.status).toBe(200);
-    expect(mockHeartbeat.wakeup).toHaveBeenCalledWith(AGENT_ASSIGNEE, expect.objectContaining({
-      reason: "plan_rejected"
-    }));
+    expect(mockHeartbeat.wakeup).toHaveBeenCalledWith(
+      AGENT_ASSIGNEE,
+      expect.objectContaining({
+        reason: "plan_rejected",
+        payload: expect.objectContaining({
+          issueId: ISSUE_ID,
+          commentId: rejectionCommentId,
+        }),
+        contextSnapshot: expect.objectContaining({
+          issueId: ISSUE_ID,
+          taskId: ISSUE_ID,
+          commentId: rejectionCommentId,
+          wakeCommentId: rejectionCommentId,
+          wakeReason: "plan_rejected",
+          source: "issue.plan_rejected",
+        }),
+      }),
+    );
   });
 });
 
