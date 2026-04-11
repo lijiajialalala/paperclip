@@ -13,6 +13,7 @@ import {
   loadDismissedInboxItems,
   saveDismissedInboxItems,
   loadReadInboxItems,
+  normalizeTimestamp,
   saveReadInboxItems,
   READ_ITEMS_KEY,
 } from "../lib/inbox";
@@ -44,7 +45,7 @@ export function useDismissedInboxItems() {
 }
 
 export function useReadInboxItems() {
-  const [readItems, setReadItems] = useState<Set<string>>(loadReadInboxItems);
+  const [readItems, setReadItems] = useState(loadReadInboxItems);
 
   useEffect(() => {
     const handleStorage = (event: StorageEvent) => {
@@ -55,10 +56,10 @@ export function useReadInboxItems() {
     return () => window.removeEventListener("storage", handleStorage);
   }, []);
 
-  const markRead = (id: string) => {
+  const markRead = (id: string, activityAt: string | Date | number = Date.now()) => {
     setReadItems((prev) => {
-      const next = new Set(prev);
-      next.add(id);
+      const next = new Map(prev);
+      next.set(id, normalizeTimestamp(activityAt));
       saveReadInboxItems(next);
       return next;
     });
@@ -66,7 +67,7 @@ export function useReadInboxItems() {
 
   const markUnread = (id: string) => {
     setReadItems((prev) => {
-      const next = new Set(prev);
+      const next = new Map(prev);
       next.delete(id);
       saveReadInboxItems(next);
       return next;
@@ -78,6 +79,7 @@ export function useReadInboxItems() {
 
 export function useInboxBadge(companyId: string | null | undefined) {
   const { dismissed } = useDismissedInboxItems();
+  const { readItems } = useReadInboxItems();
 
   const { data: approvals = [] } = useQuery({
     queryKey: queryKeys.approvals.list(companyId!),
@@ -135,7 +137,8 @@ export function useInboxBadge(companyId: string | null | undefined) {
         heartbeatRuns,
         mineIssues,
         dismissed,
+        readItems,
       }),
-    [approvals, joinRequests, dashboard, heartbeatRuns, mineIssues, dismissed],
+    [approvals, joinRequests, dashboard, heartbeatRuns, mineIssues, dismissed, readItems],
   );
 }

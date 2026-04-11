@@ -7,6 +7,7 @@ export const DISMISSED_KEY = "paperclip:inbox:dismissed";
 export const READ_ITEMS_KEY = "paperclip:inbox:read-items";
 export const INBOX_LAST_TAB_KEY = "paperclip:inbox:last-tab";
 export const INBOX_ISSUE_COLUMNS_KEY = "paperclip:inbox:issue-columns";
+export type ReadInboxItems = Map<string, number>;
 export type InboxTab = "mine" | "recent" | "unread" | "all";
 export type InboxApprovalFilter = "all" | "actionable" | "resolved";
 export const inboxIssueColumns = ["status", "id", "assignee", "project", "workspace", "labels", "updated"] as const;
@@ -60,18 +61,47 @@ export function saveDismissedInboxItems(ids: Set<string>) {
   }
 }
 
-export function loadReadInboxItems(): Set<string> {
+function normalizeReadInboxItems(raw: unknown, legacyReadAt: number): ReadInboxItems {
+  if (Array.isArray(raw)) {
+    return new Map(
+      raw.flatMap((entry): [string, number][] => {
+        if (typeof entry === "string") return [[entry, legacyReadAt]];
+        if (
+          Array.isArray(entry) &&
+          entry.length >= 2 &&
+          typeof entry[0] === "string" &&
+          typeof entry[1] === "number" &&
+          Number.isFinite(entry[1])
+        ) {
+          return [[entry[0], entry[1]]];
+        }
+        return [];
+      }),
+    );
+  }
+
+  if (!raw || typeof raw !== "object") return new Map();
+  return new Map(
+    Object.entries(raw as Record<string, unknown>).flatMap(([key, value]): [string, number][] => {
+      if (typeof value === "number" && Number.isFinite(value)) return [[key, value]];
+      return [];
+    }),
+  );
+}
+
+export function loadReadInboxItems(): ReadInboxItems {
   try {
     const raw = localStorage.getItem(READ_ITEMS_KEY);
-    return raw ? new Set(JSON.parse(raw)) : new Set();
+    if (!raw) return new Map();
+    return normalizeReadInboxItems(JSON.parse(raw), Date.now());
   } catch {
-    return new Set();
+    return new Map();
   }
 }
 
-export function saveReadInboxItems(ids: Set<string>) {
+export function saveReadInboxItems(ids: ReadonlyMap<string, number>) {
   try {
-    localStorage.setItem(READ_ITEMS_KEY, JSON.stringify([...ids]));
+    localStorage.setItem(READ_ITEMS_KEY, JSON.stringify(Object.fromEntries(ids)));
   } catch {
     // Ignore localStorage failures.
   }
@@ -210,10 +240,21 @@ export function getLatestFailedRunsByAgent(runs: HeartbeatRun[]): HeartbeatRun[]
   return Array.from(latestByAgent.values()).filter((run) => FAILED_RUN_STATUSES.has(run.status));
 }
 
-export function normalizeTimestamp(value: string | Date | null | undefined): number {
+export function normalizeTimestamp(value: string | Date | number | null | undefined): number {
   if (!value) return 0;
+  if (typeof value === "number") return Number.isFinite(value) ? value : 0;
   const timestamp = new Date(value).getTime();
   return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+export function isInboxEntityRead(
+  readItems: ReadonlyMap<string, number>,
+  itemKey: string,
+  activityAt: string | Date | number | null | undefined,
+): boolean {
+  const readAt = readItems.get(itemKey);
+  if (readAt == null) return false;
+  return readAt >= normalizeTimestamp(activityAt);
 }
 
 export function issueLastActivityTimestamp(issue: Issue): number {
@@ -265,6 +306,14 @@ export function approvalActivityTimestamp(approval: Approval): number {
   const updatedAt = normalizeTimestamp(approval.updatedAt);
   if (updatedAt > 0) return updatedAt;
   return normalizeTimestamp(approval.createdAt);
+}
+
+export function runActivityTimestamp(run: HeartbeatRun): number {
+  return normalizeTimestamp(run.createdAt);
+}
+
+export function joinRequestActivityTimestamp(joinRequest: JoinRequest): number {
+  return normalizeTimestamp(joinRequest.updatedAt ?? joinRequest.createdAt);
 }
 
 export function getInboxWorkItems({
@@ -343,6 +392,7 @@ export function computeInboxBadgeData({
   heartbeatRuns,
   mineIssues,
   dismissed,
+  readItems = new Map<string, number>(),
 }: {
   approvals: Approval[];
   joinRequests: JoinRequest[];
@@ -350,17 +400,23 @@ export function computeInboxBadgeData({
   heartbeatRuns: HeartbeatRun[];
   mineIssues: Issue[];
   dismissed: Set<string>;
+  readItems?: ReadonlyMap<string, number>;
 }): InboxBadgeData {
   const actionableApprovals = approvals.filter(
     (approval) =>
       ACTIONABLE_APPROVAL_STATUSES.has(approval.status) &&
-      !dismissed.has(`approval:${approval.id}`),
+      !dismissed.has(`approval:${approval.id}`) &&
+      !isInboxEntityRead(readItems, `approval:${approval.id}`, approval.updatedAt),
   ).length;
   const failedRuns = getLatestFailedRunsByAgent(heartbeatRuns).filter(
-    (run) => !dismissed.has(`run:${run.id}`),
+    (run) =>
+      !dismissed.has(`run:${run.id}`) &&
+      !isInboxEntityRead(readItems, `run:${run.id}`, run.createdAt),
   ).length;
   const visibleJoinRequests = joinRequests.filter(
-    (jr) => !dismissed.has(`join:${jr.id}`),
+    (jr) =>
+      !dismissed.has(`join:${jr.id}`) &&
+      !isInboxEntityRead(readItems, `join:${jr.id}`, jr.updatedAt ?? jr.createdAt),
   ).length;
   const visibleMineIssues = mineIssues.length;
   const agentErrorCount = dashboard?.agents.error ?? 0;

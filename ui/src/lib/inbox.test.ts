@@ -19,6 +19,7 @@ import {
   getInboxKeyboardSelectionIndex,
   getRecentTouchedIssues,
   getUnreadTouchedIssues,
+  loadReadInboxItems,
   isMineInboxTab,
   loadInboxIssueColumns,
   loadLastInboxTab,
@@ -319,6 +320,53 @@ describe("inbox helpers", () => {
     });
   });
 
+  it("excludes locally read non-issue inbox items from the badge count", () => {
+    const result = computeInboxBadgeData({
+      approvals: [makeApprovalWithTimestamps("approval-1", "pending", "2026-03-11T00:00:00.000Z")],
+      joinRequests: [makeJoinRequest("join-1")],
+      dashboard: undefined,
+      heartbeatRuns: [makeRun("run-1", "failed", "2026-03-11T00:00:00.000Z")],
+      mineIssues: [],
+      dismissed: new Set<string>(),
+      readItems: new Map<string, number>([
+        ["approval:approval-1", new Date("2026-03-11T00:00:00.000Z").getTime()],
+        ["run:run-1", new Date("2026-03-11T00:00:00.000Z").getTime()],
+        ["join:join-1", new Date("2026-03-11T00:00:00.000Z").getTime()],
+      ]),
+    });
+
+    expect(result).toEqual({
+      inbox: 0,
+      approvals: 0,
+      failedRuns: 0,
+      joinRequests: 0,
+      mineIssues: 0,
+      alerts: 0,
+    });
+  });
+
+  it("resurfaces approvals in the badge after they change", () => {
+    const readAt = new Date("2026-03-11T00:00:00.000Z").getTime();
+    const result = computeInboxBadgeData({
+      approvals: [makeApprovalWithTimestamps("approval-1", "revision_requested", "2026-03-12T00:00:00.000Z")],
+      joinRequests: [],
+      dashboard: undefined,
+      heartbeatRuns: [],
+      mineIssues: [],
+      dismissed: new Set<string>(),
+      readItems: new Map<string, number>([["approval:approval-1", readAt]]),
+    });
+
+    expect(result).toEqual({
+      inbox: 1,
+      approvals: 1,
+      failedRuns: 0,
+      joinRequests: 0,
+      mineIssues: 0,
+      alerts: 0,
+    });
+  });
+
   it("keeps read issues in the touched list but excludes them from unread counts", () => {
     const issues = [makeIssue("1", true), makeIssue("2", false)];
 
@@ -501,6 +549,17 @@ describe("inbox helpers", () => {
 
     saveLastInboxTab("all");
     expect(loadLastInboxTab()).toBe("all");
+  });
+
+  it("upgrades legacy read inbox storage into timestamped entries", () => {
+    localStorage.setItem("paperclip:inbox:read-items", JSON.stringify(["approval:approval-1"]));
+
+    const readItems = loadReadInboxItems();
+    const readAt = readItems.get("approval:approval-1");
+
+    expect(readItems.has("approval:approval-1")).toBe(true);
+    expect(typeof readAt).toBe("number");
+    expect(Number.isFinite(readAt)).toBe(true);
   });
 
   it("defaults issue columns to the current inbox layout", () => {

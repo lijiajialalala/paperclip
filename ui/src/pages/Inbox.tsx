@@ -79,6 +79,7 @@ import type { Approval, HeartbeatRun, Issue, JoinRequest } from "@paperclipai/sh
 import {
   ACTIONABLE_APPROVAL_STATUSES,
   DEFAULT_INBOX_ISSUE_COLUMNS,
+  approvalActivityTimestamp,
   getAvailableInboxIssueColumns,
   getApprovalsForTab,
   getInboxWorkItems,
@@ -86,10 +87,13 @@ import {
   getLatestFailedRunsByAgent,
   getRecentTouchedIssues,
   isMineInboxTab,
+  isInboxEntityRead,
+  joinRequestActivityTimestamp,
   loadInboxIssueColumns,
   normalizeInboxIssueColumns,
   resolveIssueWorkspaceName,
   resolveInboxSelectionIndex,
+  runActivityTimestamp,
   saveInboxIssueColumns,
   InboxApprovalFilter,
   type InboxIssueColumn,
@@ -119,6 +123,12 @@ function firstNonEmptyLine(value: string | null | undefined): string | null {
 
 function runFailureMessage(run: HeartbeatRun): string {
   return firstNonEmptyLine(run.error) ?? firstNonEmptyLine(run.stderrExcerpt) ?? "Run exited with an error.";
+}
+
+function nonIssueActivityTimestamp(item: Extract<InboxWorkItem, { kind: "approval" | "failed_run" | "join_request" }>): number {
+  if (item.kind === "approval") return approvalActivityTimestamp(item.approval);
+  if (item.kind === "failed_run") return runActivityTimestamp(item.run);
+  return joinRequestActivityTimestamp(item.joinRequest);
 }
 
 function approvalStatusLabel(status: Approval["status"]): string {
@@ -1323,9 +1333,9 @@ export function Inbox() {
     },
   });
 
-  const handleMarkNonIssueRead = useCallback((key: string) => {
+  const handleMarkNonIssueRead = useCallback((key: string, activityAt: number) => {
     setFadingNonIssueItems((prev) => new Set(prev).add(key));
-    markItemRead(key);
+    markItemRead(key, activityAt);
     setTimeout(() => {
       setFadingNonIssueItems((prev) => {
         const next = new Set(prev);
@@ -1347,9 +1357,9 @@ export function Inbox() {
     }, 200);
   }, [dismiss]);
 
-  const nonIssueUnreadState = (key: string): NonIssueUnreadState => {
+  const nonIssueUnreadState = (key: string, activityAt: number): NonIssueUnreadState => {
     if (!canArchiveFromTab) return null;
-    const isRead = readItems.has(key);
+    const isRead = isInboxEntityRead(readItems, key, activityAt);
     const isFading = fadingNonIssueItems.has(key);
     if (isFading) return "fading";
     if (!isRead) return "visible";
@@ -1485,8 +1495,9 @@ export function Inbox() {
             }
           } else {
             const key = getWorkItemKey(item);
-            if (!st.readItems.has(key)) {
-              act.markNonIssueRead(key);
+            const activityAt = nonIssueActivityTimestamp(item);
+            if (!isInboxEntityRead(st.readItems, key, activityAt)) {
+              act.markNonIssueRead(key, activityAt);
             }
           }
           break;
@@ -1795,8 +1806,8 @@ export function Inbox() {
                       onApprove={() => approveMutation.mutate(item.approval.id)}
                       onReject={() => rejectMutation.mutate(item.approval.id)}
                       isPending={approveMutation.isPending || rejectMutation.isPending}
-                      unreadState={nonIssueUnreadState(approvalKey)}
-                      onMarkRead={() => handleMarkNonIssueRead(approvalKey)}
+                      unreadState={nonIssueUnreadState(approvalKey, approvalActivityTimestamp(item.approval))}
+                      onMarkRead={() => handleMarkNonIssueRead(approvalKey, approvalActivityTimestamp(item.approval))}
                       onArchive={canArchiveFromTab ? () => handleArchiveNonIssue(approvalKey) : undefined}
                       archiveDisabled={isArchiving}
                       className={
@@ -1833,8 +1844,8 @@ export function Inbox() {
                       onDismiss={() => dismiss(runKey)}
                       onRetry={() => retryRunMutation.mutate(item.run)}
                       isRetrying={retryingRunIds.has(item.run.id)}
-                      unreadState={nonIssueUnreadState(runKey)}
-                      onMarkRead={() => handleMarkNonIssueRead(runKey)}
+                      unreadState={nonIssueUnreadState(runKey, runActivityTimestamp(item.run))}
+                      onMarkRead={() => handleMarkNonIssueRead(runKey, runActivityTimestamp(item.run))}
                       onArchive={canArchiveFromTab ? () => handleArchiveNonIssue(runKey) : undefined}
                       archiveDisabled={isArchiving}
                       className={
@@ -1868,8 +1879,8 @@ export function Inbox() {
                       onApprove={() => approveJoinMutation.mutate(item.joinRequest)}
                       onReject={() => rejectJoinMutation.mutate(item.joinRequest)}
                       isPending={approveJoinMutation.isPending || rejectJoinMutation.isPending}
-                      unreadState={nonIssueUnreadState(joinKey)}
-                      onMarkRead={() => handleMarkNonIssueRead(joinKey)}
+                      unreadState={nonIssueUnreadState(joinKey, joinRequestActivityTimestamp(item.joinRequest))}
+                      onMarkRead={() => handleMarkNonIssueRead(joinKey, joinRequestActivityTimestamp(item.joinRequest))}
                       onArchive={canArchiveFromTab ? () => handleArchiveNonIssue(joinKey) : undefined}
                       archiveDisabled={isArchiving}
                       className={
