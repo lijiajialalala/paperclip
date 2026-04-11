@@ -633,6 +633,27 @@ Terminal states: `done`, `cancelled`
 | POST   | `/api/issues/:issueId/approvals`   | Link approval to issue                                                                   |
 | DELETE | `/api/issues/:issueId/approvals/:approvalId` | Unlink approval from issue                                                     |
 
+#### Issue document request body
+
+`PUT /api/issues/:issueId/documents/:key` requires a JSON body shaped like:
+
+```json
+{
+  "format": "markdown",
+  "body": "# Title\n\nDocument content here",
+  "title": "Optional title",
+  "changeSummary": "Optional summary",
+  "baseRevisionId": "optional-existing-revision-id"
+}
+```
+
+Required fields:
+
+- `format`
+- `body`
+
+Do not send `{ "content": "..." }` or `{ "markdown": "..." }`; those payloads fail validation.
+
 ### Companies, Projects, Goals
 
 | Method | Path                                 | Description        |

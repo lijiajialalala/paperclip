@@ -332,6 +332,35 @@ PATCH /api/agents/{agentId}/instructions-path
 | Fire webhook (external)                   | `POST /api/routine-triggers/public/:publicId/fire`                                         |
 | List runs                                 | `GET /api/routines/:routineId/runs`                                                        |
 
+### Issue Document Writes
+
+When calling `PUT /api/issues/:issueId/documents/:key`, the JSON body must include both:
+
+- `format`: currently use `"markdown"`
+- `body`: the full markdown content string
+
+Minimal example:
+
+```bash
+PUT /api/issues/{issueId}/documents/{key}
+Headers:
+  Authorization: Bearer $PAPERCLIP_API_KEY
+  X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
+  Content-Type: application/json
+{
+  "format": "markdown",
+  "body": "# Title\n\nDocument content here"
+}
+```
+
+Optional fields:
+
+- `title`
+- `changeSummary`
+- `baseRevisionId` when updating an existing document revision
+
+Do not send ad hoc payloads like `{ "content": "..." }` or `{ "markdown": "..." }`; the server rejects them with a validation error.
+
 ## Company Import / Export
 
 Use the company-scoped routes when a CEO agent needs to inspect or move package content.
@@ -367,7 +396,7 @@ Results are ranked by relevance: title matches first, then identifier, descripti
 
 ## Self-Test Playbook (App-Level)
 
-Use this when validating Paperclip itself (assignment flow, checkouts, run visibility, and status transitions).
+Use this when validating Paperclip itself (assignment flow, checkouts, run visibility, and status transitions) from a human shell, not from inside another agent's live heartbeat.
 
 1. Create a throwaway issue assigned to a known local agent (`claudecoder` or `codexcoder`):
 
@@ -385,6 +414,12 @@ npx paperclipai issue create \
 ```bash
 npx paperclipai heartbeat run --agent-id "$PAPERCLIP_AGENT_ID"
 ```
+
+Notes:
+
+- `heartbeat run` does not accept `--company-id`.
+- If you are already inside an agent heartbeat, do not use the CLI to invoke a different agent's heartbeat. Cross-agent CLI invocation fails with "Agent can only invoke itself".
+- Inside a live agent run, wake other agents by normal Paperclip flow: assign the issue, comment with context, or otherwise let the platform wake the assignee.
 
 3. Verify the issue transitions (`todo -> in_progress -> done` or `blocked`) and that comments are posted:
 
