@@ -142,7 +142,9 @@ describeEmbeddedPostgres("qaWritebackService", () => {
     expect(comments[0]?.body).toContain("Verdict: pass");
   });
 
-  it("does not mutate the issue thread when the run failed with process_lost", async () => {
+  it("uses platform_interrupted (not alerted_missing) when the run failed with process_lost", async () => {
+    // Fix #2 regression: process_lost must NOT block canCloseUpstream.
+    // The status must be platform_interrupted so the close gate treats it as neutral.
     const { companyId, qaAgentId, issueId } = await seedFixture();
     const agent = await getAgent(qaAgentId);
 
@@ -173,8 +175,55 @@ describeEmbeddedPostgres("qaWritebackService", () => {
     const updatedIssue = await getIssue(issueId);
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
 
-    expect(settlement.issueWriteback.status).toBe("alerted_missing");
+    // Fix #2: must be platform_interrupted, NOT alerted_missing
+    expect(settlement.issueWriteback.status).toBe("platform_interrupted");
+    // canCloseUpstream must be null (neutral), NOT false (blocking)
+    expect(settlement.issueWriteback.canCloseUpstream).toBeNull();
+    // Issue status unchanged — platform interruption must not flip issue state
     expect(updatedIssue.status).toBe("in_review");
+    // No automated comment from a process_lost run
     expect(comments).toHaveLength(0);
+  });
+
+  it("is idempotent: calling settleTerminalQaRun twice does not write extra comments", async () => {
+    // Fix #3: concurrent / retry invocations must not produce duplicate verdict comments.
+    const { companyId, qaAgentId, issueId } = await seedFixture();
+    const createdAt = new Date("2026-04-08T00:00:00.000Z");
+
+    await db.insert(heartbeatRuns).values({
+      id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      companyId,
+      agentId: qaAgentId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "succeeded",
+      contextSnapshot: { issueId },
+      resultJson: { verdict: "pass", summary: "All checks green." },
+      startedAt: new Date(createdAt.getTime() - 60_000),
+      finishedAt: createdAt,
+      createdAt,
+      updatedAt: createdAt,
+    });
+
+    const run = await getRun("cccccccc-cccc-4ccc-8ccc-cccccccccccc");
+    const agent = await getAgent(qaAgentId);
+    const svc = qaWritebackService(db);
+
+    // First call — does the real work
+    const first = await svc.settleTerminalQaRun({ run, runAgent: agent, issueId });
+
+    // Reload the run from DB (now has resultJson.issueWriteback)
+    const runAfterFirst = await getRun(run.id);
+
+    // Second call (simulates retry / concurrent invocation)
+    const second = await svc.settleTerminalQaRun({ run: runAfterFirst, runAgent: agent, issueId });
+
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+
+    // Both calls return same status
+    expect(first.issueWriteback.status).toBe(second.issueWriteback.status);
+    // Exactly one verdict comment, not two
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.body).toContain("## QA Verdict");
   });
 });

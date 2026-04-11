@@ -1504,3 +1504,243 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Fix #1 — status drift self-repair
+// ---------------------------------------------------------------------------
+describeEmbeddedPostgres("issueService.markDone — status drift self-repair", () => {
+  let db!: ReturnType<typeof createDb>;
+  let svc!: ReturnType<typeof issueService>;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-drift-repair-");
+    db = createDb(tempDb.connectionString);
+    svc = issueService(db);
+  }, embeddedPostgresSuiteTimeoutMs);
+
+  afterEach(async () => {
+    await db.delete(issueComments);
+    await db.delete(activityLog);
+    await db.delete(issues);
+    await db.delete(heartbeatRuns);
+    await db.delete(agents);
+    await db.delete(instanceSettings);
+    await db.delete(companies);
+  });
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  it("allows markDone when authoritativeStatus is done even if DB row is still in_progress (positive drift)", async () => {
+    // Fix #1 regression:
+    // Before the fix, canClose required consistency === "consistent". With a positive drift
+    // (event log says done, DB row still says in_progress), markDone was incorrectly blocked.
+    // After the fix, canClose is based on authoritativeStatus, and markDone also repairs the DB row.
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    const runId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "CMPA",
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Engineer",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    // DB row says in_progress (stale)
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      issueNumber: 77,
+      identifier: "CMPA-77",
+      title: "Drifted issue",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId: agentId,
+    });
+
+    // Event log authoritatively says done (agent marked it done already)
+    await db.insert(activityLog).values({
+      companyId,
+      actorType: "agent",
+      actorId: agentId,
+      agentId,
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: issueId,
+      createdAt: new Date("2026-04-08T00:05:00.000Z"),
+      details: {
+        status: "done",
+        _previous: { status: "in_progress" },
+      },
+    });
+
+    // markDone must succeed (not throw "issue_done_blocked_by_status_truth")
+    await expect(
+      svc.assertCanTransitionIssueToDone({
+        issueId,
+        companyId,
+        actorType: "agent",
+        actorAgentId: agentId,
+        actorRunId: runId,
+      }),
+    ).resolves.not.toThrow();
+
+    // After assertCanTransitionIssueToDone, the DB row must be repaired to 'done' (repairDrift)
+    const updatedIssue = await db.select({ status: issues.status }).from(issues).where(eq(issues.id, issueId)).then((r) => r[0]!);
+    expect(updatedIssue.status).toBe("done");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix #7 — parent batch auto-comment on child lane status change
+// ---------------------------------------------------------------------------
+describeEmbeddedPostgres("recomputeAncestorStatuses — parent batch auto-comment", () => {
+  let db!: ReturnType<typeof createDb>;
+  let svc!: ReturnType<typeof issueService>;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-ancestor-comment-");
+    db = createDb(tempDb.connectionString);
+    svc = issueService(db);
+  }, embeddedPostgresSuiteTimeoutMs);
+
+  afterEach(async () => {
+    await db.delete(issueComments);
+    await db.delete(activityLog);
+    await db.delete(issues);
+    await db.delete(heartbeatRuns);
+    await db.delete(agents);
+    await db.delete(instanceSettings);
+    await db.delete(companies);
+  });
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  it("posts a system comment on the parent when all child lanes are done", async () => {
+    // Fix #7: when a child lane transitions to done and causes the parent to recompute
+    // to 'done', a summary comment must appear on the parent recording that change.
+    const companyId = randomUUID();
+    const parentId = randomUUID();
+    const childId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "CMPA",
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(issues).values([
+      {
+        id: parentId,
+        companyId,
+        issueNumber: 80,
+        identifier: "CMPA-80",
+        title: "Batch issue",
+        status: "in_progress",
+        priority: "medium",
+      },
+      {
+        id: childId,
+        companyId,
+        issueNumber: 81,
+        identifier: "CMPA-81",
+        title: "Child lane",
+        status: "in_progress",
+        priority: "medium",
+        parentId,
+      },
+    ]);
+
+    // Transition child to done — this triggers recomputeAncestorStatuses
+    await svc.update(childId, { status: "done" });
+
+    // Parent should now be done
+    const parentRow = await db.select({ status: issues.status }).from(issues).where(eq(issues.id, parentId)).then((r) => r[0]!);
+    expect(parentRow.status).toBe("done");
+
+    // A system comment must have been written to the parent (Fix #7)
+    const parentComments = await db.select({ body: issueComments.body }).from(issueComments).where(eq(issueComments.issueId, parentId));
+    expect(parentComments.length).toBeGreaterThanOrEqual(1);
+    const batchComment = parentComments.find((c) => c.body.includes("Batch status updated"));
+    expect(batchComment).toBeDefined();
+    expect(batchComment?.body).toContain("`done`");
+    expect(batchComment?.body).toContain("1/1 lanes done");
+  });
+
+  it("posts a comment even when only some child lanes are done (partial progress)", async () => {
+    const companyId = randomUUID();
+    const parentId = randomUUID();
+    const child1Id = randomUUID();
+    const child2Id = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "CMPA",
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(issues).values([
+      {
+        id: parentId,
+        companyId,
+        issueNumber: 90,
+        identifier: "CMPA-90",
+        title: "Batch 2",
+        status: "todo",
+        priority: "medium",
+      },
+      {
+        id: child1Id,
+        companyId,
+        issueNumber: 91,
+        identifier: "CMPA-91",
+        title: "Lane 1",
+        status: "todo",
+        priority: "medium",
+        parentId,
+      },
+      {
+        id: child2Id,
+        companyId,
+        issueNumber: 92,
+        identifier: "CMPA-92",
+        title: "Lane 2",
+        status: "todo",
+        priority: "medium",
+        parentId,
+      },
+    ]);
+
+    // Only one child done — parent should transition to in_progress
+    await svc.update(child1Id, { status: "done" });
+
+    const parentComments = await db.select({ body: issueComments.body }).from(issueComments).where(eq(issueComments.issueId, parentId));
+    expect(parentComments.length).toBeGreaterThanOrEqual(1);
+    const batchComment = parentComments.find((c) => c.body.includes("Batch status updated"));
+    expect(batchComment).toBeDefined();
+    // Should show 1 out of 2 lanes (not cancelled count)
+    expect(batchComment?.body).toContain("1/2 lanes done");
+  });
+});
+
