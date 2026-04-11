@@ -13,6 +13,7 @@ export type QaIssueWritebackStatus =
   | "agent_written"
   | "platform_written"
   | "platform_repaired_partial"
+  | "platform_interrupted"
   | "alerted_missing"
   | "alerted_inconclusive";
 
@@ -352,10 +353,27 @@ export function qaWritebackService(db: Db) {
       runAgent: AgentRow;
       issueId: string;
     }): Promise<QaWritebackSettlement> => {
+      // Idempotency guard: if a terminal writeback already exists, return it immediately.
+      // This prevents duplicate comments and conflicting verdicts from concurrent invocations.
+      const existingWriteback = readQaIssueWriteback(input.run.resultJson);
+      const TERMINAL_WRITEBACK_STATUSES: QaIssueWritebackStatus[] = [
+        "agent_written",
+        "platform_written",
+        "platform_repaired_partial",
+        "platform_interrupted",
+        "alerted_missing",
+        "alerted_inconclusive",
+      ];
+      if (existingWriteback && TERMINAL_WRITEBACK_STATUSES.includes(existingWriteback.status)) {
+        return { issueWriteback: existingWriteback };
+      }
+
       if (input.run.errorCode === "process_lost") {
+        // platform_interrupted is a neutral status: it does NOT block canCloseUpstream.
+        // The QA gate must not penalize product completion for platform-level failures.
         return {
           issueWriteback: buildQaIssueWriteback({
-            status: "alerted_missing",
+            status: "platform_interrupted",
             verdict: null,
             source: "platform",
             canCloseUpstream: null,

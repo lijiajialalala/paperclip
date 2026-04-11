@@ -63,6 +63,8 @@ function buildSummaryFromWriteback(run: QaRunRow, writeback: QaIssueWriteback | 
   const alertOpen =
     writeback?.status === "alerted_missing"
     || writeback?.status === "alerted_inconclusive";
+    // Note: platform_interrupted is intentionally excluded — it is a neutral platform signal
+    // and must not block canCloseUpstream or trigger manual recovery flows.
 
   return {
     verdict,
@@ -129,15 +131,27 @@ export function qaIssueStateService(db: Db) {
 
       const persistedWriteback =
         readQaIssueWriteback(latestRun.resultJson)
-        ?? buildQaIssueWriteback({
-          status: "alerted_missing",
-          verdict: classifyQaVerdictFromRun(latestRun).verdict,
-          source: "alert",
-          canCloseUpstream: false,
-          commentId: null,
-          writebackAt: latestRun.finishedAt?.toISOString() ?? latestRun.createdAt.toISOString(),
-          alertType: "missing_writeback",
-        });
+        ?? (latestRun.errorCode === "process_lost"
+          // process_lost runs are platform failures, not product failures.
+          // Use platform_interrupted (canCloseUpstream: null) so the close gate is not blocked.
+          ? buildQaIssueWriteback({
+              status: "platform_interrupted",
+              verdict: null,
+              source: "platform",
+              canCloseUpstream: null,
+              commentId: null,
+              writebackAt: latestRun.finishedAt?.toISOString() ?? latestRun.createdAt.toISOString(),
+              alertType: null,
+            })
+          : buildQaIssueWriteback({
+              status: "alerted_missing",
+              verdict: classifyQaVerdictFromRun(latestRun).verdict,
+              source: "alert",
+              canCloseUpstream: false,
+              commentId: null,
+              writebackAt: latestRun.finishedAt?.toISOString() ?? latestRun.createdAt.toISOString(),
+              alertType: "missing_writeback",
+            }));
       const baseSummary = buildSummaryFromWriteback(latestRun, persistedWriteback);
 
       if (!baseSummary.alertOpen) {

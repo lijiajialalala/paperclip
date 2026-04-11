@@ -1,4 +1,4 @@
-﻿import { and, asc, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   activityLog,
@@ -1313,6 +1313,13 @@ export function issueService(db: Db) {
 
       if (input.actorType !== "board") {
         const statusSummary = await statusTruth.getIssueStatusTruthSummary(input.issueId);
+        if (statusSummary?.repairDrift) {
+          // Heal the persisted row to the authoritative status so downstream readers converge.
+          await db
+            .update(issues)
+            .set({ status: statusSummary.authoritativeStatus, updatedAt: new Date() })
+            .where(eq(issues.id, input.issueId));
+        }
         if (statusSummary?.canClose === false) {
           throw unprocessable("Issue cannot be marked done because status truth indicates it is not closable", {
             code: "issue_done_blocked_by_status_truth",
