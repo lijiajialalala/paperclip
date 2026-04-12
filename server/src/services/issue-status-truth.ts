@@ -187,8 +187,8 @@ function buildSummary(issue: IssueRow, latestActivity: StatusActivityRow | null)
     authoritativeActorType: coerceActorType(latestActivity?.actorType),
     authoritativeActorId: latestActivity?.actorId ?? null,
     reasonSummary: summarizeReason(authoritativeStatus, details, authoritativeSource),
-    canExecute: canExecuteForStatus(persistedStatus),
-    canClose: canCloseForStatus(persistedStatus),
+    canExecute: consistency === "consistent" && canExecuteForStatus(effectiveStatus),
+    canClose: canCloseForStatus(authoritativeStatus),
     driftCode,
     evidence,
   };
@@ -206,7 +206,7 @@ export function applyEffectiveStatus<T extends { status: string }>(
   }
   return {
     ...issue,
-    status: coerceIssueStatus(issue.status),
+    status: summary.effectiveStatus,
     statusTruthSummary: summary,
   } as EffectiveStatusIssue<T>;
 }

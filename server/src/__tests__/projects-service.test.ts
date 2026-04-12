@@ -95,8 +95,9 @@ describeEmbeddedPostgres("projectService issue lifecycle", () => {
       {
         id: childIssueId,
         companyId,
+        projectId,
         parentId: rootIssueId,
-        title: "Child issue without direct project id",
+        title: "Child issue in same project",
         status: "todo",
         priority: "medium",
       },
@@ -237,6 +238,7 @@ describeEmbeddedPostgres("projectService issue lifecycle", () => {
       {
         id: childIssueId,
         companyId,
+        projectId,
         parentId: rootIssueId,
         title: "Child issue",
         status: "todo",

@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, isNull, or } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   activityLog,
@@ -336,10 +336,13 @@ async function collectProjectIssueTreeIds(dbOrTx: any, projectId: string): Promi
     });
     if (batch.length === 0) break;
 
+    // Only descend into children that also belong to this project,
+    // preventing cross-project data loss when parent-child links
+    // span different projects.
     frontier = await dbOrTx
       .select({ id: issues.id })
       .from(issues)
-      .where(inArray(issues.parentId, batch))
+      .where(and(inArray(issues.parentId, batch), eq(issues.projectId, projectId)))
       .then((rows: Array<{ id: string }>) => rows.map((row) => row.id));
   }
 
@@ -393,6 +396,22 @@ async function deleteProjectIssueGraph(dbOrTx: any, projectId: string) {
     await dbOrTx.delete(costEvents).where(eq(costEvents.projectId, projectId));
     return;
   }
+
+  // Detach cross-project children whose parent is about to be deleted.
+  // These issues belong to other projects and must not be removed, but
+  // their parentId FK would block the delete.
+  await dbOrTx
+    .update(issues)
+    .set({ parentId: null, updatedAt: new Date() })
+    .where(
+      and(
+        inArray(issues.parentId, issueIds),
+        or(
+          isNull(issues.projectId),
+          sql`${issues.projectId} != ${projectId}`,
+        ),
+      ),
+    );
 
   const [attachmentAssetIds, issueDocumentIds] = await Promise.all([
     dbOrTx
