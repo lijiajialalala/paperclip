@@ -141,7 +141,7 @@ function sameRunLock(checkoutRunId: string | null, actorRunId: string | null) {
 }
 
 const TERMINAL_HEARTBEAT_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
-const AUTO_RECOMPUTED_ANCESTOR_STATUSES = new Set(["backlog", "todo", "in_progress"]);
+const AUTO_RECOMPUTED_ANCESTOR_STATUSES = new Set(["backlog", "todo", "in_progress", "done"]);
 const ACTIVE_CHILD_ISSUE_STATUSES = new Set(["in_progress", "in_review"]);
 
 function escapeLikePattern(value: string): string {
@@ -1371,6 +1371,18 @@ export function issueService(db: Db) {
       }
 
       if (input.actorType !== "board") {
+        const statusSummary = await statusTruth.getIssueStatusTruthSummary(input.issueId);
+        if (statusSummary?.canClose === false) {
+          throw unprocessable("Issue cannot be marked done because status truth indicates it is not closable", {
+            code: "issue_done_blocked_by_status_truth",
+            effectiveStatus: statusSummary.effectiveStatus,
+            persistedStatus: statusSummary.persistedStatus,
+            authoritativeStatus: statusSummary.authoritativeStatus,
+            consistency: statusSummary.consistency,
+            driftCode: statusSummary.driftCode,
+          });
+        }
+
         const qaSummary = await qaIssueState.getIssueQaSummary(input.issueId);
         if (qaSummary?.canCloseUpstream === false) {
           throw unprocessable("Issue cannot be marked done because QA writeback still blocks close-out", {

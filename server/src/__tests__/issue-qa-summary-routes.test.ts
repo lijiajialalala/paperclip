@@ -85,7 +85,7 @@ vi.mock("../services/qa-issue-state.js", () => ({
 
 vi.mock("../services/issue-status-truth.js", () => ({
   applyEffectiveStatus: <T extends { status: string }>(issue: T, summary: any) => summary
-    ? { ...issue, statusTruthSummary: summary }
+    ? { ...issue, status: summary.effectiveStatus, statusTruthSummary: summary }
     : issue,
   issueStatusTruthService: () => mockStatusTruth,
 }));
@@ -246,7 +246,7 @@ describe("issue QA summary routes", () => {
     expect(res.status).toBe(200);
     expect(res.body.issue).toEqual(expect.objectContaining({
       id: issueId,
-      status: "in_progress",
+      status: "blocked",
       statusTruthSummary: expect.objectContaining({
         effectiveStatus: "blocked",
         consistency: "drifted",
@@ -268,7 +268,7 @@ describe("issue QA summary routes", () => {
     expect(mockStatusTruth.getIssueStatusTruthSummary).toHaveBeenCalledWith(issueId);
     expect(res.body).toEqual(expect.objectContaining({
       id: issueId,
-      status: "in_progress",
+      status: "blocked",
       statusTruthSummary: expect.objectContaining({
         effectiveStatus: "blocked",
         consistency: "drifted",
@@ -276,7 +276,7 @@ describe("issue QA summary routes", () => {
     }));
   });
 
-  it("passes persisted status filters through to the issue service", async () => {
+  it("filters company issue lists by effective status instead of persisted row status", async () => {
     mockIssueService.list.mockResolvedValueOnce([
       {
         id: issueId,
@@ -298,12 +298,12 @@ describe("issue QA summary routes", () => {
 
     expect(res.status).toBe(200);
     expect(mockIssueService.list).toHaveBeenCalledWith(companyId, expect.objectContaining({
-      status: "blocked",
+      status: undefined,
     }));
     expect(res.body).toEqual([
       expect.objectContaining({
         id: issueId,
-        status: "in_progress",
+        status: "blocked",
         statusTruthSummary: expect.objectContaining({
           effectiveStatus: "blocked",
           consistency: "drifted",

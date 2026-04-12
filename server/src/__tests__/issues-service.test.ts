@@ -1209,7 +1209,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       ).resolves.toBeUndefined();
     });
 
-    it("treats drifted status truth as diagnostic and still allows done when other gates are clear", async () => {
+    it("blocks markDone when status truth still says the issue is blocked", async () => {
       const { companyId, agentId, issueId } = await seedDoneGuardFixture();
 
       await db
@@ -1242,7 +1242,15 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
           actorAgentId: agentId,
           actorRunId: null,
         }),
-      ).resolves.toBeUndefined();
+      ).rejects.toMatchObject({
+        status: 422,
+        details: expect.objectContaining({
+          code: "issue_done_blocked_by_status_truth",
+          effectiveStatus: "blocked",
+          authoritativeStatus: "blocked",
+          driftCode: "blocked_checkout_reopen",
+        }),
+      });
     });
 
     it("blocks agent-driven done transitions when QA writeback still forbids close-out", async () => {
@@ -1399,6 +1407,22 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
 
       expect(parent?.status).toBe("blocked");
       expect(root?.status).toBe("blocked");
+    });
+
+    it("reopens done ancestors when a child branch resumes execution", async () => {
+      const { agentId, rootId, parentId, childId } = await seedAncestorFixture({
+        rootStatus: "done",
+        parentStatus: "done",
+        childStatus: "todo",
+      });
+
+      await svc.checkout(childId, agentId, ["todo"], null);
+
+      const parent = await svc.getById(parentId);
+      const root = await svc.getById(rootId);
+
+      expect(parent?.status).toBe("in_progress");
+      expect(root?.status).toBe("in_progress");
     });
 
     it("preserves blocked status when checking out a blocked issue", async () => {
@@ -1567,7 +1591,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
 // ---------------------------------------------------------------------------
 // Fix #1 — status drift self-repair
 // ---------------------------------------------------------------------------
-describeEmbeddedPostgres("issueService.markDone — status drift diagnostics", () => {
+describeEmbeddedPostgres("issueService.markDone — status truth close gate", () => {
   let db!: ReturnType<typeof createDb>;
   let svc!: ReturnType<typeof issueService>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
@@ -1592,7 +1616,7 @@ describeEmbeddedPostgres("issueService.markDone — status drift diagnostics", (
     await tempDb?.cleanup();
   });
 
-  it("does not block markDone when status truth is drifted even if activity disagrees", async () => {
+  it("blocks markDone when drifted status truth still says the issue is blocked", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const issueId = randomUUID();
@@ -1629,7 +1653,8 @@ describeEmbeddedPostgres("issueService.markDone — status drift diagnostics", (
       assigneeAgentId: agentId,
     });
 
-    // Event log authoritatively says done (agent marked it done already)
+    // Event log authoritatively says blocked while the persisted row drifted back
+    // to in_progress.
     await db.insert(activityLog).values({
       companyId,
       actorType: "agent",
@@ -1640,8 +1665,8 @@ describeEmbeddedPostgres("issueService.markDone — status drift diagnostics", (
       entityId: issueId,
       createdAt: new Date("2026-04-08T00:05:00.000Z"),
       details: {
-        status: "done",
-        _previous: { status: "in_progress" },
+        status: "blocked",
+        _previous: { status: "todo" },
       },
     });
 
@@ -1653,7 +1678,14 @@ describeEmbeddedPostgres("issueService.markDone — status drift diagnostics", (
         actorAgentId: agentId,
         actorRunId: runId,
       }),
-    ).resolves.toBeUndefined();
+    ).rejects.toMatchObject({
+      status: 422,
+      details: expect.objectContaining({
+        code: "issue_done_blocked_by_status_truth",
+        effectiveStatus: "blocked",
+        authoritativeStatus: "blocked",
+      }),
+    });
 
     const updatedIssue = await db
       .select({ status: issues.status })

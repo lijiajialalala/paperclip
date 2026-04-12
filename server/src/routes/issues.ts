@@ -763,6 +763,9 @@ export function issueRoutes(
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     const includePlatformUnblock = parseBooleanQuery(req.query.includePlatformUnblock);
+    const requestedStatusFilter = typeof req.query.status === "string" && req.query.status.trim().length > 0
+      ? new Set(req.query.status.split(",").map((status) => status.trim()).filter(Boolean))
+      : null;
     const assigneeUserFilterRaw = req.query.assigneeUserId as string | undefined;
     const touchedByUserFilterRaw = req.query.touchedByUserId as string | undefined;
     const inboxArchivedByUserFilterRaw = req.query.inboxArchivedByUserId as string | undefined;
@@ -804,7 +807,7 @@ export function issueRoutes(
     }
 
     const result = await svc.list(companyId, {
-      status: req.query.status as string | undefined,
+      status: canQueryDb && requestedStatusFilter ? undefined : req.query.status as string | undefined,
       assigneeAgentId: req.query.assigneeAgentId as string | undefined,
       participantAgentId: req.query.participantAgentId as string | undefined,
       assigneeUserId,
@@ -845,7 +848,11 @@ export function issueRoutes(
       };
     });
 
-    res.json(serializedIssues);
+    res.json(
+      requestedStatusFilter
+        ? serializedIssues.filter((issue) => requestedStatusFilter.has(issue.status))
+        : serializedIssues,
+    );
   });
 
   router.get("/companies/:companyId/labels", async (req, res) => {
