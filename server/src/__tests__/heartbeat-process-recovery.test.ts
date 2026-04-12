@@ -35,6 +35,7 @@ vi.mock("@paperclipai/shared/telemetry", async () => {
 });
 
 import { heartbeatService } from "../services/heartbeat.ts";
+import { issueService } from "../services/issues.ts";
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 const embeddedPostgresSuiteTimeoutMs = 60_000;
@@ -340,6 +341,209 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(comments).toHaveLength(1);
     expect(comments[0]?.body).toContain("Platform Interruption");
     expect(comments[0]?.body).toContain("Recommended action");
+  });
+
+  it("rebinds a stale issue execution lock to a queued run for the same issue", async () => {
+    const { companyId, agentId, issueId, runId: staleRunId } = await seedRunFixture({
+      runStatus: "failed",
+      processPid: null,
+    });
+    const queuedWakeupId = randomUUID();
+    const queuedRunId = randomUUID();
+    const now = new Date("2026-03-19T00:05:00.000Z");
+
+    await db.insert(agentWakeupRequests).values({
+      id: queuedWakeupId,
+      companyId,
+      agentId,
+      source: "automation",
+      triggerDetail: "system",
+      reason: "process_lost_retry",
+      payload: { issueId, retryOfRunId: staleRunId },
+      status: "queued",
+      runId: queuedRunId,
+      requestedAt: now,
+      updatedAt: now,
+    });
+
+    await db.insert(heartbeatRuns).values({
+      id: queuedRunId,
+      companyId,
+      agentId,
+      invocationSource: "automation",
+      triggerDetail: "system",
+      status: "queued",
+      wakeupRequestId: queuedWakeupId,
+      contextSnapshot: { issueId, retryOfRunId: staleRunId },
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.reapOrphanedRuns();
+
+    expect(result.reaped).toBe(0);
+    expect(result.recoveredIssueLocks).toBe(1);
+    expect(result.recoveredIssueIds).toEqual([issueId]);
+
+    const issue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(issue?.executionRunId).toBe(queuedRunId);
+    expect(issue?.checkoutRunId).toBe(staleRunId);
+  });
+
+  it("promotes deferred execution wakeups when an issue lock points at a terminal run", async () => {
+    const { companyId, agentId, issueId, runId: staleRunId } = await seedRunFixture({
+      runStatus: "failed",
+      processPid: null,
+    });
+    const deferredWakeupId = randomUUID();
+    const now = new Date("2026-03-19T00:06:00.000Z");
+
+    await db.insert(agentWakeupRequests).values({
+      id: deferredWakeupId,
+      companyId,
+      agentId,
+      source: "automation",
+      triggerDetail: "system",
+      reason: "issue_execution_waiting",
+      payload: { issueId },
+      status: "deferred_issue_execution",
+      requestedAt: now,
+      updatedAt: now,
+    });
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.reapOrphanedRuns();
+
+    expect(result.reaped).toBe(0);
+    expect(result.recoveredIssueLocks).toBe(1);
+    expect(result.promotedRunIds).toHaveLength(1);
+
+    const wakeup = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.id, deferredWakeupId))
+      .then((rows) => rows[0] ?? null);
+    expect(wakeup?.status).toBe("queued");
+    expect(wakeup?.runId).toBeTruthy();
+
+    const issue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(issue?.executionRunId).toBe(wakeup?.runId ?? null);
+    expect(issue?.checkoutRunId).toBe(staleRunId);
+  });
+
+  it("clears execution metadata when an issue is manually released", async () => {
+    const { companyId, agentId, issueId, runId } = await seedRunFixture({
+      processPid: null,
+    });
+    const issuesSvc = issueService(db);
+
+    const released = await issuesSvc.release(issueId, agentId, runId);
+
+    expect(released?.status).toBe("todo");
+    const issue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(issue?.checkoutRunId).toBeNull();
+    expect(issue?.executionRunId).toBeNull();
+    expect(issue?.executionAgentNameKey).toBeNull();
+    expect(issue?.executionLockedAt).toBeNull();
+  });
+
+  it("does not let a new run steal checkout ownership while another execution run is still active", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const staleRunId = randomUUID();
+    const activeRunId = randomUUID();
+    const issueId = randomUUID();
+    const issuePrefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
+    const now = new Date("2026-03-19T00:08:00.000Z");
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "CodexCoder",
+      role: "engineer",
+      status: "paused",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.insert(heartbeatRuns).values([
+      {
+        id: staleRunId,
+        companyId,
+        agentId,
+        invocationSource: "assignment",
+        triggerDetail: "system",
+        status: "failed",
+        contextSnapshot: { issueId },
+        errorCode: "process_lost",
+        error: "lost process",
+        startedAt: now,
+        finishedAt: now,
+        updatedAt: now,
+      },
+      {
+        id: activeRunId,
+        companyId,
+        agentId,
+        invocationSource: "automation",
+        triggerDetail: "system",
+        status: "running",
+        contextSnapshot: { issueId },
+        startedAt: now,
+        updatedAt: now,
+      },
+    ]);
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Do not steal active execution lock",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId: agentId,
+      checkoutRunId: staleRunId,
+      executionRunId: activeRunId,
+      issueNumber: 3,
+      identifier: `${issuePrefix}-3`,
+    });
+
+    const issuesSvc = issueService(db);
+
+    await expect(
+      issuesSvc.assertCheckoutOwner(issueId, agentId, randomUUID()),
+    ).rejects.toMatchObject({
+      message: "Issue run ownership conflict",
+    });
+
+    const issue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(issue?.checkoutRunId).toBe(staleRunId);
+    expect(issue?.executionRunId).toBe(activeRunId);
   });
 
   it("does NOT post a comment to the issue when a QA agent exhausts all process_lost retries", async () => {

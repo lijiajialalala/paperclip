@@ -18,11 +18,13 @@ import {
   getInboxWorkItems,
   getInboxKeyboardSelectionIndex,
   getRecentTouchedIssues,
+  getUnreadInboxIssues,
   getUnreadTouchedIssues,
   loadReadInboxItems,
   isMineInboxTab,
   loadInboxIssueColumns,
   loadLastInboxTab,
+  mergeInboxIssues,
   normalizeInboxIssueColumns,
   RECENT_ISSUES_LIMIT,
   resolveIssueWorkspaceName,
@@ -149,7 +151,7 @@ function makeRun(id: string, status: HeartbeatRun["status"], createdAt: string, 
   };
 }
 
-function makeIssue(id: string, isUnreadForMe: boolean): Issue {
+function makeIssue(id: string, isUnreadForMe: boolean, overrides: Partial<Issue> = {}): Issue {
   return {
     id,
     companyId: "company-1",
@@ -189,6 +191,10 @@ function makeIssue(id: string, isUnreadForMe: boolean): Issue {
     lastExternalCommentAt: new Date("2026-03-11T01:00:00.000Z"),
     lastActivityAt: new Date("2026-03-11T01:00:00.000Z"),
     isUnreadForMe,
+    replyNeededForMe: false,
+    replyNeededCommentId: null,
+    replyNeededAt: null,
+    ...overrides,
   };
 }
 
@@ -303,6 +309,41 @@ describe("inbox helpers", () => {
       joinRequests: 1,
       mineIssues: 1,
       alerts: 1,
+      replyNeeded: 0,
+    });
+  });
+
+  it("counts reply-needed as a separate signal without replacing mine or double-counting issue totals", () => {
+    const mineIssue = makeIssue("mine-1", false);
+    const overlappingReplyIssue = makeIssue("mine-1", false, {
+      replyNeededForMe: true,
+      replyNeededAt: new Date("2026-03-11T03:00:00.000Z"),
+      replyNeededCommentId: "comment-overlap",
+    });
+    const extraReplyIssue = makeIssue("reply-2", false, {
+      replyNeededForMe: true,
+      replyNeededAt: new Date("2026-03-11T04:00:00.000Z"),
+      replyNeededCommentId: "comment-extra",
+    });
+
+    const result = computeInboxBadgeData({
+      approvals: [],
+      joinRequests: [],
+      dashboard: undefined,
+      heartbeatRuns: [],
+      mineIssues: [mineIssue],
+      replyNeededIssues: [overlappingReplyIssue, extraReplyIssue],
+      dismissed: new Set<string>(),
+    });
+
+    expect(result).toEqual({
+      inbox: 2,
+      approvals: 0,
+      failedRuns: 0,
+      joinRequests: 0,
+      mineIssues: 1,
+      alerts: 0,
+      replyNeeded: 2,
     });
   });
 
@@ -323,6 +364,7 @@ describe("inbox helpers", () => {
       joinRequests: 0,
       mineIssues: 0,
       alerts: 0,
+      replyNeeded: 0,
     });
   });
 
@@ -348,6 +390,7 @@ describe("inbox helpers", () => {
       joinRequests: 0,
       mineIssues: 0,
       alerts: 0,
+      replyNeeded: 0,
     });
   });
 
@@ -370,6 +413,7 @@ describe("inbox helpers", () => {
       joinRequests: 0,
       mineIssues: 0,
       alerts: 0,
+      replyNeeded: 0,
     });
   });
 
@@ -378,6 +422,29 @@ describe("inbox helpers", () => {
 
     expect(getUnreadTouchedIssues(issues).map((issue) => issue.id)).toEqual(["1"]);
     expect(issues).toHaveLength(2);
+  });
+
+  it("merges reply-needed issues into mine/unread lists without dropping existing touched issues", () => {
+    const touchedIssue = makeIssue("touched-1", false, {
+      lastActivityAt: new Date("2026-03-11T01:00:00.000Z"),
+    });
+    const unreadTouchedIssue = makeIssue("touched-2", true, {
+      lastActivityAt: new Date("2026-03-11T02:00:00.000Z"),
+    });
+    const replyOnlyIssue = makeIssue("reply-3", false, {
+      replyNeededForMe: true,
+      replyNeededAt: new Date("2026-03-11T05:00:00.000Z"),
+      replyNeededCommentId: "comment-3",
+      lastActivityAt: new Date("2026-03-11T00:30:00.000Z"),
+    });
+
+    expect(
+      mergeInboxIssues([touchedIssue, unreadTouchedIssue], [replyOnlyIssue]).map((issue) => issue.id),
+    ).toEqual(["reply-3", "touched-2", "touched-1"]);
+
+    expect(
+      getUnreadInboxIssues([touchedIssue, unreadTouchedIssue], [replyOnlyIssue]).map((issue) => issue.id),
+    ).toEqual(["reply-3", "touched-2"]);
   });
 
   it("shows recent approvals in updated order and unread approvals as actionable only", () => {
@@ -438,6 +505,25 @@ describe("inbox helpers", () => {
       "approval:approval-between",
       "issue:2",
     ]);
+  });
+
+  it("prioritizes reply-needed issues in the inbox feed using reply-needed time", () => {
+    const replyNeededIssue = makeIssue("reply-1", false, {
+      lastActivityAt: new Date("2026-03-11T01:00:00.000Z"),
+      replyNeededForMe: true,
+      replyNeededAt: new Date("2026-03-11T05:00:00.000Z"),
+      replyNeededCommentId: "comment-1",
+    });
+    const recentTouchedIssue = makeIssue("recent-2", false, {
+      lastActivityAt: new Date("2026-03-11T04:00:00.000Z"),
+    });
+
+    expect(
+      getInboxWorkItems({
+        issues: [recentTouchedIssue, replyNeededIssue],
+        approvals: [],
+      }).map((item) => (item.kind === "issue" ? item.issue.id : "")),
+    ).toEqual(["reply-1", "recent-2"]);
   });
 
   it("prefers canonical lastActivityAt over comment-only timestamps", () => {

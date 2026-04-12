@@ -1,6 +1,6 @@
 import { and, desc, eq, inArray, not, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents, approvals, heartbeatRuns } from "@paperclipai/db";
+import { agents, approvals, heartbeatRuns, issueReplyNeeded } from "@paperclipai/db";
 import type { SidebarBadges } from "@paperclipai/shared";
 import {
   approvalMineCondition,
@@ -15,7 +15,7 @@ export function sidebarBadgeService(db: Db) {
     get: async (
       companyId: string,
       actor: ApprovalActor | null,
-      extra?: { joinRequests?: number; unreadTouchedIssues?: number },
+      extra?: { joinRequests?: number; unreadTouchedIssues?: number; replyNeeded?: number },
     ): Promise<SidebarBadges> => {
       const approvalConditions = [
         eq(approvals.companyId, companyId),
@@ -29,6 +29,8 @@ export function sidebarBadgeService(db: Db) {
         .from(approvals)
         .where(and(...approvalConditions))
         .then((rows) => Number(rows[0]?.count ?? 0));
+
+      const replyNeeded = extra?.replyNeeded ?? 0;
 
       const latestRunByAgent = await db
         .selectDistinctOn([heartbeatRuns.agentId], {
@@ -52,11 +54,22 @@ export function sidebarBadgeService(db: Db) {
       const joinRequests = extra?.joinRequests ?? 0;
       const unreadTouchedIssues = extra?.unreadTouchedIssues ?? 0;
       return {
-        inbox: actionableApprovals + failedRuns + joinRequests + unreadTouchedIssues,
+        inbox: actionableApprovals + failedRuns + joinRequests + unreadTouchedIssues + replyNeeded,
         approvals: actionableApprovals,
         failedRuns,
         joinRequests,
+        replyNeeded,
       };
     },
+    countReplyNeededForUser: async (companyId: string, userId: string) => db
+      .select({ count: sql<number>`count(*)` })
+      .from(issueReplyNeeded)
+      .where(
+        and(
+          eq(issueReplyNeeded.companyId, companyId),
+          eq(issueReplyNeeded.userId, userId),
+        ),
+      )
+      .then((rows) => Number(rows[0]?.count ?? 0)),
   };
 }

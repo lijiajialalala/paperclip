@@ -789,6 +789,7 @@ export function issueRoutes(
     const touchedByUserFilterRaw = req.query.touchedByUserId as string | undefined;
     const inboxArchivedByUserFilterRaw = req.query.inboxArchivedByUserId as string | undefined;
     const unreadForUserFilterRaw = req.query.unreadForUserId as string | undefined;
+    const replyNeededForUserFilterRaw = req.query.replyNeededForUserId as string | undefined;
     const includeHidden = parseBooleanQuery(req.query.includeHidden);
     const includeArchivedProjectIssues = parseBooleanQuery(req.query.includeArchivedProjectIssues);
     const assigneeUserId =
@@ -807,6 +808,10 @@ export function issueRoutes(
       unreadForUserFilterRaw === "me" && req.actor.type === "board"
         ? req.actor.userId
         : unreadForUserFilterRaw;
+    const replyNeededForUserId =
+      replyNeededForUserFilterRaw === "me" && req.actor.type === "board"
+        ? req.actor.userId
+        : replyNeededForUserFilterRaw;
 
     if (assigneeUserFilterRaw === "me" && (!assigneeUserId || req.actor.type !== "board")) {
       res.status(403).json({ error: "assigneeUserId=me requires board authentication" });
@@ -824,6 +829,10 @@ export function issueRoutes(
       res.status(403).json({ error: "unreadForUserId=me requires board authentication" });
       return;
     }
+    if (replyNeededForUserFilterRaw === "me" && (!replyNeededForUserId || req.actor.type !== "board")) {
+      res.status(403).json({ error: "replyNeededForUserId=me requires board authentication" });
+      return;
+    }
 
     const result = await svc.list(companyId, {
       status: canQueryDb && requestedStatusFilter ? undefined : req.query.status as string | undefined,
@@ -833,6 +842,7 @@ export function issueRoutes(
       touchedByUserId,
       inboxArchivedByUserId,
       unreadForUserId,
+      replyNeededForUserId,
       projectId: req.query.projectId as string | undefined,
       executionWorkspaceId: req.query.executionWorkspaceId as string | undefined,
       parentId: req.query.parentId as string | undefined,
@@ -3022,6 +3032,7 @@ export function issueRoutes(
       agentId: actor.agentId ?? undefined,
       userId: actor.actorType === "user" ? actor.actorId : undefined,
       runId: actor.runId,
+      replyNeeded: req.body.replyNeeded,
     });
 
     if (actor.runId) {
