@@ -10,6 +10,7 @@ const mockIssueSvc = vi.hoisted(() => ({
   getById: vi.fn(),
   update: vi.fn(),
   checkout: vi.fn(),
+  release: vi.fn(),
   addComment: vi.fn(),
   getAncestors: vi.fn(),
   assertCheckoutOwner: vi.fn(),
@@ -29,6 +30,19 @@ const mockHeartbeat = vi.hoisted(() => ({
   reportRunActivity: vi.fn(),
 }));
 
+const mockApprovalSvc = vi.hoisted(() => ({
+  create: vi.fn(),
+  getById: vi.fn(),
+  approve: vi.fn(),
+  reject: vi.fn(),
+  resubmit: vi.fn(),
+}));
+
+const mockIssueApprovalSvc = vi.hoisted(() => ({
+  listApprovalsForIssue: vi.fn(),
+  linkManyForApproval: vi.fn(),
+}));
+
 const mockLogActivity = vi.hoisted(() => vi.fn());
 
 const mockInstanceSettings = vi.hoisted(() => ({
@@ -37,17 +51,6 @@ const mockInstanceSettings = vi.hoisted(() => ({
 
 const mockProjectSvc = vi.hoisted(() => ({
   getById: vi.fn(),
-}));
-
-const mockApprovalSvc = vi.hoisted(() => ({
-  create: vi.fn(),
-  approve: vi.fn(),
-  reject: vi.fn(),
-}));
-
-const mockIssueApprovalSvc = vi.hoisted(() => ({
-  listApprovalsForIssue: vi.fn(),
-  linkManyForApproval: vi.fn(),
 }));
 
 const mockApprovalRouting = vi.hoisted(() => ({
@@ -200,6 +203,25 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
     // Restore defaults after clearAllMocks
     mockHeartbeat.wakeup.mockResolvedValue(undefined);
     mockHeartbeat.reportRunActivity.mockResolvedValue(undefined);
+    mockApprovalSvc.create.mockResolvedValue({
+      id: randomUUID(),
+      companyId: COMPANY_ID,
+      type: "work_plan",
+      status: "pending",
+      payload: {},
+    });
+    mockApprovalSvc.getById.mockResolvedValue({
+      id: randomUUID(),
+      companyId: COMPANY_ID,
+      type: "work_plan",
+      status: "pending",
+      payload: {},
+    });
+    mockApprovalSvc.approve.mockResolvedValue({ approval: { id: randomUUID(), status: "approved" }, applied: true });
+    mockApprovalSvc.reject.mockResolvedValue({ approval: { id: randomUUID(), status: "rejected" }, applied: true });
+    mockApprovalSvc.resubmit.mockResolvedValue(undefined);
+    mockIssueApprovalSvc.listApprovalsForIssue.mockResolvedValue([]);
+    mockIssueApprovalSvc.linkManyForApproval.mockResolvedValue(undefined);
     mockLogActivity.mockResolvedValue(undefined);
     mockInstanceSettings.getExperimental.mockResolvedValue({ enableIsolatedWorkspaces: false });
     mockProjectSvc.getById.mockResolvedValue(null);
@@ -244,6 +266,68 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
     expect(res.body.status).toBe("in_progress");
   });
 
+  it("records an explicit status activity when checkout resumes a blocked issue", async () => {
+    const issue = makeIssue({ assigneeAgentId: AGENT_ASSIGNEE, status: "blocked" });
+    const updated = makeIssue({ ...issue, status: "in_progress" });
+    mockIssueSvc.getById.mockResolvedValue(issue);
+    mockIssueSvc.checkout.mockResolvedValue(updated);
+
+    const res = await request(makeApp(agentActor(AGENT_ASSIGNEE)))
+      .post(`/api/issues/${ISSUE_ID}/checkout`)
+      .send({ agentId: AGENT_ASSIGNEE, expectedStatuses: ["blocked"] });
+
+    expect(res.status).toBe(200);
+    expect(mockLogActivity).toHaveBeenNthCalledWith(
+      1,
+      expect.anything(),
+      expect.objectContaining({
+        action: "issue.checked_out",
+        entityId: ISSUE_ID,
+        details: expect.objectContaining({
+          status: "in_progress",
+          source: "checkout",
+          _previous: { status: "blocked" },
+        }),
+      }),
+    );
+  });
+
+  it("records an explicit status activity when release moves an issue back to todo", async () => {
+    const issue = makeIssue({
+      assigneeAgentId: AGENT_ASSIGNEE,
+      status: "in_progress",
+      checkoutRunId: "run-1",
+    });
+    const updated = makeIssue({
+      ...issue,
+      status: "todo",
+      assigneeAgentId: null,
+      checkoutRunId: null,
+    });
+    mockIssueSvc.getById.mockResolvedValue(issue);
+    mockIssueSvc.release.mockResolvedValue(updated);
+    mockIssueSvc.assertCheckoutOwner.mockResolvedValue({ adoptedFromRunId: null });
+
+    const res = await request(makeApp(agentActor(AGENT_ASSIGNEE, "run-1")))
+      .post(`/api/issues/${ISSUE_ID}/release`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(mockLogActivity).toHaveBeenNthCalledWith(
+      1,
+      expect.anything(),
+      expect.objectContaining({
+        action: "issue.released",
+        entityId: ISSUE_ID,
+        details: expect.objectContaining({
+          status: "todo",
+          source: "release",
+          _previous: { status: "in_progress" },
+        }),
+      }),
+    );
+  });
+
   // 2. Non-assignee agent cannot propose
   it("forbids non-assignee agents from proposing a plan on another's issue", async () => {
     const issue = makeIssue({ assigneeAgentId: AGENT_ASSIGNEE });
@@ -254,6 +338,63 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
       .send({ plan: "I will steal this task." });
 
     expect(res.status).toBe(403);
+  });
+
+  it("creates a plan approval and moves the issue to in_review", async () => {
+    const issue = makeIssue({ assigneeAgentId: AGENT_ASSIGNEE });
+    const commentId = randomUUID();
+    const approvalId = randomUUID();
+    const updated = makeIssue({
+      ...issue,
+      status: "in_review",
+      planProposedAt: new Date("2026-04-12T12:00:00.000Z"),
+    });
+
+    mockIssueSvc.getById.mockResolvedValue(issue);
+    mockIssueSvc.addComment.mockResolvedValue({ id: commentId });
+    mockIssueSvc.update.mockResolvedValue(updated);
+    mockApprovalSvc.create.mockResolvedValue({
+      id: approvalId,
+      companyId: COMPANY_ID,
+      type: "work_plan",
+      status: "pending",
+      payload: {},
+    });
+
+    const res = await request(makeApp(agentActor(AGENT_ASSIGNEE)))
+      .post(`/api/issues/${ISSUE_ID}/propose-plan`)
+      .send({ plan: "Ship the implementation in three checkpoints." });
+
+    expect(res.status).toBe(201);
+    expect(res.body.issue.status).toBe("in_review");
+    expect(res.body.comment.id).toBe(commentId);
+    expect(res.body.approvalId).toBe(approvalId);
+    expect(mockIssueSvc.update).toHaveBeenCalledWith(
+      ISSUE_ID,
+      expect.objectContaining({
+        status: "in_review",
+        planApprovedAt: null,
+      }),
+    );
+    expect(mockIssueApprovalSvc.linkManyForApproval).toHaveBeenCalledWith(
+      approvalId,
+      [ISSUE_ID],
+      expect.objectContaining({
+        agentId: AGENT_ASSIGNEE,
+      }),
+    );
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "issue.updated",
+        entityId: ISSUE_ID,
+        details: expect.objectContaining({
+          status: "in_review",
+          source: "plan_proposed",
+          _previous: { status: "todo" },
+        }),
+      }),
+    );
   });
 
   it("routes a child work plan to the parent assignee agent instead of the Board pool", async () => {
@@ -292,6 +433,77 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
     );
   });
 
+  it("does not fail the plan proposal when the root summary comment side effect throws", async () => {
+    const issue = makeIssue({ assigneeAgentId: AGENT_ASSIGNEE });
+    const commentId = randomUUID();
+    const approvalId = randomUUID();
+    const rootAncestor = makeIssue({ id: PARENT_ID, identifier: "PC-ROOT", assigneeAgentId: AGENT_PARENT });
+    const updated = makeIssue({
+      ...issue,
+      status: "in_review",
+      planProposedAt: new Date("2026-04-12T12:05:00.000Z"),
+    });
+
+    mockIssueSvc.getById.mockResolvedValue(issue);
+    mockIssueSvc.getAncestors.mockResolvedValue([rootAncestor]);
+    mockIssueSvc.addComment
+      .mockResolvedValueOnce({ id: commentId })
+      .mockRejectedValueOnce(new Error("root summary comment failed"));
+    mockIssueSvc.update.mockResolvedValue(updated);
+    mockApprovalSvc.create.mockResolvedValue({
+      id: approvalId,
+      companyId: COMPANY_ID,
+      type: "work_plan",
+      status: "pending",
+      payload: {},
+    });
+    mockAgentSvc.getById.mockResolvedValue({ id: AGENT_ASSIGNEE, name: "Frontend Engineer" });
+
+    const res = await request(makeApp(agentActor(AGENT_ASSIGNEE)))
+      .post(`/api/issues/${ISSUE_ID}/propose-plan`)
+      .send({ plan: "Checkpoint one, checkpoint two, checkpoint three." });
+
+    expect(res.status).toBe(201);
+    expect(res.body.approvalId).toBe(approvalId);
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "issue.plan_proposed",
+        entityId: ISSUE_ID,
+      }),
+    );
+  });
+
+  it("does not fail the plan proposal when activity logging throws after the core writes succeed", async () => {
+    const issue = makeIssue({ assigneeAgentId: AGENT_ASSIGNEE });
+    const commentId = randomUUID();
+    const approvalId = randomUUID();
+    const updated = makeIssue({
+      ...issue,
+      status: "in_review",
+      planProposedAt: new Date("2026-04-12T12:10:00.000Z"),
+    });
+
+    mockIssueSvc.getById.mockResolvedValue(issue);
+    mockIssueSvc.addComment.mockResolvedValue({ id: commentId });
+    mockIssueSvc.update.mockResolvedValue(updated);
+    mockApprovalSvc.create.mockResolvedValue({
+      id: approvalId,
+      companyId: COMPANY_ID,
+      type: "work_plan",
+      status: "pending",
+      payload: {},
+    });
+    mockLogActivity.mockRejectedValue(new Error("activity log unavailable"));
+
+    const res = await request(makeApp(agentActor(AGENT_ASSIGNEE)))
+      .post(`/api/issues/${ISSUE_ID}/propose-plan`)
+      .send({ plan: "Capture the plan even if telemetry is degraded." });
+
+    expect(res.status).toBe(201);
+    expect(res.body.comment.id).toBe(commentId);
+    expect(res.body.approvalId).toBe(approvalId);
+  });
   // 3. planProposedAt set + in_review → checkout blocked
   it("blocks checkout if a plan has been proposed but not approved (in_review)", async () => {
     const issue = makeIssue({
@@ -506,6 +718,18 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.issue.status).toBe("todo");
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "issue.updated",
+        entityId: ISSUE_ID,
+        details: expect.objectContaining({
+          status: "todo",
+          source: "plan_approved",
+          _previous: { status: "in_review" },
+        }),
+      }),
+    );
   });
 
 
@@ -537,6 +761,18 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
     expect(res.status).toBe(200);
     expect(res.body.issue.status).toBe("todo");
     expect(res.body.issue.planProposedAt).toBeNull();
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "issue.updated",
+        entityId: ISSUE_ID,
+        details: expect.objectContaining({
+          status: "todo",
+          source: "plan_rejected",
+          _previous: { status: "in_review" },
+        }),
+      }),
+    );
   });
 
   // 3. Rejection prohibits self-action

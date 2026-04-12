@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { activityLog, issues } from "@paperclipai/db";
 import { ISSUE_STATUSES, IssueStatus } from "@paperclipai/shared";
@@ -38,6 +38,7 @@ type IssueRow = {
 type StatusActivityRow = {
   id: string;
   issueId: string;
+  action: string;
   actorType: string;
   actorId: string;
   createdAt: Date;
@@ -50,6 +51,7 @@ type EffectiveStatusIssue<T extends { status: string }> = Omit<T, "status"> & {
 };
 
 const ISSUE_STATUS_SET = new Set<string>(ISSUE_STATUSES);
+const STATUS_ACTIVITY_ACTIONS = ["issue.updated", "issue.checked_out", "issue.released"] as const;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -194,6 +196,40 @@ function buildSummary(issue: IssueRow, latestActivity: StatusActivityRow | null)
   };
 }
 
+function normalizeStatusActivityRow(row: StatusActivityRow): StatusActivityRow | null {
+  const details = asRecord(row.details) ?? {};
+
+  if (row.action === "issue.updated") {
+    return readNonEmptyString(details.status)
+      ? { ...row, details }
+      : null;
+  }
+
+  if (row.action === "issue.checked_out") {
+    return {
+      ...row,
+      details: {
+        ...details,
+        status: readNonEmptyString(details.status) ?? "in_progress",
+        source: readNonEmptyString(details.source) ?? "checkout",
+      },
+    };
+  }
+
+  if (row.action === "issue.released") {
+    return {
+      ...row,
+      details: {
+        ...details,
+        status: readNonEmptyString(details.status) ?? "todo",
+        source: readNonEmptyString(details.source) ?? "release",
+      },
+    };
+  }
+
+  return null;
+}
+
 export function applyEffectiveStatus<T extends { status: string }>(
   issue: T,
   summary: IssueStatusTruthSummary | null,
@@ -233,6 +269,7 @@ export function issueStatusTruthService(db: Db) {
       .select({
         id: activityLog.id,
         issueId: activityLog.entityId,
+        action: activityLog.action,
         actorType: activityLog.actorType,
         actorId: activityLog.actorId,
         createdAt: activityLog.createdAt,
@@ -242,17 +279,17 @@ export function issueStatusTruthService(db: Db) {
       .where(
         and(
           eq(activityLog.entityType, "issue"),
-          eq(activityLog.action, "issue.updated"),
+          inArray(activityLog.action, [...STATUS_ACTIVITY_ACTIONS]),
           inArray(activityLog.entityId, issueIds),
-          sql<boolean>`nullif(btrim(${activityLog.details} ->> 'status'), '') is not null`,
         ),
       )
       .orderBy(desc(activityLog.createdAt));
 
     const latestByIssueId = new Map<string, StatusActivityRow>();
     for (const row of rows) {
-      if (!latestByIssueId.has(row.issueId)) {
-        latestByIssueId.set(row.issueId, row);
+      const normalized = normalizeStatusActivityRow(row);
+      if (normalized && !latestByIssueId.has(normalized.issueId)) {
+        latestByIssueId.set(normalized.issueId, normalized);
       }
     }
     return latestByIssueId;
