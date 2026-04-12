@@ -22,8 +22,6 @@ export interface IssueStatusTruthSummary {
   reasonSummary: string;
   canExecute: boolean;
   canClose: boolean;
-  /** True when consistency === "drifted" and the persisted row should be healed to authoritativeStatus. */
-  repairDrift: boolean;
   driftCode: "blocked_checkout_reopen" | "status_mismatch" | null;
   evidence: PlatformEvidenceRef[];
 }
@@ -189,14 +187,8 @@ function buildSummary(issue: IssueRow, latestActivity: StatusActivityRow | null)
     authoritativeActorType: coerceActorType(latestActivity?.actorType),
     authoritativeActorId: latestActivity?.actorId ?? null,
     reasonSummary: summarizeReason(authoritativeStatus, details, authoritativeSource),
-    // canExecute: only allow execution if state is stable and the authoritative status permits it.
-    canExecute: consistency === "consistent" && canExecuteForStatus(effectiveStatus),
-    // canClose: based on the authoritative truth, not consistency.
-    // If the event-log says the issue is done/in_progress but the DB row hasn't caught up,
-    // we should still allow close rather than incorrectly blocking.
-    canClose: canCloseForStatus(authoritativeStatus),
-    // repairDrift signals callers to heal the persisted row before proceeding.
-    repairDrift: consistency === "drifted",
+    canExecute: canExecuteForStatus(persistedStatus),
+    canClose: canCloseForStatus(persistedStatus),
     driftCode,
     evidence,
   };
@@ -214,7 +206,7 @@ export function applyEffectiveStatus<T extends { status: string }>(
   }
   return {
     ...issue,
-    status: summary.effectiveStatus,
+    status: coerceIssueStatus(issue.status),
     statusTruthSummary: summary,
   } as EffectiveStatusIssue<T>;
 }

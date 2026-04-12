@@ -351,6 +351,13 @@
       "when": 1775145655558,
       "tag": "0049_issue_plan_approval",
       "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1775923200000,
+      "tag": "0050_clever_shadowcat",
+      "breakpoints": true
     }
   ]
 }

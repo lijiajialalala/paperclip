@@ -65,6 +65,8 @@ export type QaIssueWritebackAlertType =
   | "missing_writeback"
   | "inconclusive";
 
+export type IssueHiddenReason = "manual" | "project_archived";
+
 export interface QaIssueWriteback {
   status: QaIssueWritebackStatus;
   verdict: QaVerdict | null;
@@ -144,6 +146,8 @@ export interface IssuePlatformUnblockSummary {
   recommendedNextAction: string | null;
   recoveryCriteria: string | null;
   nextCheckpointAt: string | null;
+  blocksExecutionRetry: boolean;
+  blocksCloseOut: boolean;
   canRetryEngineering: boolean;
   canCloseUpstream: boolean | null;
   recoveryKind: PlatformRecoveryKind | null;
@@ -255,6 +259,7 @@ export interface Issue {
   completedAt: Date | null;
   cancelledAt: Date | null;
   hiddenAt: Date | null;
+  hiddenReason?: IssueHiddenReason | null;
   planProposedAt?: string | Date | null;
   planApprovedAt?: string | Date | null;
   labelIds?: string[];

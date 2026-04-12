@@ -82,6 +82,8 @@ export interface IssueFilters {
   originKind?: string;
   originId?: string;
   includeRoutineExecutions?: boolean;
+  includeHidden?: boolean;
+  includeArchivedProjectIssues?: boolean;
   q?: string;
 }
 
@@ -139,7 +141,7 @@ function sameRunLock(checkoutRunId: string | null, actorRunId: string | null) {
 }
 
 const TERMINAL_HEARTBEAT_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
-const AUTO_RECOMPUTED_ANCESTOR_STATUSES = new Set(["backlog", "todo", "in_progress", "blocked", "done"]);
+const AUTO_RECOMPUTED_ANCESTOR_STATUSES = new Set(["backlog", "todo", "in_progress"]);
 const ACTIVE_CHILD_ISSUE_STATUSES = new Set(["in_progress", "in_review"]);
 
 function escapeLikePattern(value: string): string {
@@ -455,6 +457,35 @@ function issueCanonicalLastActivityAtExpr(companyId: string) {
       COALESCE(${latestLogAt}, to_timestamp(0))
     )
   `;
+}
+
+function issueVisibilityCondition(input?: Pick<IssueFilters, "includeHidden" | "includeArchivedProjectIssues">) {
+  const includeHidden = input?.includeHidden === true;
+  const includeArchivedProjectIssues = input?.includeArchivedProjectIssues === true;
+  const defaultVisibleCondition = and(
+    isNull(issues.hiddenAt),
+    or(
+      isNull(issues.hiddenReason),
+      eq(issues.hiddenReason, "manual"),
+    )!,
+  )!;
+
+  if (includeHidden && includeArchivedProjectIssues) {
+    return null;
+  }
+  if (includeHidden) {
+    return or(
+      isNull(issues.hiddenReason),
+      eq(issues.hiddenReason, "manual"),
+    )!;
+  }
+  if (includeArchivedProjectIssues) {
+    return or(
+      defaultVisibleCondition,
+      eq(issues.hiddenReason, "project_archived"),
+    )!;
+  }
+  return defaultVisibleCondition;
 }
 
 function unreadForUserCondition(companyId: string, userId: string) {
@@ -1006,7 +1037,10 @@ export function issueService(db: Db) {
       if (!filters?.includeRoutineExecutions && !filters?.originKind && !filters?.originId) {
         conditions.push(ne(issues.originKind, "routine_execution"));
       }
-      conditions.push(isNull(issues.hiddenAt));
+      const visibilityCondition = issueVisibilityCondition(filters);
+      if (visibilityCondition) {
+        conditions.push(visibilityCondition);
+      }
 
       const priorityOrder = sql`CASE ${issues.priority} WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END`;
       const searchOrder = sql<number>`
@@ -1177,10 +1211,13 @@ export function issueService(db: Db) {
     countUnreadTouchedByUser: async (companyId: string, userId: string, status?: string) => {
       const conditions = [
         eq(issues.companyId, companyId),
-        isNull(issues.hiddenAt),
         unreadForUserCondition(companyId, userId),
         ne(issues.originKind, "routine_execution"),
       ];
+      const visibilityCondition = issueVisibilityCondition();
+      if (visibilityCondition) {
+        conditions.push(visibilityCondition);
+      }
       if (status) {
         const statuses = status.split(",").map((s) => s.trim()).filter(Boolean);
         if (statuses.length === 1) {
@@ -1334,25 +1371,6 @@ export function issueService(db: Db) {
       }
 
       if (input.actorType !== "board") {
-        const statusSummary = await statusTruth.getIssueStatusTruthSummary(input.issueId);
-        if (statusSummary?.repairDrift) {
-          // Heal the persisted row to the authoritative status so downstream readers converge.
-          await db
-            .update(issues)
-            .set({ status: statusSummary.authoritativeStatus, updatedAt: new Date() })
-            .where(eq(issues.id, input.issueId));
-        }
-        if (statusSummary?.canClose === false) {
-          throw unprocessable("Issue cannot be marked done because status truth indicates it is not closable", {
-            code: "issue_done_blocked_by_status_truth",
-            effectiveStatus: statusSummary.effectiveStatus,
-            persistedStatus: statusSummary.persistedStatus,
-            authoritativeStatus: statusSummary.authoritativeStatus,
-            consistency: statusSummary.consistency,
-            driftCode: statusSummary.driftCode,
-          });
-        }
-
         const qaSummary = await qaIssueState.getIssueQaSummary(input.issueId);
         if (qaSummary?.canCloseUpstream === false) {
           throw unprocessable("Issue cannot be marked done because QA writeback still blocks close-out", {
@@ -1365,12 +1383,13 @@ export function issueService(db: Db) {
         }
 
         const platformSummary = await platformUnblock.getIssuePlatformUnblockSummary(input.issueId);
-        if (platformSummary?.canRetryEngineering === false) {
+        if (platformSummary?.blocksCloseOut === true) {
           throw unprocessable("Issue cannot be marked done because a platform unblock is still active", {
             code: "issue_done_blocked_by_platform_unblock",
             primaryCategory: platformSummary.primaryCategory,
             authoritativeSignalSource: platformSummary.authoritativeSignalSource,
             authoritativeRunId: platformSummary.authoritativeRunId,
+            blocksCloseOut: platformSummary.blocksCloseOut,
             canRetryEngineering: platformSummary.canRetryEngineering,
           });
         }
@@ -1692,6 +1711,13 @@ export function issueService(db: Db) {
       const executionLockCondition = checkoutRunId
         ? or(isNull(issues.executionRunId), eq(issues.executionRunId, checkoutRunId))
         : isNull(issues.executionRunId);
+      const expectedStatusSet = new Set(expectedStatuses);
+      const nextStatus =
+        expectedStatusSet.has("backlog") || expectedStatusSet.has("todo")
+          ? "in_progress"
+          : expectedStatusSet.has("blocked")
+            ? "blocked"
+            : "in_progress";
       const updated = await db
         .update(issues)
         .set({
@@ -1699,8 +1725,9 @@ export function issueService(db: Db) {
           assigneeUserId: null,
           checkoutRunId,
           executionRunId: checkoutRunId,
-          status: "in_progress",
-          startedAt: now,
+          executionLockedAt: now,
+          status: nextStatus,
+          startedAt: nextStatus === "in_progress" ? now : issues.startedAt,
           updatedAt: now,
         })
         .where(

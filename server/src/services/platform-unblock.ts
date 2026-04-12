@@ -61,6 +61,8 @@ export interface IssuePlatformUnblockSummary {
   recommendedNextAction: string | null;
   recoveryCriteria: string | null;
   nextCheckpointAt: string | null;
+  blocksExecutionRetry: boolean;
+  blocksCloseOut: boolean;
   canRetryEngineering: boolean;
   canCloseUpstream: boolean | null;
   recoveryKind: PlatformRecoveryKind | null;
@@ -469,7 +471,7 @@ export function platformUnblockService(db: Db) {
       let authoritativeRunId: string | null = null;
 
       if (primaryCategory !== null) {
-        if (latestGateBlocked) {
+        if (gateActive && latestGateBlocked) {
           authoritativeSignalSource = "close_gate_block";
           authoritativeSignalAt = toIso(latestGateBlocked.createdAt);
           authoritativeRunId = readNonEmptyString(asRecord(latestGateBlocked.details)?.runId);
@@ -500,12 +502,13 @@ export function platformUnblockService(db: Db) {
 
       let recommendedNextAction: string | null = null;
       let recoveryCriteria: string | null = null;
-      let canCloseUpstream: boolean | null = qaSummary?.canCloseUpstream ?? (issue.status === "done" ? true : null);
+      const blocksExecutionRetry = primaryCategory !== null;
+      const blocksCloseOut = activeCategories.includes("qa_writeback_gate");
+      let canCloseUpstream: boolean | null = qaSummary?.canCloseUpstream ?? (primaryCategory === null && issue.status === "done" ? true : null);
 
       if (primaryCategory === "runtime_process") {
         recommendedNextAction = "Restore the execution environment or approve a substitute completion path.";
         recoveryCriteria = "Record one fresh non-process_lost terminal run for the issue or an approved manual override.";
-        canCloseUpstream = false;
       } else if (primaryCategory === "qa_writeback_gate") {
         recommendedNextAction = "Repair QA writeback settlement or clear the erroneous close gate without asking for fresh product code.";
         recoveryCriteria = "Settle QA summary to a single non-alerting state and record a successful close signal or explicit override.";
@@ -513,11 +516,10 @@ export function platformUnblockService(db: Db) {
       } else if (primaryCategory === "comment_visibility") {
         recommendedNextAction = "Pause retry-based decisions and rely on fallback signals until comment delta health recovers.";
         recoveryCriteria = "Record a newer successful comment delta read or an approved manual override.";
-        canCloseUpstream = false;
       } else if (primaryCategory === "composite") {
         recommendedNextAction = "Triage the runtime, gate, and comment visibility blockers in order before asking engineering to retry.";
         recoveryCriteria = "Resolve each active blocker category and leave one authoritative recovered state.";
-        canCloseUpstream = false;
+        if (blocksCloseOut) canCloseUpstream = false;
       } else if (recoveryKind) {
         recommendedNextAction = "Platform blocker has a recorded recovery; continue with normal execution or close-out flow.";
         recoveryCriteria = "Already recovered.";
@@ -588,7 +590,9 @@ export function platformUnblockService(db: Db) {
             issue.updatedAt,
           ),
         ),
-        canRetryEngineering: primaryCategory === null ? true : false,
+        blocksExecutionRetry,
+        blocksCloseOut,
+        canRetryEngineering: !blocksExecutionRetry,
         canCloseUpstream,
         recoveryKind,
         commentVisibility,

@@ -1,6 +1,24 @@
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, or } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { projects, projectGoals, goals, projectWorkspaces, workspaceRuntimeServices } from "@paperclipai/db";
+import {
+  activityLog,
+  assets,
+  costEvents,
+  documents,
+  feedbackVotes,
+  financeEvents,
+  issueAttachments,
+  issueComments,
+  issueDocuments,
+  issueInboxArchives,
+  issueReadStates,
+  issues,
+  projects,
+  projectGoals,
+  goals,
+  projectWorkspaces,
+  workspaceRuntimeServices,
+} from "@paperclipai/db";
 import {
   PROJECT_COLORS,
   deriveProjectUrlKey,
@@ -269,13 +287,13 @@ async function attachWorkspaces(db: Db, rows: ProjectWithGoals[]): Promise<Proje
 }
 
 /** Sync the project_goals join table for a single project. */
-async function syncGoalLinks(db: Db, projectId: string, companyId: string, goalIds: string[]) {
+async function syncGoalLinks(dbOrTx: any, projectId: string, companyId: string, goalIds: string[]) {
   // Delete existing links
-  await db.delete(projectGoals).where(eq(projectGoals.projectId, projectId));
+  await dbOrTx.delete(projectGoals).where(eq(projectGoals.projectId, projectId));
 
   // Insert new links
   if (goalIds.length > 0) {
-    await db.insert(projectGoals).values(
+    await dbOrTx.insert(projectGoals).values(
       goalIds.map((goalId) => ({ projectId, goalId, companyId })),
     );
   }
@@ -294,6 +312,134 @@ function readNonEmptyString(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function sameInstant(left: Date | null | undefined, right: Date | null | undefined) {
+  if (!left && !right) return true;
+  if (!left || !right) return false;
+  return left.getTime() === right.getTime();
+}
+
+async function collectProjectIssueTreeIds(dbOrTx: any, projectId: string): Promise<string[]> {
+  const visited = new Set<string>();
+  let frontier = await dbOrTx
+    .select({ id: issues.id })
+    .from(issues)
+    .where(eq(issues.projectId, projectId))
+    .then((rows: Array<{ id: string }>) => rows.map((row) => row.id));
+
+  while (frontier.length > 0) {
+    const batch = frontier.filter((issueId: string) => {
+      if (visited.has(issueId)) return false;
+      visited.add(issueId);
+      return true;
+    });
+    if (batch.length === 0) break;
+
+    frontier = await dbOrTx
+      .select({ id: issues.id })
+      .from(issues)
+      .where(inArray(issues.parentId, batch))
+      .then((rows: Array<{ id: string }>) => rows.map((row) => row.id));
+  }
+
+  return [...visited];
+}
+
+async function syncArchivedProjectIssueVisibility(
+  dbOrTx: any,
+  input: {
+    projectId: string;
+    archivedAt: Date | null;
+  },
+) {
+  const issueIds = await collectProjectIssueTreeIds(dbOrTx, input.projectId);
+  if (issueIds.length === 0) return;
+
+  if (input.archivedAt) {
+    await dbOrTx
+      .update(issues)
+      .set({
+        hiddenAt: input.archivedAt,
+        hiddenReason: "project_archived",
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          inArray(issues.id, issueIds),
+          or(
+            isNull(issues.hiddenReason),
+            eq(issues.hiddenReason, "project_archived"),
+          ),
+        ),
+      );
+    return;
+  }
+
+  await dbOrTx
+    .update(issues)
+    .set({
+      hiddenAt: null,
+      hiddenReason: null,
+      updatedAt: new Date(),
+    })
+    .where(and(inArray(issues.id, issueIds), eq(issues.hiddenReason, "project_archived")));
+}
+
+async function deleteProjectIssueGraph(dbOrTx: any, projectId: string) {
+  const issueIds = await collectProjectIssueTreeIds(dbOrTx, projectId);
+  if (issueIds.length === 0) {
+    await dbOrTx.delete(financeEvents).where(eq(financeEvents.projectId, projectId));
+    await dbOrTx.delete(costEvents).where(eq(costEvents.projectId, projectId));
+    return;
+  }
+
+  const [attachmentAssetIds, issueDocumentIds] = await Promise.all([
+    dbOrTx
+      .select({ assetId: issueAttachments.assetId })
+      .from(issueAttachments)
+      .where(inArray(issueAttachments.issueId, issueIds)),
+    dbOrTx
+      .select({ documentId: issueDocuments.documentId })
+      .from(issueDocuments)
+      .where(inArray(issueDocuments.issueId, issueIds)),
+  ]);
+
+  await dbOrTx.delete(issueComments).where(inArray(issueComments.issueId, issueIds));
+  await dbOrTx.delete(issueInboxArchives).where(inArray(issueInboxArchives.issueId, issueIds));
+  await dbOrTx.delete(issueReadStates).where(inArray(issueReadStates.issueId, issueIds));
+  await dbOrTx.delete(feedbackVotes).where(inArray(feedbackVotes.issueId, issueIds));
+  await dbOrTx.delete(financeEvents).where(
+    or(
+      inArray(financeEvents.issueId, issueIds),
+      eq(financeEvents.projectId, projectId),
+    ),
+  );
+  await dbOrTx.delete(costEvents).where(
+    or(
+      inArray(costEvents.issueId, issueIds),
+      eq(costEvents.projectId, projectId),
+    ),
+  );
+  await dbOrTx.delete(activityLog).where(
+    and(
+      eq(activityLog.entityType, "issue"),
+      inArray(activityLog.entityId, issueIds),
+    ),
+  );
+  await dbOrTx.delete(issues).where(inArray(issues.id, issueIds));
+
+  if (attachmentAssetIds.length > 0) {
+    await dbOrTx
+      .delete(assets)
+      .where(inArray(assets.id, attachmentAssetIds.map((row: { assetId: string }) => row.assetId)));
+  }
+
+  if (issueDocumentIds.length > 0) {
+    await dbOrTx
+      .delete(documents)
+      .where(inArray(documents.id, issueDocumentIds.map((row: { documentId: string }) => row.documentId)));
+  }
 }
 
 function normalizeWorkspaceCwd(value: unknown): string | null {
@@ -477,7 +623,12 @@ export function projectService(db: Db) {
       const { goalIds: inputGoalIds, ...projectData } = data;
       const ids = resolveGoalIds({ goalIds: inputGoalIds, goalId: projectData.goalId });
       const existingProject = await db
-        .select({ id: projects.id, companyId: projects.companyId, name: projects.name })
+        .select({
+          id: projects.id,
+          companyId: projects.companyId,
+          name: projects.name,
+          archivedAt: projects.archivedAt,
+        })
         .from(projects)
         .where(eq(projects.id, id))
         .then((rows) => rows[0] ?? null);
@@ -506,17 +657,32 @@ export function projectService(db: Db) {
         updates.goalId = ids.length > 0 ? ids[0] : null;
       }
 
-      const row = await db
-        .update(projects)
-        .set(updates)
-        .where(eq(projects.id, id))
-        .returning()
-        .then((rows) => rows[0] ?? null);
-      if (!row) return null;
+      const row = await db.transaction(async (tx) => {
+        const updatedRow = await tx
+          .update(projects)
+          .set(updates)
+          .where(eq(projects.id, id))
+          .returning()
+          .then((rows) => rows[0] ?? null);
+        if (!updatedRow) return null;
 
-      if (ids !== undefined) {
-        await syncGoalLinks(db, id, row.companyId, ids);
-      }
+        if (ids !== undefined) {
+          await syncGoalLinks(tx, id, updatedRow.companyId, ids);
+        }
+
+        if (
+          data.archivedAt !== undefined &&
+          !sameInstant(existingProject.archivedAt ?? null, updatedRow.archivedAt ?? null)
+        ) {
+          await syncArchivedProjectIssueVisibility(tx, {
+            projectId: updatedRow.id,
+            archivedAt: updatedRow.archivedAt ?? null,
+          });
+        }
+
+        return updatedRow;
+      });
+      if (!row) return null;
 
       const [withGoals] = await attachGoals(db, [row]);
       const [enriched] = withGoals ? await attachWorkspaces(db, [withGoals]) : [];
@@ -524,15 +690,25 @@ export function projectService(db: Db) {
     },
 
     remove: (id: string) =>
-      db
-        .delete(projects)
-        .where(eq(projects.id, id))
-        .returning()
-        .then((rows) => {
-          const row = rows[0] ?? null;
-          if (!row) return null;
-          return { ...row, urlKey: deriveProjectUrlKey(row.name, row.id) };
-        }),
+      db.transaction(async (tx) => {
+        const existing = await tx
+          .select()
+          .from(projects)
+          .where(eq(projects.id, id))
+          .then((rows) => rows[0] ?? null);
+        if (!existing) return null;
+
+        await deleteProjectIssueGraph(tx, id);
+
+        const row = await tx
+          .delete(projects)
+          .where(eq(projects.id, id))
+          .returning()
+          .then((rows) => rows[0] ?? null);
+        if (!row) return null;
+
+        return { ...row, urlKey: deriveProjectUrlKey(row.name, row.id) };
+      }),
 
     listWorkspaces: async (projectId: string): Promise<ProjectWorkspace[]> => {
       const rows = await db

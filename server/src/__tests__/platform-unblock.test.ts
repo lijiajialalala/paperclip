@@ -158,8 +158,10 @@ describeEmbeddedPostgres("platformUnblockService", () => {
       mode: "platform",
       primaryCategory: "runtime_process",
       primaryOwnerRole: "runtime_owner",
+      blocksExecutionRetry: true,
+      blocksCloseOut: false,
       canRetryEngineering: false,
-      canCloseUpstream: false,
+      canCloseUpstream: null,
     }));
   });
 
