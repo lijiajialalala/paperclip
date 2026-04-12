@@ -2286,7 +2286,12 @@ export function issueRoutes(
       action: "issue.checked_out",
       entityType: "issue",
       entityId: issue.id,
-      details: { agentId: req.body.agentId },
+      details: {
+        agentId: req.body.agentId,
+        status: updated.status,
+        source: "checkout",
+        ...(updated.status !== issue.status ? { _previous: { status: issue.status } } : {}),
+      },
     });
 
     if (
@@ -2381,7 +2386,7 @@ export function issueRoutes(
         // Technically not needed, but ensures payload aligns if overwriting quickly
         await db.update(approvals).set({ payload, updatedAt: now }).where(eq(approvals.id, existingPlanApproval.id));
       }
-      planApproval = await approvalsSvc.getById(existingPlanApproval.id);
+      planApproval = (await approvalsSvc.getById(existingPlanApproval.id)) ?? existingPlanApproval;
     } else {
       planApproval = await approvalsSvc.create(issue.companyId, {
         type: "work_plan",
@@ -2400,32 +2405,47 @@ export function issueRoutes(
       });
     }
 
+    if (!planApproval?.id) {
+      throw new HttpError(500, "Plan approval could not be resolved");
+    }
+
     // 4. Bubble summary to root ancestor issue
     const ancestors = await svc.getAncestors(id);
     const rootAncestor = ancestors.length > 0 ? ancestors[ancestors.length - 1] : null;
     if (rootAncestor) {
-      const agentName = actor.agentId
-        ? (await agentsSvc.getById(actor.agentId))?.name ?? "Agent"
-        : "User";
-      const summarySnippet = planText.length > 1500 ? planText.slice(0, 1500) + "..." : planText;
-      await svc.addComment(rootAncestor.id, `📋 [${agentName} on ${issue.identifier ?? id}] **Plan:**\n${summarySnippet}`, {
-        agentId: actor.agentId ?? undefined,
-        userId: actor.actorType === "user" ? actor.actorId : undefined,
-        runId: actor.runId,
-      });
+      try {
+        const agentName = actor.agentId
+          ? (await agentsSvc.getById(actor.agentId))?.name ?? "Agent"
+          : "User";
+        const summarySnippet = planText.length > 1500 ? planText.slice(0, 1500) + "..." : planText;
+        await svc.addComment(rootAncestor.id, `📋 [${agentName} on ${issue.identifier ?? id}] **Plan:**\n${summarySnippet}`, {
+          agentId: actor.agentId ?? undefined,
+          userId: actor.actorType === "user" ? actor.actorId : undefined,
+          runId: actor.runId,
+        });
+      } catch (err) {
+        logger.warn(
+          { err, issueId: issue.id, rootAncestorId: rootAncestor.id },
+          "failed to mirror proposed plan summary to root ancestor",
+        );
+      }
     }
 
-    await logActivity(db, {
-      companyId: issue.companyId,
-      actorType: actor.actorType,
-      actorId: actor.actorId,
-      agentId: actor.agentId,
-      runId: actor.runId,
-      action: "issue.plan_proposed",
-      entityType: "issue",
-      entityId: issue.id,
-      details: { planSnippet: planText.slice(0, 120), commentId: comment.id, approvalId: planApproval.id },
-    });
+    try {
+      await logActivity(db, {
+        companyId: issue.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        action: "issue.plan_proposed",
+        entityType: "issue",
+        entityId: issue.id,
+        details: { planSnippet: planText.slice(0, 120), commentId: comment.id, approvalId: planApproval.id },
+      });
+    } catch (err) {
+      logger.warn({ err, issueId: issue.id, approvalId: planApproval.id }, "failed to log proposed plan activity");
+    }
 
     // 5. Wake parent issue assignee (for approval) + root issue assignee (for visibility)
     void (async () => {
@@ -2593,6 +2613,11 @@ export function issueRoutes(
       action: "issue.released",
       entityType: "issue",
       entityId: released.id,
+      details: {
+        status: released.status,
+        source: "release",
+        ...(released.status !== existing.status ? { _previous: { status: existing.status } } : {}),
+      },
     });
 
     res.json(released);
