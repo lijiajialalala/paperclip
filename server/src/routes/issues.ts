@@ -2358,6 +2358,25 @@ export function issueRoutes(
       planProposedAt: now,
       planApprovedAt: null,
     });
+    try {
+      await logActivity(db, {
+        companyId: issue.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        action: "issue.updated",
+        entityType: "issue",
+        entityId: issue.id,
+        details: {
+          status: "in_review",
+          source: "plan_proposed",
+          _previous: { status: issue.status },
+        },
+      });
+    } catch (err) {
+      logger.warn({ err, issueId: issue.id }, "failed to log plan proposed status transition");
+    }
 
     // 3. Create a formal Approval record so the plan appears in the Inbox
     // 3. Create or Resubmit a formal Approval record so the plan appears in the Inbox
@@ -2506,6 +2525,26 @@ export function issueRoutes(
       status: "todo",
       planApprovedAt: new Date(),
     });
+    const actor = getActorInfo(req);
+    try {
+      await logActivity(db, {
+        companyId: issue.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        action: "issue.updated",
+        entityType: "issue",
+        entityId: issue.id,
+        details: {
+          status: "todo",
+          source: "plan_approved",
+          _previous: { status: issue.status },
+        },
+      });
+    } catch (err) {
+      logger.warn({ err, issueId: issue.id }, "failed to log plan approved status transition");
+    }
 
     // Sync linked work_plan approval to approved
     const issueApprovalsSvc = issueApprovalService(db);
@@ -2560,6 +2599,26 @@ export function issueRoutes(
       planProposedAt: null,
       planApprovedAt: null,
     });
+    const actor = getActorInfo(req);
+    try {
+      await logActivity(db, {
+        companyId: issue.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        action: "issue.updated",
+        entityType: "issue",
+        entityId: issue.id,
+        details: {
+          status: "todo",
+          source: "plan_rejected",
+          _previous: { status: issue.status },
+        },
+      });
+    } catch (err) {
+      logger.warn({ err, issueId: issue.id }, "failed to log plan rejected status transition");
+    }
 
     // Sync linked work_plan approval to rejected
     const issueApprovalsSvc = issueApprovalService(db);

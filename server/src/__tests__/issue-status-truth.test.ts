@@ -147,4 +147,88 @@ describeEmbeddedPostgres("issueStatusTruthService activity signals", () => {
     }));
     expect(summary?.reasonSummary).toMatch(/todo/);
   });
+
+  it("lets a later issue.updated in_review signal override an older checkout activity", async () => {
+    const { companyId, issueId } = await seedIssue("in_review");
+
+    await db.insert(activityLog).values([
+      {
+        companyId,
+        actorType: "agent",
+        actorId: "agent-worker",
+        action: "issue.checked_out",
+        entityType: "issue",
+        entityId: issueId,
+        createdAt: new Date("2026-04-12T03:00:00.000Z"),
+        details: {
+          agentId: "agent-worker",
+        },
+      },
+      {
+        companyId,
+        actorType: "agent",
+        actorId: "agent-worker",
+        action: "issue.updated",
+        entityType: "issue",
+        entityId: issueId,
+        createdAt: new Date("2026-04-12T03:05:00.000Z"),
+        details: {
+          status: "in_review",
+          source: "plan_proposed",
+          _previous: { status: "in_progress" },
+        },
+      },
+    ]);
+
+    const summary = await issueStatusTruthService(db).getIssueStatusTruthSummary(issueId);
+
+    expect(summary).toEqual(expect.objectContaining({
+      effectiveStatus: "in_review",
+      persistedStatus: "in_review",
+      authoritativeStatus: "in_review",
+      consistency: "consistent",
+    }));
+  });
+
+  it("lets a later issue.updated todo signal override an older checkout activity", async () => {
+    const { companyId, issueId } = await seedIssue("todo");
+
+    await db.insert(activityLog).values([
+      {
+        companyId,
+        actorType: "agent",
+        actorId: "agent-worker",
+        action: "issue.checked_out",
+        entityType: "issue",
+        entityId: issueId,
+        createdAt: new Date("2026-04-12T04:00:00.000Z"),
+        details: {
+          agentId: "agent-worker",
+        },
+      },
+      {
+        companyId,
+        actorType: "user",
+        actorId: "board-user",
+        action: "issue.updated",
+        entityType: "issue",
+        entityId: issueId,
+        createdAt: new Date("2026-04-12T04:05:00.000Z"),
+        details: {
+          status: "todo",
+          source: "plan_rejected",
+          _previous: { status: "in_review" },
+        },
+      },
+    ]);
+
+    const summary = await issueStatusTruthService(db).getIssueStatusTruthSummary(issueId);
+
+    expect(summary).toEqual(expect.objectContaining({
+      effectiveStatus: "todo",
+      persistedStatus: "todo",
+      authoritativeStatus: "todo",
+      consistency: "consistent",
+    }));
+  });
 });

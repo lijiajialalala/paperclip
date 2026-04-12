@@ -307,6 +307,18 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
         agentId: AGENT_ASSIGNEE,
       }),
     );
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "issue.updated",
+        entityId: ISSUE_ID,
+        details: expect.objectContaining({
+          status: "in_review",
+          source: "plan_proposed",
+          _previous: { status: "todo" },
+        }),
+      }),
+    );
   });
 
   it("does not fail the plan proposal when the root summary comment side effect throws", async () => {
@@ -445,6 +457,18 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
     expect(res.status).toBe(200);
     expect(res.body.issue.status).toBe("todo");
     expect(res.body.issue.planApprovedAt).toBeDefined();
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "issue.updated",
+        entityId: ISSUE_ID,
+        details: expect.objectContaining({
+          status: "todo",
+          source: "plan_approved",
+          _previous: { status: "in_review" },
+        }),
+      }),
+    );
   });
 
   it("includes the approval comment when waking the assignee after plan approval", async () => {
@@ -564,6 +588,18 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
     expect(res.status).toBe(200);
     expect(res.body.issue.status).toBe("todo");
     expect(res.body.issue.planProposedAt).toBeNull();
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "issue.updated",
+        entityId: ISSUE_ID,
+        details: expect.objectContaining({
+          status: "todo",
+          source: "plan_rejected",
+          _previous: { status: "in_review" },
+        }),
+      }),
+    );
   });
 
   // 3. Rejection prohibits self-action
