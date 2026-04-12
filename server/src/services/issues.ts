@@ -19,6 +19,7 @@ import {
   issueInboxArchives,
   issueLabels,
   issueComments,
+  issueReplyNeeded,
   issueDocuments,
   issueWorkProducts,
   issueReadStates,
@@ -84,6 +85,7 @@ export interface IssueFilters {
   touchedByUserId?: string;
   inboxArchivedByUserId?: string;
   unreadForUserId?: string;
+  replyNeededForUserId?: string;
   projectId?: string;
   executionWorkspaceId?: string;
   parentId?: string;
@@ -115,6 +117,11 @@ type IssueUserCommentStats = {
   myLastCommentAt: Date | null;
   lastExternalCommentAt: Date | null;
 };
+type IssueReplyNeededStat = {
+  issueId: string;
+  commentId: string;
+  createdAt: Date;
+};
 type IssueLastActivityStat = {
   issueId: string;
   latestCommentAt: Date | null;
@@ -125,6 +132,12 @@ type IssueUserContextInput = {
   assigneeUserId: string | null;
   createdAt: Date | string;
   updatedAt: Date | string;
+};
+type IssueReplyNeededRecipientsInput = {
+  companyId: string;
+  issueId: string;
+  assigneeUserId: string | null;
+  createdByUserId: string | null;
 };
 type ProjectGoalReader = Pick<Db, "select">;
 type DbReader = Pick<Db, "select">;
@@ -607,6 +620,42 @@ export function deriveIssueUserContext(
   };
 }
 
+async function resolveReplyNeededRecipientUserIds(
+  db: DbReader,
+  input: IssueReplyNeededRecipientsInput,
+) {
+  const direct = [input.assigneeUserId, input.createdByUserId]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+  if (direct.length > 0) return [...new Set(direct)];
+
+  const ownerRows = await db
+    .select({ principalId: companyMemberships.principalId })
+    .from(companyMemberships)
+    .where(
+      and(
+        eq(companyMemberships.companyId, input.companyId),
+        eq(companyMemberships.principalType, "user"),
+        eq(companyMemberships.status, "active"),
+        eq(companyMemberships.membershipRole, "owner"),
+      ),
+    )
+    .orderBy(asc(companyMemberships.createdAt));
+  if (ownerRows.length > 0) return [...new Set(ownerRows.map((row) => row.principalId))];
+
+  const activeRows = await db
+    .select({ principalId: companyMemberships.principalId })
+    .from(companyMemberships)
+    .where(
+      and(
+        eq(companyMemberships.companyId, input.companyId),
+        eq(companyMemberships.principalType, "user"),
+        eq(companyMemberships.status, "active"),
+      ),
+    )
+    .orderBy(asc(companyMemberships.createdAt));
+  return [...new Set(activeRows.map((row) => row.principalId))];
+}
+
 function latestIssueActivityAt(...values: Array<Date | string | null | undefined>): Date | null {
   const normalized = values
     .map((value) => {
@@ -931,9 +980,18 @@ export function issueService(db: Db) {
     actorAgentId: string;
     actorRunId: string;
     expectedCheckoutRunId: string;
+    expectedExecutionRunId?: string | null;
   }) {
     const stale = await isTerminalOrMissingHeartbeatRun(input.expectedCheckoutRunId);
     if (!stale) return null;
+    if (
+      input.expectedExecutionRunId &&
+      input.expectedExecutionRunId !== input.expectedCheckoutRunId &&
+      input.expectedExecutionRunId !== input.actorRunId
+    ) {
+      const executionStale = await isTerminalOrMissingHeartbeatRun(input.expectedExecutionRunId);
+      if (!executionStale) return null;
+    }
 
     const now = new Date();
     const adopted = await db
@@ -950,6 +1008,14 @@ export function issueService(db: Db) {
           eq(issues.status, "in_progress"),
           eq(issues.assigneeAgentId, input.actorAgentId),
           eq(issues.checkoutRunId, input.expectedCheckoutRunId),
+          or(
+            isNull(issues.executionRunId),
+            eq(issues.executionRunId, input.expectedCheckoutRunId),
+            eq(issues.executionRunId, input.actorRunId),
+            input.expectedExecutionRunId
+              ? eq(issues.executionRunId, input.expectedExecutionRunId)
+              : sql<boolean>`false`,
+          ),
         ),
       )
       .returning({
@@ -970,7 +1036,8 @@ export function issueService(db: Db) {
       const touchedByUserId = filters?.touchedByUserId?.trim() || undefined;
       const inboxArchivedByUserId = filters?.inboxArchivedByUserId?.trim() || undefined;
       const unreadForUserId = filters?.unreadForUserId?.trim() || undefined;
-      const contextUserId = unreadForUserId ?? touchedByUserId ?? inboxArchivedByUserId;
+      const replyNeededForUserId = filters?.replyNeededForUserId?.trim() || undefined;
+      const contextUserId = replyNeededForUserId ?? unreadForUserId ?? touchedByUserId ?? inboxArchivedByUserId;
       const rawSearch = filters?.q?.trim() ?? "";
       const hasSearch = rawSearch.length > 0;
       const escapedSearch = hasSearch ? escapeLikePattern(rawSearch) : "";
@@ -1018,6 +1085,17 @@ export function issueService(db: Db) {
       }
       if (unreadForUserId) {
         conditions.push(unreadForUserCondition(companyId, unreadForUserId));
+      }
+      if (replyNeededForUserId) {
+        conditions.push(sql<boolean>`
+          EXISTS (
+            SELECT 1
+            FROM ${issueReplyNeeded}
+            WHERE ${issueReplyNeeded.issueId} = ${issues.id}
+              AND ${issueReplyNeeded.companyId} = ${companyId}
+              AND ${issueReplyNeeded.userId} = ${replyNeededForUserId}
+          )
+        `);
       }
       if (filters?.projectId) conditions.push(eq(issues.projectId, filters.projectId));
       if (filters?.executionWorkspaceId) {
@@ -1083,7 +1161,7 @@ export function issueService(db: Db) {
       }
 
       const issueIds = withRuns.map((row) => row.id);
-      const [statsRows, readRows, lastActivityRows] = await Promise.all([
+      const [statsRows, readRows, lastActivityRows, replyNeededRows] = await Promise.all([
         contextUserId
           ? db
             .select({
@@ -1178,9 +1256,26 @@ export function issueService(db: Db) {
           }
           return [...byIssueId.values()];
         }),
+        contextUserId
+          ? db
+            .select({
+              issueId: issueReplyNeeded.issueId,
+              commentId: issueReplyNeeded.commentId,
+              createdAt: issueReplyNeeded.createdAt,
+            })
+            .from(issueReplyNeeded)
+            .where(
+              and(
+                eq(issueReplyNeeded.companyId, companyId),
+                eq(issueReplyNeeded.userId, contextUserId),
+                inArray(issueReplyNeeded.issueId, issueIds),
+              ),
+            )
+          : Promise.resolve([]),
       ]);
       const statsByIssueId = new Map(statsRows.map((row) => [row.issueId, row]));
       const lastActivityByIssueId = new Map(lastActivityRows.map((row) => [row.issueId, row]));
+      const replyNeededByIssueId = new Map(replyNeededRows.map((row) => [row.issueId, row]));
 
       if (!contextUserId) {
         return withRuns.map((row) => {
@@ -1189,6 +1284,7 @@ export function issueService(db: Db) {
             row.updatedAt,
             activity?.latestCommentAt ?? null,
             activity?.latestLogAt ?? null,
+            replyNeededByIssueId.get(row.id)?.createdAt ?? null,
           ) ?? row.updatedAt;
           return {
             ...row,
@@ -1201,14 +1297,19 @@ export function issueService(db: Db) {
 
       return withRuns.map((row) => {
         const activity = lastActivityByIssueId.get(row.id);
+        const replyNeeded = replyNeededByIssueId.get(row.id);
         const lastActivityAt = latestIssueActivityAt(
           row.updatedAt,
           activity?.latestCommentAt ?? null,
           activity?.latestLogAt ?? null,
+          replyNeeded?.createdAt ?? null,
         ) ?? row.updatedAt;
         return {
           ...row,
           lastActivityAt,
+          replyNeededForMe: Boolean(replyNeeded),
+          replyNeededCommentId: replyNeeded?.commentId ?? null,
+          replyNeededAt: replyNeeded?.createdAt ?? null,
           ...deriveIssueUserContext(row, contextUserId, {
             myLastCommentAt: statsByIssueId.get(row.id)?.myLastCommentAt ?? null,
             myLastReadAt: readByIssueId.get(row.id) ?? null,
@@ -1245,24 +1346,35 @@ export function issueService(db: Db) {
 
     markRead: async (companyId: string, issueId: string, userId: string, readAt: Date = new Date()) => {
       const now = new Date();
-      const [row] = await db
-        .insert(issueReadStates)
-        .values({
-          companyId,
-          issueId,
-          userId,
-          lastReadAt: readAt,
-          updatedAt: now,
-        })
-        .onConflictDoUpdate({
-          target: [issueReadStates.companyId, issueReadStates.issueId, issueReadStates.userId],
-          set: {
+      return db.transaction(async (tx) => {
+        const [row] = await tx
+          .insert(issueReadStates)
+          .values({
+            companyId,
+            issueId,
+            userId,
             lastReadAt: readAt,
             updatedAt: now,
-          },
-        })
-        .returning();
-      return row;
+          })
+          .onConflictDoUpdate({
+            target: [issueReadStates.companyId, issueReadStates.issueId, issueReadStates.userId],
+            set: {
+              lastReadAt: readAt,
+              updatedAt: now,
+            },
+          })
+          .returning();
+        await tx
+          .delete(issueReplyNeeded)
+          .where(
+            and(
+              eq(issueReplyNeeded.companyId, companyId),
+              eq(issueReplyNeeded.issueId, issueId),
+              eq(issueReplyNeeded.userId, userId),
+            ),
+          );
+        return row;
+      });
     },
 
     markUnread: async (companyId: string, issueId: string, userId: string) => {
@@ -1827,6 +1939,7 @@ export function issueService(db: Db) {
           .set({
             checkoutRunId,
             executionRunId: checkoutRunId,
+            executionLockedAt: new Date(),
             updatedAt: new Date(),
           })
           .where(
@@ -1858,6 +1971,7 @@ export function issueService(db: Db) {
           actorAgentId: agentId,
           actorRunId: checkoutRunId,
           expectedCheckoutRunId: current.checkoutRunId,
+          expectedExecutionRunId: current.executionRunId,
         });
         if (adopted) {
           const row = await db.select().from(issues).where(eq(issues.id, id)).then((rows) => rows[0]!);
@@ -1893,6 +2007,7 @@ export function issueService(db: Db) {
           status: issues.status,
           assigneeAgentId: issues.assigneeAgentId,
           checkoutRunId: issues.checkoutRunId,
+          executionRunId: issues.executionRunId,
         })
         .from(issues)
         .where(eq(issues.id, id))
@@ -1920,6 +2035,7 @@ export function issueService(db: Db) {
           actorAgentId,
           actorRunId,
           expectedCheckoutRunId: current.checkoutRunId,
+          expectedExecutionRunId: current.executionRunId,
         });
 
         if (adopted) {
@@ -1972,6 +2088,9 @@ export function issueService(db: Db) {
           status: "todo",
           assigneeAgentId: null,
           checkoutRunId: null,
+          executionRunId: null,
+          executionAgentNameKey: null,
+          executionLockedAt: null,
           updatedAt: new Date(),
         })
         .where(eq(issues.id, id))
@@ -2108,10 +2227,14 @@ export function issueService(db: Db) {
     addComment: async (
       issueId: string,
       body: string,
-      actor: { agentId?: string; userId?: string; runId?: string | null },
+      actor: { agentId?: string; userId?: string; runId?: string | null; replyNeeded?: boolean },
     ) => {
       const issue = await db
-        .select({ companyId: issues.companyId })
+        .select({
+          companyId: issues.companyId,
+          createdByUserId: issues.createdByUserId,
+          assigneeUserId: issues.assigneeUserId,
+        })
         .from(issues)
         .where(eq(issues.id, issueId))
         .then((rows) => rows[0] ?? null);
@@ -2122,25 +2245,65 @@ export function issueService(db: Db) {
         enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
       };
       const redactedBody = redactCurrentUserText(body, currentUserRedactionOptions);
-      const [comment] = await db
-        .insert(issueComments)
-        .values({
-          companyId: issue.companyId,
-          issueId,
-          authorAgentId: actor.agentId ?? null,
-          authorUserId: actor.userId ?? null,
-          createdByRunId: actor.runId ?? null,
-          body: redactedBody,
-        })
-        .returning();
+      return db.transaction(async (tx) => {
+        const [comment] = await tx
+          .insert(issueComments)
+          .values({
+            companyId: issue.companyId,
+            issueId,
+            authorAgentId: actor.agentId ?? null,
+            authorUserId: actor.userId ?? null,
+            createdByRunId: actor.runId ?? null,
+            body: redactedBody,
+          })
+          .returning();
 
-      // Update issue's updatedAt so comment activity is reflected in recency sorting
-      await db
-        .update(issues)
-        .set({ updatedAt: new Date() })
-        .where(eq(issues.id, issueId));
+        await tx
+          .update(issues)
+          .set({ updatedAt: new Date() })
+          .where(eq(issues.id, issueId));
 
-      return redactIssueComment(comment, currentUserRedactionOptions.enabled);
+        if (actor.userId) {
+          await tx
+            .delete(issueReplyNeeded)
+            .where(
+              and(
+                eq(issueReplyNeeded.companyId, issue.companyId),
+                eq(issueReplyNeeded.issueId, issueId),
+                eq(issueReplyNeeded.userId, actor.userId),
+              ),
+            );
+        } else if (actor.replyNeeded === true && !actor.userId) {
+          const recipientUserIds = await resolveReplyNeededRecipientUserIds(tx, {
+            companyId: issue.companyId,
+            issueId,
+            assigneeUserId: issue.assigneeUserId,
+            createdByUserId: issue.createdByUserId,
+          });
+          if (recipientUserIds.length > 0) {
+            await tx
+              .insert(issueReplyNeeded)
+              .values(
+                recipientUserIds.map((userId) => ({
+                  companyId: issue.companyId,
+                  issueId,
+                  commentId: comment.id,
+                  userId,
+                  updatedAt: new Date(),
+                })),
+              )
+              .onConflictDoUpdate({
+                target: [issueReplyNeeded.companyId, issueReplyNeeded.issueId, issueReplyNeeded.userId],
+                set: {
+                  commentId: comment.id,
+                  updatedAt: new Date(),
+                },
+              });
+          }
+        }
+
+        return redactIssueComment(comment, currentUserRedactionOptions.enabled);
+      });
     },
 
     createAttachment: async (input: {

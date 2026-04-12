@@ -1,7 +1,9 @@
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { activityLog, issues } from "@paperclipai/db";
+import { activityLog, heartbeatRunEvents, heartbeatRuns, issues } from "@paperclipai/db";
 import { ISSUE_STATUSES, IssueStatus } from "@paperclipai/shared";
+
+const ISSUE_STALLED_RUN_THRESHOLD_MS = 5 * 60 * 1000;
 
 export interface PlatformEvidenceRef {
   kind: "activity" | "run" | "comment";
@@ -22,6 +24,11 @@ export interface IssueStatusTruthSummary {
   reasonSummary: string;
   canExecute: boolean;
   canClose: boolean;
+  executionState: "idle" | "active" | "stalled";
+  executionDiagnosis: "no_active_run" | null;
+  lastExecutionSignalAt: string | null;
+  stalledSince: string | null;
+  stalledThresholdMs: number | null;
   driftCode: "blocked_checkout_reopen" | "status_mismatch" | null;
   evidence: PlatformEvidenceRef[];
 }
@@ -31,6 +38,7 @@ type IssueRow = {
   companyId: string;
   identifier: string | null;
   status: string;
+  executionRunId: string | null;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -42,6 +50,13 @@ type StatusActivityRow = {
   actorId: string;
   createdAt: Date;
   details: Record<string, unknown> | null;
+};
+
+type ExecutionSignalRow = {
+  issueId: string;
+  hasActiveExecutionRun: boolean;
+  latestRunEventAt: Date | null;
+  latestRunUpdateAt: Date | null;
 };
 
 type EffectiveStatusIssue<T extends { status: string }> = Omit<T, "status"> & {
@@ -127,7 +142,83 @@ function canCloseForStatus(status: IssueStatus) {
   return status !== "blocked" && status !== "cancelled";
 }
 
-function buildSummary(issue: IssueRow, latestActivity: StatusActivityRow | null): IssueStatusTruthSummary {
+function maxDate(...values: Array<Date | null | undefined>) {
+  const timestamps = values
+    .map((value) => value?.getTime() ?? Number.NaN)
+    .filter((value) => Number.isFinite(value));
+  if (timestamps.length === 0) return null;
+  return new Date(Math.max(...timestamps));
+}
+
+function resolveExecutionDiagnosis(input: {
+  effectiveStatus: IssueStatus;
+  authoritativeStatus: IssueStatus;
+  issue: IssueRow;
+  latestSignal: ExecutionSignalRow | null;
+  now: Date;
+}) {
+  const statusSuggestsExecution =
+    input.effectiveStatus === "in_progress"
+    || input.effectiveStatus === "in_review"
+    || input.authoritativeStatus === "in_progress"
+    || input.authoritativeStatus === "in_review";
+
+  if (!statusSuggestsExecution) {
+    return {
+      executionState: "idle" as const,
+      executionDiagnosis: null,
+      lastExecutionSignalAt: null,
+      stalledSince: null,
+      stalledThresholdMs: null,
+    };
+  }
+
+  const latestExecutionSignalAt =
+    maxDate(
+      input.latestSignal?.latestRunEventAt ?? null,
+      input.latestSignal?.latestRunUpdateAt ?? null,
+    ) ?? input.issue.updatedAt;
+  const latestExecutionSignalIso = latestExecutionSignalAt?.toISOString() ?? null;
+
+  if (input.latestSignal?.hasActiveExecutionRun) {
+    return {
+      executionState: "active" as const,
+      executionDiagnosis: null,
+      lastExecutionSignalAt: latestExecutionSignalIso,
+      stalledSince: null,
+      stalledThresholdMs: null,
+    };
+  }
+
+  const stale =
+    latestExecutionSignalAt != null
+      && input.now.getTime() - latestExecutionSignalAt.getTime() >= ISSUE_STALLED_RUN_THRESHOLD_MS;
+
+  if (!stale) {
+    return {
+      executionState: "idle" as const,
+      executionDiagnosis: null,
+      lastExecutionSignalAt: latestExecutionSignalIso,
+      stalledSince: null,
+      stalledThresholdMs: ISSUE_STALLED_RUN_THRESHOLD_MS,
+    };
+  }
+
+  return {
+    executionState: "stalled" as const,
+    executionDiagnosis: "no_active_run" as const,
+    lastExecutionSignalAt: latestExecutionSignalIso,
+    stalledSince: latestExecutionSignalIso,
+    stalledThresholdMs: ISSUE_STALLED_RUN_THRESHOLD_MS,
+  };
+}
+
+function buildSummary(
+  issue: IssueRow,
+  latestActivity: StatusActivityRow | null,
+  latestSignal: ExecutionSignalRow | null,
+  now: Date,
+): IssueStatusTruthSummary {
   const details = asRecord(latestActivity?.details);
   const persistedStatus = coerceIssueStatus(issue.status);
   const authoritativeStatus = coerceIssueStatus(readNonEmptyString(details?.status), persistedStatus);
@@ -146,6 +237,13 @@ function buildSummary(issue: IssueRow, latestActivity: StatusActivityRow | null)
         : "status_mismatch"
       : null;
   const evidence: PlatformEvidenceRef[] = [];
+  const executionDiagnosis = resolveExecutionDiagnosis({
+    effectiveStatus,
+    authoritativeStatus,
+    issue,
+    latestSignal,
+    now,
+  });
 
   if (latestActivity) {
     evidence.push(
@@ -176,6 +274,16 @@ function buildSummary(issue: IssueRow, latestActivity: StatusActivityRow | null)
       ),
     );
   }
+  if (executionDiagnosis.executionDiagnosis === "no_active_run") {
+    evidence.push(
+      createEvidence(
+        issue,
+        "run",
+        "Issue is marked active, but no queued or running heartbeat run is currently linked",
+        executionDiagnosis.stalledSince ? new Date(executionDiagnosis.stalledSince) : null,
+      ),
+    );
+  }
 
   return {
     effectiveStatus,
@@ -189,6 +297,11 @@ function buildSummary(issue: IssueRow, latestActivity: StatusActivityRow | null)
     reasonSummary: summarizeReason(authoritativeStatus, details, authoritativeSource),
     canExecute: consistency === "consistent" && canExecuteForStatus(effectiveStatus),
     canClose: canCloseForStatus(authoritativeStatus),
+    executionState: executionDiagnosis.executionState,
+    executionDiagnosis: executionDiagnosis.executionDiagnosis,
+    lastExecutionSignalAt: executionDiagnosis.lastExecutionSignalAt,
+    stalledSince: executionDiagnosis.stalledSince,
+    stalledThresholdMs: executionDiagnosis.stalledThresholdMs,
     driftCode,
     evidence,
   };
@@ -220,6 +333,7 @@ export function issueStatusTruthService(db: Db) {
         companyId: issues.companyId,
         identifier: issues.identifier,
         status: issues.status,
+        executionRunId: issues.executionRunId,
         createdAt: issues.createdAt,
         updatedAt: issues.updatedAt,
       })
@@ -258,14 +372,54 @@ export function issueStatusTruthService(db: Db) {
     return latestByIssueId;
   }
 
+  async function loadExecutionSignals(issueIds: string[]) {
+    if (issueIds.length === 0) return new Map<string, ExecutionSignalRow>();
+    const runMatchesIssue = sql<boolean>`
+      ${heartbeatRuns.id} = ${issues.executionRunId}
+      OR ${heartbeatRuns.contextSnapshot} ->> 'issueId' = cast(${issues.id} as text)
+    `;
+    const rows = await db
+      .select({
+        issueId: issues.id,
+        hasActiveExecutionRun: sql<boolean>`
+          coalesce(bool_or(${heartbeatRuns.status} in ('queued', 'running')), false)
+        `,
+        latestRunEventAt: sql<Date | null>`MAX(${heartbeatRunEvents.createdAt})`,
+        latestRunUpdateAt: sql<Date | null>`MAX(${heartbeatRuns.updatedAt})`,
+      })
+      .from(issues)
+      .leftJoin(heartbeatRuns, runMatchesIssue)
+      .leftJoin(heartbeatRunEvents, eq(heartbeatRunEvents.runId, heartbeatRuns.id))
+      .where(inArray(issues.id, issueIds))
+      .groupBy(issues.id, issues.executionRunId);
+
+    const latestByIssueId = new Map<string, ExecutionSignalRow>();
+    for (const row of rows) {
+      latestByIssueId.set(row.issueId, row);
+    }
+    return latestByIssueId;
+  }
+
   async function getIssueStatusTruthSummaries(issueIds: string[]) {
     const uniqueIssueIds = Array.from(new Set(issueIds.filter((issueId) => issueId.trim().length > 0)));
     const issueRows = await loadIssueRows(uniqueIssueIds);
-    const latestActivities = await loadLatestStatusActivities(issueRows.map((issue) => issue.id));
+    const [latestActivities, latestSignals] = await Promise.all([
+      loadLatestStatusActivities(issueRows.map((issue) => issue.id)),
+      loadExecutionSignals(issueRows.map((issue) => issue.id)),
+    ]);
     const summaries = new Map<string, IssueStatusTruthSummary>();
+    const now = new Date();
 
     for (const issue of issueRows) {
-      summaries.set(issue.id, buildSummary(issue, latestActivities.get(issue.id) ?? null));
+      summaries.set(
+        issue.id,
+        buildSummary(
+          issue,
+          latestActivities.get(issue.id) ?? null,
+          latestSignals.get(issue.id) ?? null,
+          now,
+        ),
+      );
     }
 
     return summaries;

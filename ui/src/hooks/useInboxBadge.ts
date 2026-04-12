@@ -10,6 +10,7 @@ import { queryKeys } from "../lib/queryKeys";
 import {
   computeInboxBadgeData,
   getRecentTouchedIssues,
+  mergeInboxIssues,
   loadDismissedInboxItems,
   saveDismissedInboxItems,
   loadReadInboxItems,
@@ -120,7 +121,21 @@ export function useInboxBadge(companyId: string | null | undefined) {
     enabled: !!companyId,
   });
 
+  const { data: replyNeededIssuesRaw = [] } = useQuery({
+    queryKey: ["issues", companyId, "reply-needed-for-me"],
+    queryFn: () =>
+      issuesApi.list(companyId!, {
+        replyNeededForUserId: "me",
+        status: INBOX_ISSUE_STATUSES,
+      }),
+    enabled: !!companyId,
+  });
+
   const mineIssues = useMemo(() => getRecentTouchedIssues(mineIssuesRaw), [mineIssuesRaw]);
+  const replyNeededIssues = useMemo(
+    () => mergeInboxIssues([], replyNeededIssuesRaw),
+    [replyNeededIssuesRaw],
+  );
 
   const { data: heartbeatRuns = [] } = useQuery({
     queryKey: queryKeys.heartbeats(companyId!),
@@ -136,9 +151,10 @@ export function useInboxBadge(companyId: string | null | undefined) {
         dashboard,
         heartbeatRuns,
         mineIssues,
+        replyNeededIssues,
         dismissed,
         readItems,
       }),
-    [approvals, joinRequests, dashboard, heartbeatRuns, mineIssues, dismissed, readItems],
+    [approvals, joinRequests, dashboard, heartbeatRuns, mineIssues, replyNeededIssues, dismissed, readItems],
   );
 }

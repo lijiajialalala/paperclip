@@ -100,6 +100,7 @@ describe("issue comment reopen routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockIssueService.assertCanTransitionIssueToDone.mockResolvedValue(undefined);
+    mockIssueService.getById.mockResolvedValue(makeIssue("todo"));
     mockIssueService.assertCheckoutOwner.mockResolvedValue({
       id: "11111111-1111-4111-8111-111111111111",
       status: "in_progress",
@@ -118,6 +119,28 @@ describe("issue comment reopen routes", () => {
       authorUserId: "local-board",
     });
     mockIssueService.findMentionedAgents.mockResolvedValue([]);
+  });
+
+  it("passes explicit replyNeeded on direct comment posts", async () => {
+    const res = await request(createApp({
+      type: "agent",
+      agentId: "22222222-2222-4222-8222-222222222222",
+      companyId: "company-1",
+      runId: "run-9",
+    }))
+      .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
+      .send({ body: "Need your answer", replyNeeded: true });
+
+    expect(res.status).toBe(201);
+    expect(mockIssueService.addComment).toHaveBeenCalledWith(
+      "11111111-1111-4111-8111-111111111111",
+      "Need your answer",
+      expect.objectContaining({
+        agentId: "22222222-2222-4222-8222-222222222222",
+        runId: "run-9",
+        replyNeeded: true,
+      }),
+    );
   });
 
   it("treats reopen=true as a no-op when the issue is already open", async () => {

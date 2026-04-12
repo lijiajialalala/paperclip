@@ -175,6 +175,11 @@ export interface IssueStatusTruthSummary {
   reasonSummary: string | null;
   canExecute: boolean;
   canClose: boolean;
+  executionState: "idle" | "active" | "stalled";
+  executionDiagnosis: "no_active_run" | null;
+  lastExecutionSignalAt: string | null;
+  stalledSince: string | null;
+  stalledThresholdMs: number | null;
   driftCode: "status_mismatch" | "blocked_checkout_reopen" | null;
   evidence: PlatformEvidenceRef[];
 }
@@ -279,6 +284,9 @@ export interface Issue {
   lastExternalCommentAt?: Date | null;
   lastActivityAt?: Date | null;
   isUnreadForMe?: boolean;
+  replyNeededForMe?: boolean;
+  replyNeededCommentId?: string | null;
+  replyNeededAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }

@@ -42,6 +42,7 @@ export interface InboxBadgeData {
   joinRequests: number;
   mineIssues: number;
   alerts: number;
+  replyNeeded: number;
 }
 
 export function loadDismissedInboxItems(): Set<string> {
@@ -267,10 +268,29 @@ export function issueLastActivityTimestamp(issue: Issue): number {
   return normalizeTimestamp(issue.updatedAt);
 }
 
+export function issueReplyNeededTimestamp(issue: Issue): number {
+  if (!issue.replyNeededForMe) return 0;
+  return normalizeTimestamp(issue.replyNeededAt);
+}
+
+export function issueInboxTimestamp(issue: Issue): number {
+  return Math.max(issueLastActivityTimestamp(issue), issueReplyNeededTimestamp(issue));
+}
+
 export function sortIssuesByMostRecentActivity(a: Issue, b: Issue): number {
   const activityDiff = issueLastActivityTimestamp(b) - issueLastActivityTimestamp(a);
   if (activityDiff !== 0) return activityDiff;
   return normalizeTimestamp(b.updatedAt) - normalizeTimestamp(a.updatedAt);
+}
+
+export function sortIssuesByInboxPriority(a: Issue, b: Issue): number {
+  const replyNeededFlagDiff = Number(Boolean(b.replyNeededForMe)) - Number(Boolean(a.replyNeededForMe));
+  if (replyNeededFlagDiff !== 0) return replyNeededFlagDiff;
+
+  const replyNeededDiff = issueReplyNeededTimestamp(b) - issueReplyNeededTimestamp(a);
+  if (replyNeededDiff !== 0) return replyNeededDiff;
+
+  return sortIssuesByMostRecentActivity(a, b);
 }
 
 export function getRecentTouchedIssues(issues: Issue[]): Issue[] {
@@ -279,6 +299,60 @@ export function getRecentTouchedIssues(issues: Issue[]): Issue[] {
 
 export function getUnreadTouchedIssues(issues: Issue[]): Issue[] {
   return issues.filter((issue) => issue.isUnreadForMe);
+}
+
+function mergeInboxIssueSignals(base: Issue, candidate: Issue): Issue {
+  const preferred =
+    sortIssuesByInboxPriority(candidate, base) < 0
+      ? candidate
+      : base;
+  const secondary = preferred === base ? candidate : base;
+  const baseReplyNeededAt = issueReplyNeededTimestamp(base);
+  const candidateReplyNeededAt = issueReplyNeededTimestamp(candidate);
+  const replyPreferred =
+    candidateReplyNeededAt > baseReplyNeededAt
+      ? candidate
+      : baseReplyNeededAt > candidateReplyNeededAt
+        ? base
+        : preferred;
+  const replyNeededAt =
+    replyPreferred.replyNeededAt
+    ?? (replyPreferred === base ? candidate.replyNeededAt : base.replyNeededAt)
+    ?? null;
+  const replyNeededCommentId =
+    replyPreferred.replyNeededCommentId
+    ?? (replyPreferred === base ? candidate.replyNeededCommentId : base.replyNeededCommentId)
+    ?? null;
+
+  return {
+    ...secondary,
+    ...preferred,
+    isUnreadForMe: Boolean(base.isUnreadForMe || candidate.isUnreadForMe),
+    replyNeededForMe: Boolean(base.replyNeededForMe || candidate.replyNeededForMe),
+    replyNeededAt,
+    replyNeededCommentId,
+  };
+}
+
+export function mergeInboxIssues(primaryIssues: Issue[], supplementalIssues: Issue[]): Issue[] {
+  const issuesById = new Map<string, Issue>();
+
+  for (const issue of primaryIssues) {
+    issuesById.set(issue.id, issue);
+  }
+
+  for (const issue of supplementalIssues) {
+    const existing = issuesById.get(issue.id);
+    issuesById.set(issue.id, existing ? mergeInboxIssueSignals(existing, issue) : issue);
+  }
+
+  return Array.from(issuesById.values())
+    .sort(sortIssuesByInboxPriority)
+    .slice(0, RECENT_ISSUES_LIMIT);
+}
+
+export function getUnreadInboxIssues(touchedIssues: Issue[], replyNeededIssues: Issue[]): Issue[] {
+  return mergeInboxIssues(getUnreadTouchedIssues(touchedIssues), replyNeededIssues);
 }
 
 export function getApprovalsForTab(
@@ -330,7 +404,7 @@ export function getInboxWorkItems({
   return [
     ...issues.map((issue) => ({
       kind: "issue" as const,
-      timestamp: issueLastActivityTimestamp(issue),
+      timestamp: issueInboxTimestamp(issue),
       issue,
     })),
     ...approvals.map((approval) => ({
@@ -353,7 +427,7 @@ export function getInboxWorkItems({
     if (timestampDiff !== 0) return timestampDiff;
 
     if (a.kind === "issue" && b.kind === "issue") {
-      return sortIssuesByMostRecentActivity(a.issue, b.issue);
+      return sortIssuesByInboxPriority(a.issue, b.issue);
     }
     if (a.kind === "approval" && b.kind === "approval") {
       return approvalActivityTimestamp(b.approval) - approvalActivityTimestamp(a.approval);
@@ -391,6 +465,7 @@ export function computeInboxBadgeData({
   dashboard,
   heartbeatRuns,
   mineIssues,
+  replyNeededIssues = [],
   dismissed,
   readItems = new Map<string, number>(),
 }: {
@@ -399,6 +474,7 @@ export function computeInboxBadgeData({
   dashboard: DashboardSummary | undefined;
   heartbeatRuns: HeartbeatRun[];
   mineIssues: Issue[];
+  replyNeededIssues?: Issue[];
   dismissed: Set<string>;
   readItems?: ReadonlyMap<string, number>;
 }): InboxBadgeData {
@@ -419,6 +495,16 @@ export function computeInboxBadgeData({
       !isInboxEntityRead(readItems, `join:${jr.id}`, jr.updatedAt ?? jr.createdAt),
   ).length;
   const visibleMineIssues = mineIssues.length;
+  const visibleReplyNeededIds = new Set(
+    replyNeededIssues
+      .filter((issue) => issue.replyNeededForMe)
+      .map((issue) => issue.id),
+  );
+  const visibleIssueIds = new Set(mineIssues.map((issue) => issue.id));
+  for (const issueId of visibleReplyNeededIds) {
+    visibleIssueIds.add(issueId);
+  }
+  const visibleReplyNeeded = visibleReplyNeededIds.size;
   const agentErrorCount = dashboard?.agents.error ?? 0;
   const monthBudgetCents = dashboard?.costs.monthBudgetCents ?? 0;
   const monthUtilizationPercent = dashboard?.costs.monthUtilizationPercent ?? 0;
@@ -433,11 +519,12 @@ export function computeInboxBadgeData({
   const alerts = Number(showAggregateAgentError) + Number(showBudgetAlert);
 
   return {
-    inbox: actionableApprovals + visibleJoinRequests + failedRuns + visibleMineIssues + alerts,
+    inbox: actionableApprovals + visibleJoinRequests + failedRuns + visibleIssueIds.size + alerts,
     approvals: actionableApprovals,
     failedRuns,
     joinRequests: visibleJoinRequests,
     mineIssues: visibleMineIssues,
     alerts,
+    replyNeeded: visibleReplyNeeded,
   };
 }

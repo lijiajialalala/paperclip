@@ -87,6 +87,7 @@ const SESSIONED_LOCAL_ADAPTERS = new Set([
   "opencode_local",
   "pi_local",
 ]);
+const ACTIVE_HEARTBEAT_RUN_STATUS_SET = new Set(["queued", "running"]);
 
 export type AutomaticRetryReason = "process_lost" | "rate_limited" | "auth_file_transient" | "browser_busy";
 
@@ -559,6 +560,18 @@ export type ResolvedWorkspaceForRun = {
 type ProjectWorkspaceCandidate = {
   id: string;
 };
+
+type IssueExecutionLockRow = {
+  id: string;
+  companyId: string;
+  executionRunId: string | null;
+};
+
+type IssueExecutionRecoveryOutcome =
+  | { action: "unchanged" | "missing_issue" | "no_lock"; promotedRun: null }
+  | { action: "rebound_active_run"; promotedRun: null; runId: string }
+  | { action: "promoted_deferred"; promotedRun: typeof heartbeatRuns.$inferSelect }
+  | { action: "cleared_stale_lock"; promotedRun: null };
 
 export function prioritizeProjectWorkspaceCandidatesForRun<T extends ProjectWorkspaceCandidate>(
   rows: T[],
@@ -2519,7 +2532,24 @@ export function heartbeatService(db: Db) {
     if (reaped.length > 0) {
       logger.warn({ reapedCount: reaped.length, runIds: reaped }, "reaped orphaned heartbeat runs");
     }
-    return { reaped: reaped.length, runIds: reaped };
+    const recoveredLocks = await reconcileIssueExecutionLocks();
+    if (recoveredLocks.recovered > 0) {
+      logger.warn(
+        {
+          recoveredCount: recoveredLocks.recovered,
+          issueIds: recoveredLocks.issueIds,
+          promotedRunIds: recoveredLocks.promotedRunIds,
+        },
+        "reconciled stale issue execution locks",
+      );
+    }
+    return {
+      reaped: reaped.length,
+      runIds: reaped,
+      recoveredIssueLocks: recoveredLocks.recovered,
+      recoveredIssueIds: recoveredLocks.issueIds,
+      promotedRunIds: recoveredLocks.promotedRunIds,
+    };
   }
 
   async function resumeQueuedRuns() {
@@ -3707,144 +3737,303 @@ export function heartbeatService(db: Db) {
         }
   }
 
-  async function releaseIssueExecutionAndPromote(run: typeof heartbeatRuns.$inferSelect) {
-    const promotedRun = await db.transaction(async (tx) => {
+  async function findNextActiveIssueExecutionRun(
+    tx: Db | any,
+    issue: Pick<IssueExecutionLockRow, "id" | "companyId">,
+  ) {
+    return tx
+      .select()
+      .from(heartbeatRuns)
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, issue.companyId),
+          inArray(heartbeatRuns.status, ["queued", "running"]),
+          sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issue.id}`,
+        ),
+      )
+      .orderBy(
+        sql`case when ${heartbeatRuns.status} = 'running' then 0 else 1 end`,
+        asc(heartbeatRuns.createdAt),
+      )
+      .limit(1)
+      .then((rows: Array<typeof heartbeatRuns.$inferSelect>) => rows[0] ?? null);
+  }
+
+  async function bindIssueExecutionRun(
+    tx: Db | any,
+    issueId: string,
+    run: typeof heartbeatRuns.$inferSelect,
+    now: Date,
+  ) {
+    const executionAgent = await tx
+      .select({ name: agents.name })
+      .from(agents)
+      .where(eq(agents.id, run.agentId))
+      .then((rows: Array<{ name: string | null }>) => rows[0] ?? null);
+
+    await tx
+      .update(issues)
+      .set({
+        executionRunId: run.id,
+        executionAgentNameKey: normalizeAgentNameKey(executionAgent?.name),
+        executionLockedAt: now,
+        updatedAt: now,
+      })
+      .where(eq(issues.id, issueId));
+  }
+
+  async function clearIssueExecutionRun(
+    tx: Db | any,
+    issueId: string,
+    now: Date,
+  ) {
+    await tx
+      .update(issues)
+      .set({
+        executionRunId: null,
+        executionAgentNameKey: null,
+        executionLockedAt: null,
+        updatedAt: now,
+      })
+      .where(eq(issues.id, issueId));
+  }
+
+  async function promoteDeferredIssueExecutionWake(
+    tx: Db | any,
+    issue: Pick<IssueExecutionLockRow, "id" | "companyId">,
+    now: Date,
+  ) {
+    while (true) {
+      const deferred = await tx
+        .select()
+        .from(agentWakeupRequests)
+        .where(
+          and(
+            eq(agentWakeupRequests.companyId, issue.companyId),
+            eq(agentWakeupRequests.status, "deferred_issue_execution"),
+            sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issue.id}`,
+          ),
+        )
+        .orderBy(asc(agentWakeupRequests.requestedAt))
+        .limit(1)
+        .then((rows: Array<typeof agentWakeupRequests.$inferSelect>) => rows[0] ?? null);
+
+      if (!deferred) return null;
+
+      const deferredAgent = await tx
+        .select()
+        .from(agents)
+        .where(eq(agents.id, deferred.agentId))
+        .then((rows: Array<typeof agents.$inferSelect>) => rows[0] ?? null);
+
+      if (
+        !deferredAgent ||
+        deferredAgent.companyId !== issue.companyId ||
+        deferredAgent.status === "paused" ||
+        deferredAgent.status === "terminated" ||
+        deferredAgent.status === "pending_approval"
+      ) {
+        await tx
+          .update(agentWakeupRequests)
+          .set({
+            status: "failed",
+            finishedAt: now,
+            error: "Deferred wake could not be promoted: agent is not invokable",
+            updatedAt: now,
+          })
+          .where(eq(agentWakeupRequests.id, deferred.id));
+        continue;
+      }
+
+      const deferredPayload = parseObject(deferred.payload);
+      const deferredContextSeed = parseObject(deferredPayload[DEFERRED_WAKE_CONTEXT_KEY]);
+      const promotedContextSeed: Record<string, unknown> = { ...deferredContextSeed };
+      const promotedReason = readNonEmptyString(deferred.reason) ?? "issue_execution_promoted";
+      const promotedSource =
+        (readNonEmptyString(deferred.source) as WakeupOptions["source"]) ?? "automation";
+      const promotedTriggerDetail =
+        (readNonEmptyString(deferred.triggerDetail) as WakeupOptions["triggerDetail"]) ?? null;
+      const promotedPayload = deferredPayload;
+      delete promotedPayload[DEFERRED_WAKE_CONTEXT_KEY];
+
+      const {
+        contextSnapshot: promotedContextSnapshot,
+        taskKey: promotedTaskKey,
+      } = enrichWakeContextSnapshot({
+        contextSnapshot: promotedContextSeed,
+        reason: promotedReason,
+        source: promotedSource,
+        triggerDetail: promotedTriggerDetail,
+        payload: promotedPayload,
+      });
+
+      const sessionBefore =
+        readNonEmptyString(promotedContextSnapshot.resumeSessionDisplayId) ??
+        await resolveSessionBeforeForWakeup(deferredAgent, promotedTaskKey);
+      const newRun = await tx
+        .insert(heartbeatRuns)
+        .values({
+          companyId: deferredAgent.companyId,
+          agentId: deferredAgent.id,
+          invocationSource: promotedSource,
+          triggerDetail: promotedTriggerDetail,
+          status: "queued",
+          wakeupRequestId: deferred.id,
+          contextSnapshot: promotedContextSnapshot,
+          sessionIdBefore: sessionBefore,
+        })
+        .returning()
+        .then((rows: Array<typeof heartbeatRuns.$inferSelect>) => rows[0]);
+
+      await tx
+        .update(agentWakeupRequests)
+        .set({
+          status: "queued",
+          reason: "issue_execution_promoted",
+          runId: newRun.id,
+          claimedAt: null,
+          finishedAt: null,
+          error: null,
+          updatedAt: now,
+        })
+        .where(eq(agentWakeupRequests.id, deferred.id));
+
+      await bindIssueExecutionRun(tx, issue.id, newRun, now);
+      return newRun;
+    }
+  }
+
+  async function recoverIssueExecutionLock(input: {
+    companyId: string;
+    issueId: string;
+    releasedRunId?: string | null;
+    now?: Date;
+  }): Promise<IssueExecutionRecoveryOutcome> {
+    const now = input.now ?? new Date();
+    return db.transaction(async (tx) => {
       await tx.execute(
-        sql`select id from issues where company_id = ${run.companyId} and execution_run_id = ${run.id} for update`,
+        sql`select id from issues where id = ${input.issueId} and company_id = ${input.companyId} for update`,
       );
 
       const issue = await tx
         .select({
           id: issues.id,
           companyId: issues.companyId,
+          executionRunId: issues.executionRunId,
         })
         .from(issues)
-        .where(and(eq(issues.companyId, run.companyId), eq(issues.executionRunId, run.id)))
-        .then((rows) => rows[0] ?? null);
+        .where(and(eq(issues.id, input.issueId), eq(issues.companyId, input.companyId)))
+        .then((rows: Array<IssueExecutionLockRow>) => rows[0] ?? null);
+      if (!issue) return { action: "missing_issue", promotedRun: null };
+      if (!issue.executionRunId) return { action: "no_lock", promotedRun: null };
 
-      if (!issue) return;
+      const currentExecutionRun = await tx
+        .select()
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, issue.executionRunId))
+        .then((rows: Array<typeof heartbeatRuns.$inferSelect>) => rows[0] ?? null);
+      const currentRunActive = Boolean(
+        currentExecutionRun && ACTIVE_HEARTBEAT_RUN_STATUS_SET.has(currentExecutionRun.status),
+      );
+      const releasingCurrentRun =
+        !!input.releasedRunId &&
+        currentExecutionRun != null &&
+        currentExecutionRun.id === input.releasedRunId;
 
-      await tx
-        .update(issues)
-        .set({
-          executionRunId: null,
-          executionAgentNameKey: null,
-          executionLockedAt: null,
-          updatedAt: new Date(),
-        })
-        .where(eq(issues.id, issue.id));
-
-      while (true) {
-        const deferred = await tx
-          .select()
-          .from(agentWakeupRequests)
-          .where(
-            and(
-              eq(agentWakeupRequests.companyId, issue.companyId),
-              eq(agentWakeupRequests.status, "deferred_issue_execution"),
-              sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issue.id}`,
-            ),
-          )
-          .orderBy(asc(agentWakeupRequests.requestedAt))
-          .limit(1)
-          .then((rows) => rows[0] ?? null);
-
-        if (!deferred) return null;
-
-        const deferredAgent = await tx
-          .select()
-          .from(agents)
-          .where(eq(agents.id, deferred.agentId))
-          .then((rows) => rows[0] ?? null);
-
-        if (
-          !deferredAgent ||
-          deferredAgent.companyId !== issue.companyId ||
-          deferredAgent.status === "paused" ||
-          deferredAgent.status === "terminated" ||
-          deferredAgent.status === "pending_approval"
-        ) {
-          await tx
-            .update(agentWakeupRequests)
-            .set({
-              status: "failed",
-              finishedAt: new Date(),
-              error: "Deferred wake could not be promoted: agent is not invokable",
-              updatedAt: new Date(),
-            })
-            .where(eq(agentWakeupRequests.id, deferred.id));
-          continue;
-        }
-
-        const deferredPayload = parseObject(deferred.payload);
-        const deferredContextSeed = parseObject(deferredPayload[DEFERRED_WAKE_CONTEXT_KEY]);
-        const promotedContextSeed: Record<string, unknown> = { ...deferredContextSeed };
-        const promotedReason = readNonEmptyString(deferred.reason) ?? "issue_execution_promoted";
-        const promotedSource =
-          (readNonEmptyString(deferred.source) as WakeupOptions["source"]) ?? "automation";
-        const promotedTriggerDetail =
-          (readNonEmptyString(deferred.triggerDetail) as WakeupOptions["triggerDetail"]) ?? null;
-        const promotedPayload = deferredPayload;
-        delete promotedPayload[DEFERRED_WAKE_CONTEXT_KEY];
-
-        const {
-          contextSnapshot: promotedContextSnapshot,
-          taskKey: promotedTaskKey,
-        } = enrichWakeContextSnapshot({
-          contextSnapshot: promotedContextSeed,
-          reason: promotedReason,
-          source: promotedSource,
-          triggerDetail: promotedTriggerDetail,
-          payload: promotedPayload,
-        });
-
-        const sessionBefore =
-          readNonEmptyString(promotedContextSnapshot.resumeSessionDisplayId) ??
-          await resolveSessionBeforeForWakeup(deferredAgent, promotedTaskKey);
-        const now = new Date();
-        const newRun = await tx
-          .insert(heartbeatRuns)
-          .values({
-            companyId: deferredAgent.companyId,
-            agentId: deferredAgent.id,
-            invocationSource: promotedSource,
-            triggerDetail: promotedTriggerDetail,
-            status: "queued",
-            wakeupRequestId: deferred.id,
-            contextSnapshot: promotedContextSnapshot,
-            sessionIdBefore: sessionBefore,
-          })
-          .returning()
-          .then((rows) => rows[0]);
-
-        await tx
-          .update(agentWakeupRequests)
-          .set({
-            status: "queued",
-            reason: "issue_execution_promoted",
-            runId: newRun.id,
-            claimedAt: null,
-            finishedAt: null,
-            error: null,
-            updatedAt: now,
-          })
-          .where(eq(agentWakeupRequests.id, deferred.id));
-
-        await tx
-          .update(issues)
-          .set({
-            executionRunId: newRun.id,
-            executionAgentNameKey: normalizeAgentNameKey(deferredAgent.name),
-            executionLockedAt: now,
-            updatedAt: now,
-          })
-          .where(eq(issues.id, issue.id));
-
-        return newRun;
+      if (currentRunActive && !releasingCurrentRun) {
+        return { action: "unchanged", promotedRun: null };
       }
-    });
 
-    if (!promotedRun) return;
+      await clearIssueExecutionRun(tx, issue.id, now);
+
+      const reboundRun = await findNextActiveIssueExecutionRun(tx, issue);
+      if (reboundRun) {
+        await bindIssueExecutionRun(tx, issue.id, reboundRun, now);
+        return {
+          action: "rebound_active_run",
+          promotedRun: null,
+          runId: reboundRun.id,
+        };
+      }
+
+      const promotedRun = await promoteDeferredIssueExecutionWake(tx, issue, now);
+      if (promotedRun) {
+        return {
+          action: "promoted_deferred",
+          promotedRun,
+        };
+      }
+
+      return { action: "cleared_stale_lock", promotedRun: null };
+    });
+  }
+
+  async function reconcileIssueExecutionLocks() {
+    const lockedIssues = await db
+      .select({
+        id: issues.id,
+        companyId: issues.companyId,
+      })
+      .from(issues)
+      .where(sql`${issues.executionRunId} is not null`);
+
+    const recoveredIssueIds: string[] = [];
+    const promotedRunIds: string[] = [];
+
+    for (const issue of lockedIssues) {
+      const outcome = await recoverIssueExecutionLock({
+        companyId: issue.companyId,
+        issueId: issue.id,
+      });
+
+      if (outcome.action === "unchanged" || outcome.action === "missing_issue" || outcome.action === "no_lock") {
+        continue;
+      }
+
+      recoveredIssueIds.push(issue.id);
+      if (outcome.action === "promoted_deferred") {
+        promotedRunIds.push(outcome.promotedRun.id);
+        publishLiveEvent({
+          companyId: outcome.promotedRun.companyId,
+          type: "heartbeat.run.queued",
+          payload: {
+            runId: outcome.promotedRun.id,
+            agentId: outcome.promotedRun.agentId,
+            invocationSource: outcome.promotedRun.invocationSource,
+            triggerDetail: outcome.promotedRun.triggerDetail,
+            wakeupRequestId: outcome.promotedRun.wakeupRequestId,
+          },
+        });
+        await startNextQueuedRunForAgent(outcome.promotedRun.agentId);
+      }
+    }
+
+    return {
+      recovered: recoveredIssueIds.length,
+      issueIds: recoveredIssueIds,
+      promotedRunIds,
+    };
+  }
+
+  async function releaseIssueExecutionAndPromote(run: typeof heartbeatRuns.$inferSelect) {
+    const lockedIssue = await db
+      .select({
+        id: issues.id,
+        companyId: issues.companyId,
+      })
+      .from(issues)
+      .where(and(eq(issues.companyId, run.companyId), eq(issues.executionRunId, run.id)))
+      .then((rows: Array<Pick<IssueExecutionLockRow, "id" | "companyId">>) => rows[0] ?? null);
+    if (!lockedIssue) return;
+
+    const outcome = await recoverIssueExecutionLock({
+      companyId: lockedIssue.companyId,
+      issueId: lockedIssue.id,
+      releasedRunId: run.id,
+    });
+    if (outcome.action !== "promoted_deferred") return;
+
+    const promotedRun = outcome.promotedRun;
 
     publishLiveEvent({
       companyId: promotedRun.companyId,
@@ -4691,6 +4880,8 @@ export function heartbeatService(db: Db) {
     reportRunActivity: clearDetachedRunWarning,
 
     reapOrphanedRuns,
+
+    reconcileIssueExecutionLocks,
 
     resumeQueuedRuns,
 

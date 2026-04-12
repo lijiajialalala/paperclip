@@ -90,6 +90,7 @@ import {
   isInboxEntityRead,
   joinRequestActivityTimestamp,
   loadInboxIssueColumns,
+  mergeInboxIssues,
   normalizeInboxIssueColumns,
   resolveIssueWorkspaceName,
   resolveInboxSelectionIndex,
@@ -146,6 +147,12 @@ function readIssueIdFromRun(run: HeartbeatRun): string | null {
   if (typeof taskId === "string" && taskId.length > 0) return taskId;
 
   return null;
+}
+
+function issueReplyNeededLabel(issue: Issue): string {
+  if (!issue.replyNeededForMe) return "Reply needed";
+  if (!issue.replyNeededAt) return "Reply needed";
+  return `Reply needed ${timeAgo(issue.replyNeededAt)}`;
 }
 
 
@@ -219,12 +226,63 @@ export function InboxIssueMetaLeading({
           </span>
         </span>
       )}
+      {issue.replyNeededForMe && (
+        <span
+          className={cn(
+            "inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 sm:gap-1.5 sm:px-2",
+            "bg-orange-500/10",
+          )}
+          title={issueReplyNeededLabel(issue)}
+        >
+          <span className="h-2 w-2 rounded-full bg-orange-500" />
+          <span
+            className={cn(
+              "text-[11px] font-medium",
+              "text-orange-700 dark:text-orange-300",
+            )}
+          >
+            Reply needed
+          </span>
+        </span>
+      )}
+      {!isLive && issue.statusTruthSummary?.executionDiagnosis === "no_active_run" && (
+        <span
+          className={cn(
+            "inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 sm:gap-1.5 sm:px-2",
+            "bg-amber-500/10",
+          )}
+          title={
+            issue.statusTruthSummary.lastExecutionSignalAt
+              ? `Last execution signal ${timeAgo(issue.statusTruthSummary.lastExecutionSignalAt)}`
+              : "No active run attached"
+          }
+        >
+          <AlertTriangle className="h-3 w-3 text-amber-600 dark:text-amber-400" />
+          <span
+            className={cn(
+              "hidden text-[11px] font-medium sm:inline",
+              "text-amber-700 dark:text-amber-300",
+            )}
+          >
+            Stalled
+          </span>
+        </span>
+      )}
     </>
   );
 }
 
 function issueActivityText(issue: Issue): string {
-  return `Updated ${timeAgo(issue.lastActivityAt ?? issue.lastExternalCommentAt ?? issue.updatedAt)}`;
+  const segments: string[] = [];
+  if (issue.replyNeededForMe) {
+    segments.push("Reply needed");
+  }
+  if (issue.statusTruthSummary?.executionDiagnosis === "no_active_run") {
+    segments.push("Stalled: no active run");
+    return segments.join(" · ");
+  }
+  segments.push(`Updated ${timeAgo(issue.lastActivityAt ?? issue.lastExternalCommentAt ?? issue.updatedAt)}`);
+  return segments.join(" · ");
 }
 
 function issueTrailingGridTemplate(columns: InboxIssueColumn[]): string {
@@ -920,6 +978,18 @@ export function Inbox() {
     enabled: !!selectedCompanyId,
   });
   const {
+    data: replyNeededIssuesRaw = [],
+    isLoading: isReplyNeededIssuesLoading,
+  } = useQuery({
+    queryKey: ["issues", selectedCompanyId, "reply-needed-for-me"],
+    queryFn: () =>
+      issuesApi.list(selectedCompanyId!, {
+        replyNeededForUserId: "me",
+        status: INBOX_MINE_ISSUE_STATUS_FILTER,
+      }),
+    enabled: !!selectedCompanyId,
+  });
+  const {
     data: touchedIssuesRaw = [],
     isLoading: isTouchedIssuesLoading,
   } = useQuery({
@@ -938,7 +1008,14 @@ export function Inbox() {
     enabled: !!selectedCompanyId,
   });
 
-  const mineIssues = useMemo(() => getRecentTouchedIssues(mineIssuesRaw), [mineIssuesRaw]);
+  const replyNeededIssues = useMemo(
+    () => mergeInboxIssues([], replyNeededIssuesRaw),
+    [replyNeededIssuesRaw],
+  );
+  const mineIssues = useMemo(
+    () => mergeInboxIssues(getRecentTouchedIssues(mineIssuesRaw), replyNeededIssues),
+    [mineIssuesRaw, replyNeededIssues],
+  );
   const touchedIssues = useMemo(() => getRecentTouchedIssues(touchedIssuesRaw), [touchedIssuesRaw]);
   const unreadTouchedIssues = useMemo(
     () => touchedIssues.filter((issue) => issue.isUnreadForMe),
@@ -948,6 +1025,7 @@ export function Inbox() {
     () => {
       if (tab === "mine") return mineIssues;
       if (tab === "unread") return unreadTouchedIssues;
+      if (tab === "all") return mineIssues;
       return touchedIssues;
     },
     [tab, mineIssues, touchedIssues, unreadTouchedIssues],
@@ -1079,6 +1157,7 @@ export function Inbox() {
         if (issue.title.toLowerCase().includes(q)) return true;
         if (issue.identifier?.toLowerCase().includes(q)) return true;
         if (issue.description?.toLowerCase().includes(q)) return true;
+        if (issue.replyNeededForMe && "reply needed".includes(q)) return true;
         if (isolatedWorkspacesEnabled) {
           const workspaceName = resolveIssueWorkspaceName(issue, {
             executionWorkspaceById,
@@ -1250,6 +1329,7 @@ export function Inbox() {
     queryClient.invalidateQueries({ queryKey: queryKeys.issues.listMineByMe(selectedCompanyId) });
     queryClient.invalidateQueries({ queryKey: queryKeys.issues.listTouchedByMe(selectedCompanyId) });
     queryClient.invalidateQueries({ queryKey: queryKeys.issues.listUnreadTouchedByMe(selectedCompanyId) });
+    queryClient.invalidateQueries({ queryKey: ["issues", selectedCompanyId, "reply-needed-for-me"] });
     queryClient.invalidateQueries({ queryKey: queryKeys.sidebarBadges(selectedCompanyId) });
   };
 
@@ -1566,6 +1646,7 @@ export function Inbox() {
     !isDashboardLoading &&
     !isIssuesLoading &&
     !isMineIssuesLoading &&
+    !isReplyNeededIssuesLoading &&
     !isTouchedIssuesLoading &&
     !isRunsLoading;
 
@@ -1709,7 +1790,7 @@ export function Inbox() {
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="everything">All categories</SelectItem>
-              <SelectItem value="issues_i_touched">My recent issues</SelectItem>
+              <SelectItem value="issues_i_touched">Inbox issues</SelectItem>
               <SelectItem value="join_requests">Join requests</SelectItem>
               <SelectItem value="approvals">Approvals</SelectItem>
               <SelectItem value="failed_runs">Failed runs</SelectItem>
