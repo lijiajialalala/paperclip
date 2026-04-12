@@ -2,12 +2,15 @@ import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
+  approvalComments,
+  approvals,
   agents,
   companies,
   costEvents,
   createDb,
   feedbackVotes,
   financeEvents,
+  issueApprovals,
   issueComments,
   issueInboxArchives,
   issueReadStates,
@@ -342,6 +345,68 @@ describeEmbeddedPostgres("projectService issue lifecycle", () => {
     ).resolves.toEqual([]);
     await expect(
       db.select({ id: financeEvents.id }).from(financeEvents).where(eq(financeEvents.companyId, companyId)),
+    ).resolves.toEqual([]);
+  });
+
+  it("removes approvals that become orphaned after project issue deletion", async () => {
+    const companyId = randomUUID();
+    const projectId = randomUUID();
+    const issueId = randomUUID();
+    const approvalId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "CMPA",
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(projects).values({
+      id: projectId,
+      companyId,
+      name: "Delete orphan approvals",
+      status: "in_progress",
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      projectId,
+      title: "Issue with linked approval",
+      status: "todo",
+      priority: "medium",
+    });
+
+    await db.insert(approvals).values({
+      id: approvalId,
+      companyId,
+      type: "work_plan",
+      requestedByUserId: "board-user",
+      status: "approved",
+      payload: { summary: "plan" },
+    });
+
+    await db.insert(issueApprovals).values({
+      companyId,
+      issueId,
+      approvalId,
+      linkedByUserId: "board-user",
+    });
+
+    await db.insert(approvalComments).values({
+      companyId,
+      approvalId,
+      authorUserId: "board-user",
+      body: "Looks good.",
+    });
+
+    await projectSvc.remove(projectId);
+
+    await expect(
+      db.select({ id: approvals.id }).from(approvals).where(eq(approvals.companyId, companyId)),
+    ).resolves.toEqual([]);
+    await expect(
+      db.select({ id: approvalComments.id }).from(approvalComments).where(eq(approvalComments.companyId, companyId)),
     ).resolves.toEqual([]);
   });
 });

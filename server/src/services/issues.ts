@@ -6,20 +6,28 @@ import {
   assets,
   companies,
   companyMemberships,
+  costEvents,
   documents,
+  executionWorkspaces,
+  feedbackExports,
+  feedbackVotes,
+  financeEvents,
   goals,
   heartbeatRuns,
-  executionWorkspaces,
   issueAttachments,
+  issueApprovals,
   issueInboxArchives,
   issueLabels,
   issueComments,
   issueDocuments,
+  issueWorkProducts,
   issueReadStates,
   issues,
   labels,
   projectWorkspaces,
   projects,
+  routineRuns,
+  workspaceRuntimeServices,
 } from "@paperclipai/db";
 import { extractAgentMentionIds, extractProjectMentionIds, isUuidLike } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
@@ -36,6 +44,7 @@ import { instanceSettingsService } from "./instance-settings.js";
 import { platformUnblockService } from "./platform-unblock.js";
 import { qaIssueStateService } from "./qa-issue-state.js";
 import { redactCurrentUserText } from "../log-redaction.js";
+import { approvalService } from "./approvals.js";
 import { resolveIssueGoalId, resolveNextIssueGoalId } from "./issue-goal-fallback.js";
 import { getDefaultCompanyGoal } from "./goals.js";
 
@@ -697,6 +706,7 @@ export function issueService(db: Db) {
   const statusTruth = issueStatusTruthService(db);
   const qaIssueState = qaIssueStateService(db);
   const platformUnblock = platformUnblockService(db);
+  const approvalsSvc = approvalService(db);
 
   async function getIssueByUuid(id: string) {
     const row = await db
@@ -1671,6 +1681,11 @@ export function issueService(db: Db) {
 
     remove: (id: string) =>
       db.transaction(async (tx) => {
+        const linkedApprovalIds = await tx
+          .select({ approvalId: issueApprovals.approvalId })
+          .from(issueApprovals)
+          .where(eq(issueApprovals.issueId, id))
+          .then((rows: Array<{ approvalId: string }>) => rows.map((row) => row.approvalId));
         const attachmentAssetIds = await tx
           .select({ assetId: issueAttachments.assetId })
           .from(issueAttachments)
@@ -1679,6 +1694,32 @@ export function issueService(db: Db) {
           .select({ documentId: issueDocuments.documentId })
           .from(issueDocuments)
           .where(eq(issueDocuments.issueId, id));
+
+        await tx.delete(issueComments).where(eq(issueComments.issueId, id));
+        await tx.delete(issueInboxArchives).where(eq(issueInboxArchives.issueId, id));
+        await tx.delete(issueReadStates).where(eq(issueReadStates.issueId, id));
+        await tx.delete(issueLabels).where(eq(issueLabels.issueId, id));
+        await tx.delete(issueApprovals).where(eq(issueApprovals.issueId, id));
+        await tx.delete(feedbackExports).where(eq(feedbackExports.issueId, id));
+        await tx.delete(feedbackVotes).where(eq(feedbackVotes.issueId, id));
+        await tx.delete(financeEvents).where(eq(financeEvents.issueId, id));
+        await tx.delete(costEvents).where(eq(costEvents.issueId, id));
+        await tx.delete(issueWorkProducts).where(eq(issueWorkProducts.issueId, id));
+        await tx
+          .update(routineRuns)
+          .set({ linkedIssueId: null, updatedAt: new Date() })
+          .where(eq(routineRuns.linkedIssueId, id));
+        await tx
+          .update(workspaceRuntimeServices)
+          .set({ issueId: null, updatedAt: new Date() })
+          .where(eq(workspaceRuntimeServices.issueId, id));
+        await tx
+          .update(executionWorkspaces)
+          .set({ sourceIssueId: null, updatedAt: new Date() })
+          .where(eq(executionWorkspaces.sourceIssueId, id));
+        await tx
+          .delete(activityLog)
+          .where(and(eq(activityLog.entityType, "issue"), eq(activityLog.entityId, id)));
 
         const removedIssue = await tx
           .delete(issues)
@@ -1699,6 +1740,7 @@ export function issueService(db: Db) {
         }
 
         if (!removedIssue) return null;
+        await approvalsSvc.removeOrphanedByIds(linkedApprovalIds, tx);
         await recomputeAncestorStatuses(tx, [removedIssue.parentId]);
         const [enriched] = await withIssueLabels(tx, [removedIssue]);
         return enriched;

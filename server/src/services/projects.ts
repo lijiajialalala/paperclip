@@ -5,18 +5,24 @@ import {
   assets,
   costEvents,
   documents,
+  executionWorkspaces,
+  feedbackExports,
   feedbackVotes,
   financeEvents,
   issueAttachments,
+  issueApprovals,
   issueComments,
   issueDocuments,
   issueInboxArchives,
+  issueLabels,
+  issueWorkProducts,
   issueReadStates,
   issues,
   projects,
   projectGoals,
   goals,
   projectWorkspaces,
+  routineRuns,
   workspaceRuntimeServices,
 } from "@paperclipai/db";
 import {
@@ -36,6 +42,7 @@ import { listCurrentRuntimeServicesForProjectWorkspaces } from "./workspace-runt
 import { parseProjectExecutionWorkspacePolicy } from "./execution-workspace-policy.js";
 import { mergeProjectWorkspaceRuntimeConfig, readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-config.js";
 import { resolveManagedProjectWorkspaceDir } from "../home-paths.js";
+import { approvalService } from "./approvals.js";
 
 type ProjectRow = typeof projects.$inferSelect;
 type ProjectWorkspaceRow = typeof projectWorkspaces.$inferSelect;
@@ -413,6 +420,12 @@ async function deleteProjectIssueGraph(dbOrTx: any, projectId: string) {
       ),
     );
 
+  const linkedApprovalIds = await dbOrTx
+    .select({ approvalId: issueApprovals.approvalId })
+    .from(issueApprovals)
+    .where(inArray(issueApprovals.issueId, issueIds))
+    .then((rows: Array<{ approvalId: string }>) => rows.map((row) => row.approvalId));
+
   const [attachmentAssetIds, issueDocumentIds] = await Promise.all([
     dbOrTx
       .select({ assetId: issueAttachments.assetId })
@@ -427,7 +440,11 @@ async function deleteProjectIssueGraph(dbOrTx: any, projectId: string) {
   await dbOrTx.delete(issueComments).where(inArray(issueComments.issueId, issueIds));
   await dbOrTx.delete(issueInboxArchives).where(inArray(issueInboxArchives.issueId, issueIds));
   await dbOrTx.delete(issueReadStates).where(inArray(issueReadStates.issueId, issueIds));
+  await dbOrTx.delete(issueLabels).where(inArray(issueLabels.issueId, issueIds));
+  await dbOrTx.delete(issueApprovals).where(inArray(issueApprovals.issueId, issueIds));
+  await dbOrTx.delete(feedbackExports).where(inArray(feedbackExports.issueId, issueIds));
   await dbOrTx.delete(feedbackVotes).where(inArray(feedbackVotes.issueId, issueIds));
+  await dbOrTx.delete(issueWorkProducts).where(inArray(issueWorkProducts.issueId, issueIds));
   await dbOrTx.delete(financeEvents).where(
     or(
       inArray(financeEvents.issueId, issueIds),
@@ -446,7 +463,20 @@ async function deleteProjectIssueGraph(dbOrTx: any, projectId: string) {
       inArray(activityLog.entityId, issueIds),
     ),
   );
+  await dbOrTx
+    .update(routineRuns)
+    .set({ linkedIssueId: null, updatedAt: new Date() })
+    .where(inArray(routineRuns.linkedIssueId, issueIds));
+  await dbOrTx
+    .update(workspaceRuntimeServices)
+    .set({ issueId: null, updatedAt: new Date() })
+    .where(inArray(workspaceRuntimeServices.issueId, issueIds));
+  await dbOrTx
+    .update(executionWorkspaces)
+    .set({ sourceIssueId: null, updatedAt: new Date() })
+    .where(inArray(executionWorkspaces.sourceIssueId, issueIds));
   await dbOrTx.delete(issues).where(inArray(issues.id, issueIds));
+  await approvalService(dbOrTx).removeOrphanedByIds(linkedApprovalIds, dbOrTx);
 
   if (attachmentAssetIds.length > 0) {
     await dbOrTx

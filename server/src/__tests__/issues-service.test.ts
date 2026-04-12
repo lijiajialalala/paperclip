@@ -2,18 +2,28 @@ import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
+  approvalComments,
+  approvals,
   activityLog,
   agents,
   companies,
+  costEvents,
   createDb,
   executionWorkspaces,
+  feedbackVotes,
+  financeEvents,
   heartbeatRuns,
   instanceSettings,
+  issueApprovals,
   issueComments,
   issueInboxArchives,
+  issueReadStates,
   issues,
   projectWorkspaces,
   projects,
+  routines,
+  routineRuns,
+  workspaceRuntimeServices,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -1830,6 +1840,256 @@ describeEmbeddedPostgres("recomputeAncestorStatuses — parent batch auto-commen
     expect(batchComment).toBeDefined();
     // Should show 1 out of 2 lanes (not cancelled count)
     expect(batchComment?.body).toContain("1/2 lanes done");
+  });
+});
+
+describeEmbeddedPostgres("issueService.remove cleanup", () => {
+  let db!: ReturnType<typeof createDb>;
+  let svc!: ReturnType<typeof issueService>;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-issues-remove-");
+    db = createDb(tempDb.connectionString);
+    svc = issueService(db);
+  }, embeddedPostgresSuiteTimeoutMs);
+
+  afterEach(async () => {
+    await db.delete(approvalComments);
+    await db.delete(approvals);
+    await db.delete(activityLog);
+    await db.delete(financeEvents);
+    await db.delete(costEvents);
+    await db.delete(feedbackVotes);
+    await db.delete(issueApprovals);
+    await db.delete(issueReadStates);
+    await db.delete(issueInboxArchives);
+    await db.delete(issueComments);
+    await db.delete(routineRuns);
+    await db.delete(routines);
+    await db.delete(workspaceRuntimeServices);
+    await db.delete(issues);
+    await db.delete(heartbeatRuns);
+    await db.delete(executionWorkspaces);
+    await db.delete(projectWorkspaces);
+    await db.delete(projects);
+    await db.delete(agents);
+    await db.delete(instanceSettings);
+    await db.delete(companies);
+  });
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  it("deletes non-cascading issue rows and removes orphan approvals", async () => {
+    const companyId = randomUUID();
+    const projectId = randomUUID();
+    const issueId = randomUUID();
+    const agentId = randomUUID();
+    const approvalId = randomUUID();
+    const costEventId = randomUUID();
+    const runtimeServiceId = randomUUID();
+    const routineId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "CMPA",
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Cleanup agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.insert(projects).values({
+      id: projectId,
+      companyId,
+      name: "Cleanup project",
+      status: "in_progress",
+    });
+
+    await db.insert(routines).values({
+      id: routineId,
+      companyId,
+      projectId,
+      title: "Cleanup routine",
+      assigneeAgentId: agentId,
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      projectId,
+      title: "Cleanup target",
+      status: "todo",
+      priority: "medium",
+    });
+
+    await db.insert(issueComments).values({
+      companyId,
+      issueId,
+      authorUserId: "board-user",
+      body: "comment",
+    });
+    await db.insert(issueInboxArchives).values({
+      companyId,
+      issueId,
+      userId: "board-user",
+    });
+    await db.insert(issueReadStates).values({
+      companyId,
+      issueId,
+      userId: "board-user",
+    });
+    await db.insert(feedbackVotes).values({
+      companyId,
+      issueId,
+      targetType: "issue",
+      targetId: issueId,
+      authorUserId: "board-user",
+      vote: "up",
+    });
+    await db.insert(costEvents).values({
+      id: costEventId,
+      companyId,
+      agentId,
+      issueId,
+      projectId,
+      goalId: null,
+      heartbeatRunId: null,
+      billingCode: null,
+      provider: "openai",
+      biller: "openai",
+      billingType: "token",
+      model: "gpt-5.4",
+      inputTokens: 1,
+      cachedInputTokens: 0,
+      outputTokens: 1,
+      costCents: 1,
+      occurredAt: new Date("2026-04-12T00:00:00.000Z"),
+    });
+    await db.insert(financeEvents).values({
+      companyId,
+      agentId: null,
+      issueId,
+      projectId,
+      goalId: null,
+      heartbeatRunId: null,
+      costEventId,
+      billingCode: null,
+      description: "charge",
+      eventKind: "usage",
+      direction: "debit",
+      biller: "openai",
+      provider: "openai",
+      executionAdapterType: null,
+      pricingTier: null,
+      region: null,
+      model: "gpt-5.4",
+      quantity: 1,
+      unit: "token",
+      amountCents: 1,
+      currency: "USD",
+      estimated: false,
+      externalInvoiceId: null,
+      metadataJson: null,
+      occurredAt: new Date("2026-04-12T00:00:00.000Z"),
+    });
+    await db.insert(activityLog).values({
+      companyId,
+      actorType: "user",
+      actorId: "board-user",
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: issueId,
+      details: {},
+    });
+    await db.insert(workspaceRuntimeServices).values({
+      id: runtimeServiceId,
+      companyId,
+      projectId,
+      projectWorkspaceId: null,
+      executionWorkspaceId: null,
+      issueId,
+      scopeType: "issue",
+      scopeId: issueId,
+      serviceName: "vite",
+      status: "running",
+      lifecycle: "ephemeral",
+      reuseKey: null,
+      command: "pnpm dev",
+      cwd: "D:\\\\projects\\\\cleanup",
+      port: 4173,
+      url: "http://127.0.0.1:4173",
+      provider: "local_process",
+      providerRef: null,
+      ownerAgentId: agentId,
+      startedByRunId: null,
+      healthStatus: "healthy",
+    });
+    await db.insert(routineRuns).values({
+      companyId,
+      routineId,
+      triggerId: null,
+      source: "manual",
+      status: "received",
+      linkedIssueId: issueId,
+    });
+    await db.insert(approvals).values({
+      id: approvalId,
+      companyId,
+      type: "work_plan",
+      requestedByUserId: "board-user",
+      status: "approved",
+      payload: { summary: "plan" },
+    });
+    await db.insert(issueApprovals).values({
+      companyId,
+      issueId,
+      approvalId,
+      linkedByUserId: "board-user",
+    });
+    await db.insert(approvalComments).values({
+      companyId,
+      approvalId,
+      authorUserId: "board-user",
+      body: "approved",
+    });
+
+    const removed = await svc.remove(issueId);
+
+    expect(removed?.id).toBe(issueId);
+    await expect(db.select({ id: issues.id }).from(issues).where(eq(issues.companyId, companyId))).resolves.toEqual([]);
+    await expect(db.select({ id: issueComments.id }).from(issueComments).where(eq(issueComments.companyId, companyId))).resolves.toEqual([]);
+    await expect(db.select({ id: issueInboxArchives.id }).from(issueInboxArchives).where(eq(issueInboxArchives.companyId, companyId))).resolves.toEqual([]);
+    await expect(db.select({ id: issueReadStates.id }).from(issueReadStates).where(eq(issueReadStates.companyId, companyId))).resolves.toEqual([]);
+    await expect(db.select({ id: feedbackVotes.id }).from(feedbackVotes).where(eq(feedbackVotes.companyId, companyId))).resolves.toEqual([]);
+    await expect(db.select({ id: costEvents.id }).from(costEvents).where(eq(costEvents.companyId, companyId))).resolves.toEqual([]);
+    await expect(db.select({ id: financeEvents.id }).from(financeEvents).where(eq(financeEvents.companyId, companyId))).resolves.toEqual([]);
+    await expect(db.select({ id: approvals.id }).from(approvals).where(eq(approvals.companyId, companyId))).resolves.toEqual([]);
+    await expect(db.select({ id: approvalComments.id }).from(approvalComments).where(eq(approvalComments.companyId, companyId))).resolves.toEqual([]);
+
+    const runtimeRows = await db
+      .select({ issueId: workspaceRuntimeServices.issueId })
+      .from(workspaceRuntimeServices)
+      .where(eq(workspaceRuntimeServices.companyId, companyId));
+    expect(runtimeRows).toEqual([{ issueId: null }]);
+
+    const routineRows = await db
+      .select({ linkedIssueId: routineRuns.linkedIssueId })
+      .from(routineRuns)
+      .where(eq(routineRuns.companyId, companyId));
+    expect(routineRows).toEqual([{ linkedIssueId: null }]);
   });
 });
 
