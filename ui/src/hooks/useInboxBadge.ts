@@ -82,8 +82,8 @@ export function useInboxBadge(companyId: string | null | undefined) {
   const { readItems } = useReadInboxItems();
 
   const { data: approvals = [] } = useQuery({
-    queryKey: queryKeys.approvals.list(companyId!),
-    queryFn: () => approvalsApi.list(companyId!),
+    queryKey: queryKeys.approvals.list(companyId!, { scope: "mine" }),
+    queryFn: () => approvalsApi.list(companyId!, { scope: "mine" }),
     enabled: !!companyId,
   });
 

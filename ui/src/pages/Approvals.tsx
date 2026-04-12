@@ -30,8 +30,8 @@ export function Approvals() {
   }, [setBreadcrumbs]);
 
   const { data, isLoading, error } = useQuery({
-    queryKey: queryKeys.approvals.list(selectedCompanyId!),
-    queryFn: () => approvalsApi.list(selectedCompanyId!),
+    queryKey: queryKeys.approvals.list(selectedCompanyId!, { scope: "mine" }),
+    queryFn: () => approvalsApi.list(selectedCompanyId!, { scope: "mine" }),
     enabled: !!selectedCompanyId,
   });
 
@@ -45,7 +45,7 @@ export function Approvals() {
     mutationFn: (id: string) => approvalsApi.approve(id),
     onSuccess: (_approval, id) => {
       setActionError(null);
-      queryClient.invalidateQueries({ queryKey: queryKeys.approvals.list(selectedCompanyId!) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.approvals.all(selectedCompanyId!) });
       navigate(`/approvals/${id}?resolved=approved`);
     },
     onError: (err) => {
@@ -57,7 +57,7 @@ export function Approvals() {
     mutationFn: (id: string) => approvalsApi.reject(id),
     onSuccess: () => {
       setActionError(null);
-      queryClient.invalidateQueries({ queryKey: queryKeys.approvals.list(selectedCompanyId!) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.approvals.all(selectedCompanyId!) });
     },
     onError: (err) => {
       setActionError(err instanceof Error ? err.message : "Failed to reject");

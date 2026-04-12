@@ -24,6 +24,12 @@ type ApprovalRecord = {
   status: string;
   payload: Record<string, unknown>;
   requestedByAgentId: string | null;
+  requestedByUserId?: string | null;
+  targetAgentId?: string | null;
+  targetUserId?: string | null;
+  routingMode?: string | null;
+  decidedByUserId?: string | null;
+  decidedByAgentId?: string | null;
 };
 
 function createApproval(status: string): ApprovalRecord {
@@ -34,6 +40,12 @@ function createApproval(status: string): ApprovalRecord {
     status,
     payload: { agentId: "agent-1" },
     requestedByAgentId: "requester-1",
+    requestedByUserId: null,
+    targetAgentId: null,
+    targetUserId: null,
+    routingMode: "board_pool",
+    decidedByUserId: null,
+    decidedByAgentId: null,
   };
 }
 
@@ -98,10 +110,37 @@ describe("approvalService resolution idempotency", () => {
     const dbStub = createDbStub([[createApproval("pending")]], [approved]);
 
     const svc = approvalService(dbStub.db as any);
-    const result = await svc.approve("approval-1", "board", "ship it");
+    const result = await svc.approve("approval-1", {
+      decidedByUserId: "board",
+      decidedByAgentId: null,
+      decisionNote: "ship it",
+    });
 
     expect(result.applied).toBe(true);
     expect(mockAgentService.activatePendingApproval).toHaveBeenCalledWith("agent-1");
     expect(mockNotifyHireApproved).toHaveBeenCalledTimes(1);
+  });
+
+  it("records agent decisions without pretending they were made by board", async () => {
+    const approved = {
+      ...createApproval("approved"),
+      type: "work_plan",
+      payload: {},
+      requestedByAgentId: "requester-1",
+      decidedByUserId: null,
+      decidedByAgentId: "lead-agent",
+    };
+    const dbStub = createDbStub([[{ ...createApproval("pending"), type: "work_plan", payload: {} }]], [approved]);
+
+    const svc = approvalService(dbStub.db as any);
+    const result = await svc.approve("approval-1", {
+      decidedByUserId: null,
+      decidedByAgentId: "lead-agent",
+      decisionNote: "looks good",
+    });
+
+    expect(result.applied).toBe(true);
+    expect(dbStub.returning).toHaveBeenCalled();
+    expect(mockAgentService.activatePendingApproval).not.toHaveBeenCalled();
   });
 });

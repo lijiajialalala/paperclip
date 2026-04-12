@@ -200,6 +200,21 @@ export const PROJECT_COLORS = [
 export const APPROVAL_TYPES = ["hire_agent", "approve_ceo_strategy", "budget_override_required", "work_plan"] as const;
 export type ApprovalType = (typeof APPROVAL_TYPES)[number];
 
+export const APPROVAL_ROUTING_MODES = [
+  "board_pool",
+  "parent_assignee_agent",
+  "parent_assignee_user",
+  "escalated_to_board",
+  "timeout_escalated_to_board",
+] as const;
+export type ApprovalRoutingMode = (typeof APPROVAL_ROUTING_MODES)[number];
+
+export const APPROVAL_ESCALATION_REASONS = [
+  "manual",
+  "timeout",
+] as const;
+export type ApprovalEscalationReason = (typeof APPROVAL_ESCALATION_REASONS)[number];
+
 export const APPROVAL_STATUSES = [
   "pending",
   "revision_requested",

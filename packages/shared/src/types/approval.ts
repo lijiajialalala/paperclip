@@ -1,4 +1,9 @@
-import type { ApprovalStatus, ApprovalType } from "../constants.js";
+import type {
+  ApprovalEscalationReason,
+  ApprovalRoutingMode,
+  ApprovalStatus,
+  ApprovalType,
+} from "../constants.js";
 
 export interface Approval {
   id: string;
@@ -6,11 +11,17 @@ export interface Approval {
   type: ApprovalType;
   requestedByAgentId: string | null;
   requestedByUserId: string | null;
+  targetAgentId: string | null;
+  targetUserId: string | null;
+  routingMode: ApprovalRoutingMode;
   status: ApprovalStatus;
   payload: Record<string, unknown>;
   decisionNote: string | null;
   decidedByUserId: string | null;
+  decidedByAgentId: string | null;
   decidedAt: Date | null;
+  escalatedAt: Date | null;
+  escalationReason: ApprovalEscalationReason | null;
   createdAt: Date;
   updatedAt: Date;
 }

@@ -33,7 +33,10 @@ import { validate } from "../middleware/validate.js";
 import {
   accessService,
   agentService,
+  approvalDecisionActor,
   approvalService,
+  canActorResolveApproval,
+  defaultWorkPlanApprovalRouting,
   executionWorkspaceService,
   feedbackService,
   goalService,
@@ -45,6 +48,7 @@ import {
   logActivity,
   projectService,
   routineService,
+  type ApprovalActor,
   workProductService,
 } from "../services/index.js";
 import { logger } from "../middleware/logger.js";
@@ -517,28 +521,43 @@ export function issueRoutes(
 
   async function assertCanReviewPlan(req: Request, res: Response, issue: any, actionName: "approve" | "reject") {
     const actor = getActorInfo(req);
-    let canReview = false;
-    try {
-      await assertCanAssignTasks(req, issue.companyId);
-      canReview = true;
-    } catch (e) {}
-
-    if (!canReview && actor.actorType === "agent" && issue.parentId) {
-      const svc = issueService(db);
-      const parent = await svc.getById(issue.parentId);
-      if (parent && parent.assigneeAgentId === actor.agentId) {
-        canReview = true;
-      }
-    }
-
     if (actor.actorType === "agent" && actor.agentId === issue.assigneeAgentId) {
-      canReview = false;
-    }
-
-    if (!canReview) {
-      res.status(403).json({ error: `Only Board, Parent issue assignee, or manager agent can ${actionName} this plan (self-approval forbidden)` });
+      res.status(403).json({ error: `Only the target approver can ${actionName} this plan (self-approval forbidden)` });
       return false;
     }
+
+    const linkedApprovals = await issueApprovalsSvc.listApprovalsForIssue(issue.id);
+    const pendingPlanApproval = linkedApprovals.find(
+      (approval: any) =>
+        approval.type === "work_plan"
+        && (approval.status === "pending" || approval.status === "revision_requested"),
+    );
+
+    const parent = issue.parentId ? await svc.getById(issue.parentId) : null;
+    const approvalRecord = pendingPlanApproval
+      ?? {
+        ...defaultWorkPlanApprovalRouting(issue, parent),
+        type: "work_plan",
+      };
+
+    let reviewActor: ApprovalActor | null = null;
+    if (req.actor.type === "agent" && req.actor.agentId) {
+      reviewActor = {
+        actorType: "agent",
+        agentId: req.actor.agentId,
+      };
+    } else if (req.actor.type === "board") {
+      reviewActor = {
+        actorType: "board",
+        userId: req.actor.userId ?? "board",
+      };
+    }
+
+    if (!reviewActor || !canActorResolveApproval(approvalRecord, reviewActor)) {
+      res.status(403).json({ error: `Only the target approver can ${actionName} this plan` });
+      return false;
+    }
+
     return true;
   }
 
@@ -2357,7 +2376,8 @@ export function issueRoutes(
     // 3. Create a formal Approval record so the plan appears in the Inbox
     // 3. Create or Resubmit a formal Approval record so the plan appears in the Inbox
     const approvalsSvc = approvalService(db);
-    const issueApprovalsSvc = issueApprovalService(db);
+    const parentIssue = issue.parentId ? await svc.getById(issue.parentId) : null;
+    const routing = defaultWorkPlanApprovalRouting(issue, parentIssue);
 
     const payload = {
       issueId: issue.id,
@@ -2377,20 +2397,32 @@ export function issueRoutes(
     if (existingPlanApproval) {
       if (existingPlanApproval.status === "revision_requested") {
         await approvalsSvc.resubmit(existingPlanApproval.id, payload);
-      } else if (existingPlanApproval.status === "pending") {
-        // Technically not needed, but ensures payload aligns if overwriting quickly
-        await db.update(approvals).set({ payload, updatedAt: now }).where(eq(approvals.id, existingPlanApproval.id));
       }
+      await db.update(approvals).set({
+        payload,
+        targetAgentId: routing.targetAgentId,
+        targetUserId: routing.targetUserId,
+        routingMode: routing.routingMode,
+        escalatedAt: routing.escalatedAt,
+        escalationReason: routing.escalationReason,
+        updatedAt: now,
+      }).where(eq(approvals.id, existingPlanApproval.id));
       planApproval = await approvalsSvc.getById(existingPlanApproval.id);
     } else {
       planApproval = await approvalsSvc.create(issue.companyId, {
         type: "work_plan",
         requestedByAgentId: actor.agentId ?? null,
         requestedByUserId: actor.actorType === "user" ? actor.actorId : null,
+        targetAgentId: routing.targetAgentId,
+        targetUserId: routing.targetUserId,
+        routingMode: routing.routingMode,
+        escalatedAt: routing.escalatedAt,
+        escalationReason: routing.escalationReason,
         status: "pending",
         payload,
         decisionNote: null,
         decidedByUserId: null,
+        decidedByAgentId: null,
         decidedAt: null,
         updatedAt: now,
       });
@@ -2495,10 +2527,16 @@ export function issueRoutes(
     );
     if (pendingPlanApproval) {
       const approvalsSvc = approvalService(db);
+      const approvalActor: ApprovalActor =
+        req.actor.type === "agent" && req.actor.agentId
+          ? { actorType: "agent", agentId: req.actor.agentId }
+          : { actorType: "board", userId: req.actor.userId ?? "board" };
       await approvalsSvc.approve(
         pendingPlanApproval.id,
-        req.actor.userId ?? "board",
-        "Plan approved via issue review",
+        {
+          ...approvalDecisionActor(approvalActor),
+          decisionNote: "Plan approved via issue review",
+        },
       ).catch((err) => logger.warn({ err, approvalId: pendingPlanApproval.id }, "failed to sync approval on plan approve"));
     }
 
@@ -2549,10 +2587,16 @@ export function issueRoutes(
     );
     if (pendingPlanApproval) {
       const approvalsSvc = approvalService(db);
+      const approvalActor: ApprovalActor =
+        req.actor.type === "agent" && req.actor.agentId
+          ? { actorType: "agent", agentId: req.actor.agentId }
+          : { actorType: "board", userId: req.actor.userId ?? "board" };
       await approvalsSvc.reject(
         pendingPlanApproval.id,
-        req.actor.userId ?? "board",
-        feedback,
+        {
+          ...approvalDecisionActor(approvalActor),
+          decisionNote: feedback,
+        },
       ).catch((err) => logger.warn({ err, approvalId: pendingPlanApproval.id }, "failed to sync approval on plan reject"));
     }
 

@@ -11,6 +11,14 @@ export { issueApprovalService } from "./issue-approvals.js";
 export { goalService } from "./goals.js";
 export { activityService, type ActivityFilters } from "./activity.js";
 export { approvalService } from "./approvals.js";
+export {
+  approvalDecisionActor,
+  approvalMineCondition,
+  canActorResolveApproval,
+  defaultWorkPlanApprovalRouting,
+  type ApprovalActor,
+  type ApprovalRoutingFields,
+} from "./approval-routing.js";
 export { budgetService } from "./budgets.js";
 export { secretService } from "./secrets.js";
 export { routineService } from "./routines.js";

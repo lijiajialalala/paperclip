@@ -7,6 +7,22 @@ import { agentService } from "./agents.js";
 import { budgetService } from "./budgets.js";
 import { notifyHireApproved } from "./hire-hook.js";
 import { instanceSettingsService } from "./instance-settings.js";
+import {
+  approvalMineCondition,
+  type ApprovalActor,
+} from "./approval-routing.js";
+
+interface ApprovalListOptions {
+  status?: string;
+  scope?: "mine" | "all";
+  actor?: ApprovalActor;
+}
+
+interface ApprovalResolutionInput {
+  decidedByUserId: string | null;
+  decidedByAgentId: string | null;
+  decisionNote?: string | null;
+}
 
 export function approvalService(db: Db) {
   const agentsSvc = agentService(db);
@@ -37,8 +53,7 @@ export function approvalService(db: Db) {
   async function resolveApproval(
     id: string,
     targetStatus: "approved" | "rejected",
-    decidedByUserId: string,
-    decisionNote: string | null | undefined,
+    input: ApprovalResolutionInput,
   ): Promise<ResolutionResult> {
     const existing = await getExistingApproval(id);
     if (!canResolveStatuses.has(existing.status)) {
@@ -55,8 +70,9 @@ export function approvalService(db: Db) {
       .update(approvals)
       .set({
         status: targetStatus,
-        decidedByUserId,
-        decisionNote: decisionNote ?? null,
+        decidedByUserId: input.decidedByUserId,
+        decidedByAgentId: input.decidedByAgentId,
+        decisionNote: input.decisionNote ?? null,
         decidedAt: now,
         updatedAt: now,
       })
@@ -79,9 +95,12 @@ export function approvalService(db: Db) {
   }
 
   return {
-    list: (companyId: string, status?: string) => {
+    list: (companyId: string, options?: ApprovalListOptions) => {
       const conditions = [eq(approvals.companyId, companyId)];
-      if (status) conditions.push(eq(approvals.status, status));
+      if (options?.status) conditions.push(eq(approvals.status, options.status));
+      if ((options?.scope ?? "mine") === "mine" && options?.actor) {
+        conditions.push(approvalMineCondition(options.actor));
+      }
       return db.select().from(approvals).where(and(...conditions));
     },
 
@@ -95,16 +114,24 @@ export function approvalService(db: Db) {
     create: (companyId: string, data: Omit<typeof approvals.$inferInsert, "companyId">) =>
       db
         .insert(approvals)
-        .values({ ...data, companyId })
+        .values({
+          routingMode: data.routingMode ?? "board_pool",
+          targetAgentId: data.targetAgentId ?? null,
+          targetUserId: data.targetUserId ?? null,
+          escalatedAt: data.escalatedAt ?? null,
+          escalationReason: data.escalationReason ?? null,
+          decidedByAgentId: data.decidedByAgentId ?? null,
+          ...data,
+          companyId,
+        })
         .returning()
         .then((rows) => rows[0]),
 
-    approve: async (id: string, decidedByUserId: string, decisionNote?: string | null) => {
+    approve: async (id: string, input: ApprovalResolutionInput) => {
       const { approval: updated, applied } = await resolveApproval(
         id,
         "approved",
-        decidedByUserId,
-        decisionNote,
+        input,
       );
 
       let hireApprovedAgentId: string | null = null;
@@ -152,7 +179,7 @@ export function approvalService(db: Db) {
                 amount: budgetMonthlyCents,
                 windowKind: "calendar_month_utc",
               },
-              decidedByUserId,
+              input.decidedByUserId ?? input.decidedByAgentId ?? "board",
             );
           }
           void notifyHireApproved(db, {
@@ -168,12 +195,11 @@ export function approvalService(db: Db) {
       return { approval: updated, applied };
     },
 
-    reject: async (id: string, decidedByUserId: string, decisionNote?: string | null) => {
+    reject: async (id: string, input: ApprovalResolutionInput) => {
       const { approval: updated, applied } = await resolveApproval(
         id,
         "rejected",
-        decidedByUserId,
-        decisionNote,
+        input,
       );
 
       if (applied && updated.type === "hire_agent") {
@@ -187,7 +213,7 @@ export function approvalService(db: Db) {
       return { approval: updated, applied };
     },
 
-    requestRevision: async (id: string, decidedByUserId: string, decisionNote?: string | null) => {
+    requestRevision: async (id: string, input: ApprovalResolutionInput) => {
       const existing = await getExistingApproval(id);
       if (existing.status !== "pending") {
         throw unprocessable("Only pending approvals can request revision");
@@ -198,8 +224,9 @@ export function approvalService(db: Db) {
         .update(approvals)
         .set({
           status: "revision_requested",
-          decidedByUserId,
-          decisionNote: decisionNote ?? null,
+          decidedByUserId: input.decidedByUserId,
+          decidedByAgentId: input.decidedByAgentId,
+          decisionNote: input.decisionNote ?? null,
           decidedAt: now,
           updatedAt: now,
         })
@@ -222,6 +249,7 @@ export function approvalService(db: Db) {
           payload: payload ?? existing.payload,
           decisionNote: null,
           decidedByUserId: null,
+          decidedByAgentId: null,
           decidedAt: null,
           updatedAt: now,
         })

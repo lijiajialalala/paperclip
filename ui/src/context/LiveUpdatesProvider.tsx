@@ -534,7 +534,7 @@ function invalidateActivityQueries(
   }
 
   if (entityType === "approval") {
-    queryClient.invalidateQueries({ queryKey: queryKeys.approvals.list(companyId) });
+    queryClient.invalidateQueries({ queryKey: queryKeys.approvals.all(companyId) });
     return;
   }
 

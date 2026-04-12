@@ -39,6 +39,70 @@ const mockProjectSvc = vi.hoisted(() => ({
   getById: vi.fn(),
 }));
 
+const mockApprovalSvc = vi.hoisted(() => ({
+  create: vi.fn(),
+  approve: vi.fn(),
+  reject: vi.fn(),
+}));
+
+const mockIssueApprovalSvc = vi.hoisted(() => ({
+  listApprovalsForIssue: vi.fn(),
+  linkManyForApproval: vi.fn(),
+}));
+
+const mockApprovalRouting = vi.hoisted(() => ({
+  defaultWorkPlanApprovalRouting: vi.fn((issue: any, parent: any) => {
+    if (issue?.parentId && parent) {
+      if (parent.assigneeAgentId && parent.assigneeAgentId !== issue.assigneeAgentId) {
+        return {
+          targetAgentId: parent.assigneeAgentId,
+          targetUserId: null,
+          routingMode: "parent_assignee_agent",
+          escalatedAt: null,
+          escalationReason: null,
+        };
+      }
+
+      if (parent.assigneeUserId && parent.assigneeUserId !== issue.assigneeUserId) {
+        return {
+          targetAgentId: null,
+          targetUserId: parent.assigneeUserId,
+          routingMode: "parent_assignee_user",
+          escalatedAt: null,
+          escalationReason: null,
+        };
+      }
+    }
+
+    return {
+      targetAgentId: null,
+      targetUserId: null,
+      routingMode: "board_pool",
+      escalatedAt: null,
+      escalationReason: null,
+    };
+  }),
+  canActorResolveApproval: vi.fn((approval: any, actor: any) => {
+    if (actor.actorType === "agent") {
+      return approval.targetAgentId === actor.agentId;
+    }
+    if (approval.targetUserId && approval.targetUserId === actor.userId) {
+      return true;
+    }
+    return [
+      null,
+      undefined,
+      "board_pool",
+      "escalated_to_board",
+      "timeout_escalated_to_board",
+    ].includes(approval.routingMode);
+  }),
+  approvalDecisionActor: vi.fn((actor: any) =>
+    actor.actorType === "agent"
+      ? { decidedByUserId: null, decidedByAgentId: actor.agentId }
+      : { decidedByUserId: actor.userId ?? "board", decidedByAgentId: null }),
+}));
+
 // ── Flat mock of services barrel — no importOriginal, no drizzle loaded ─────
 vi.mock("../services/index.js", () => ({
   issueService: () => mockIssueSvc,
@@ -48,21 +112,17 @@ vi.mock("../services/index.js", () => ({
   logActivity: mockLogActivity,
   instanceSettingsService: () => mockInstanceSettings,
   projectService: () => mockProjectSvc,
-  approvalService: () => ({
-    create: vi.fn().mockResolvedValue({ id: randomUUID(), companyId: COMPANY_ID, type: "work_plan", status: "pending", payload: {} }),
-    approve: vi.fn().mockResolvedValue({ approval: { id: randomUUID(), status: "approved" }, applied: true }),
-    reject: vi.fn().mockResolvedValue({ approval: { id: randomUUID(), status: "rejected" }, applied: true }),
-  }),
+  approvalService: () => mockApprovalSvc,
   executionWorkspaceService: () => ({}),
   feedbackService: () => ({}),
   goalService: () => ({}),
-  issueApprovalService: () => ({
-    listApprovalsForIssue: vi.fn().mockResolvedValue([]),
-    linkManyForApproval: vi.fn().mockResolvedValue(undefined),
-  }),
+  issueApprovalService: () => mockIssueApprovalSvc,
   documentService: () => ({}),
   routineService: () => ({}),
   workProductService: () => ({}),
+  defaultWorkPlanApprovalRouting: mockApprovalRouting.defaultWorkPlanApprovalRouting,
+  canActorResolveApproval: mockApprovalRouting.canActorResolveApproval,
+  approvalDecisionActor: mockApprovalRouting.approvalDecisionActor,
 }));
 
 // ── Stable UUIDs for the test run ───────────────────────────────────────────
@@ -147,6 +207,26 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
     mockIssueSvc.addComment.mockResolvedValue({ id: randomUUID() });
     mockAccessSvc.hasPermission.mockResolvedValue(false);
     mockAccessSvc.canUser.mockResolvedValue(false);
+    mockApprovalSvc.create.mockResolvedValue({
+      id: randomUUID(),
+      companyId: COMPANY_ID,
+      type: "work_plan",
+      status: "pending",
+      payload: {},
+      targetAgentId: null,
+      targetUserId: null,
+      routingMode: "board_pool",
+    });
+    mockApprovalSvc.approve.mockResolvedValue({
+      approval: { id: randomUUID(), status: "approved" },
+      applied: true,
+    });
+    mockApprovalSvc.reject.mockResolvedValue({
+      approval: { id: randomUUID(), status: "rejected" },
+      applied: true,
+    });
+    mockIssueApprovalSvc.listApprovalsForIssue.mockResolvedValue([]);
+    mockIssueApprovalSvc.linkManyForApproval.mockResolvedValue(undefined);
   });
 
   // 1. No planProposedAt → checkout is not blocked
@@ -174,6 +254,42 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
       .send({ plan: "I will steal this task." });
 
     expect(res.status).toBe(403);
+  });
+
+  it("routes a child work plan to the parent assignee agent instead of the Board pool", async () => {
+    const issue = makeIssue({
+      assigneeAgentId: AGENT_ASSIGNEE,
+      parentId: PARENT_ID,
+      status: "todo",
+    });
+    const parent = makeIssue({
+      id: PARENT_ID,
+      assigneeAgentId: AGENT_PARENT,
+      assigneeUserId: null,
+    });
+    mockIssueSvc.getById
+      .mockResolvedValueOnce(issue)
+      .mockResolvedValueOnce(parent);
+    mockIssueSvc.update.mockResolvedValue({
+      ...issue,
+      status: "in_review",
+      planProposedAt: new Date(),
+    });
+
+    const res = await request(makeApp(agentActor(AGENT_ASSIGNEE)))
+      .post(`/api/issues/${ISSUE_ID}/propose-plan`)
+      .send({ plan: "Plan body" });
+
+    expect(res.status).toBe(201);
+    expect(mockApprovalSvc.create).toHaveBeenCalledWith(
+      COMPANY_ID,
+      expect.objectContaining({
+        type: "work_plan",
+        targetAgentId: AGENT_PARENT,
+        targetUserId: null,
+        routingMode: "parent_assignee_agent",
+      }),
+    );
   });
 
   // 3. planProposedAt set + in_review → checkout blocked
@@ -215,31 +331,42 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
     expect(res.body.error).toMatch(/self-approval forbidden/);
   });
 
-  // 5. Manager agent with canCreateAgents (legacy tasks:assign) can approve
-  it("allows a manager agent (canCreateAgents) to approve a plan", async () => {
+  // 5. Legacy manager rights no longer bypass an explicitly routed lead approval
+  it("forbids a manager agent from approving a child plan when the approval is routed to the parent assignee", async () => {
     const issue = makeIssue({
       assigneeAgentId: AGENT_ASSIGNEE,
+      parentId: PARENT_ID,
       status: "in_review",
       planProposedAt: new Date(),
     });
-    const updated = makeIssue({ ...issue, status: "todo", planApprovedAt: new Date() });
+    const parent = makeIssue({ id: PARENT_ID, assigneeAgentId: AGENT_PARENT });
 
-    mockIssueSvc.getById.mockResolvedValue(issue);
-    mockIssueSvc.update.mockResolvedValue(updated);
+    mockIssueSvc.getById
+      .mockResolvedValueOnce(issue)
+      .mockResolvedValueOnce(parent);
     mockAgentSvc.getById.mockResolvedValue({
       id: AGENT_MANAGER,
       companyId: COMPANY_ID,
       name: "ManagerAgent",
       permissions: { canCreateAgents: true },
     });
+    mockIssueApprovalSvc.listApprovalsForIssue.mockResolvedValue([
+      {
+        id: randomUUID(),
+        type: "work_plan",
+        status: "pending",
+        targetAgentId: AGENT_PARENT,
+        targetUserId: null,
+        routingMode: "parent_assignee_agent",
+      },
+    ]);
 
     const res = await request(makeApp(agentActor(AGENT_MANAGER)))
       .post(`/api/issues/${ISSUE_ID}/approve-plan`)
       .send();
 
-    expect(res.status).toBe(200);
-    expect(res.body.issue.status).toBe("todo");
-    expect(res.body.issue.planApprovedAt).toBeDefined();
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatch(/target approver/i);
   });
 
   it("includes the approval comment when waking the assignee after plan approval", async () => {
@@ -301,6 +428,16 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
       name: "ParentAgent",
       permissions: {},
     });
+    mockIssueApprovalSvc.listApprovalsForIssue.mockResolvedValue([
+      {
+        id: randomUUID(),
+        type: "work_plan",
+        status: "pending",
+        targetAgentId: AGENT_PARENT,
+        targetUserId: null,
+        routingMode: "parent_assignee_agent",
+      },
+    ]);
 
     const res = await request(makeApp(agentActor(AGENT_PARENT)))
       .post(`/api/issues/${ISSUE_ID}/approve-plan`)
@@ -310,8 +447,39 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
     expect(res.body.issue.status).toBe("todo");
   });
 
-  // 7. Board user (local_implicit) can always approve without any DB checks
-  it("allows Board (implicit company access) to approve a plan", async () => {
+  // 7. Board can no longer short-circuit a child plan that is routed to its lead
+  it("forbids Board from approving a child plan that is explicitly routed to the parent assignee", async () => {
+    const issue = makeIssue({
+      assigneeAgentId: AGENT_ASSIGNEE,
+      parentId: PARENT_ID,
+      status: "in_review",
+      planProposedAt: new Date(),
+    });
+    const parent = makeIssue({ id: PARENT_ID, assigneeAgentId: AGENT_PARENT });
+
+    mockIssueSvc.getById
+      .mockResolvedValueOnce(issue)
+      .mockResolvedValueOnce(parent);
+    mockIssueApprovalSvc.listApprovalsForIssue.mockResolvedValue([
+      {
+        id: randomUUID(),
+        type: "work_plan",
+        status: "pending",
+        targetAgentId: AGENT_PARENT,
+        targetUserId: null,
+        routingMode: "parent_assignee_agent",
+      },
+    ]);
+
+    const res = await request(makeApp(boardActor()))
+      .post(`/api/issues/${ISSUE_ID}/approve-plan`)
+      .send();
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatch(/target approver/i);
+  });
+
+  it("still allows Board to approve a root issue plan routed to the board pool", async () => {
     const issue = makeIssue({
       assigneeAgentId: AGENT_ASSIGNEE,
       status: "in_review",
@@ -321,6 +489,16 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
 
     mockIssueSvc.getById.mockResolvedValue(issue);
     mockIssueSvc.update.mockResolvedValue(updated);
+    mockIssueApprovalSvc.listApprovalsForIssue.mockResolvedValue([
+      {
+        id: randomUUID(),
+        type: "work_plan",
+        status: "pending",
+        targetAgentId: null,
+        targetUserId: null,
+        routingMode: "board_pool",
+      },
+    ]);
 
     const res = await request(makeApp(boardActor()))
       .post(`/api/issues/${ISSUE_ID}/approve-plan`)

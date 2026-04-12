@@ -123,7 +123,7 @@ export function NewAgent() {
       agentsApi.hire(selectedCompanyId!, data),
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(selectedCompanyId!) });
-      queryClient.invalidateQueries({ queryKey: queryKeys.approvals.list(selectedCompanyId!) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.approvals.all(selectedCompanyId!) });
       navigate(agentUrl(result.agent));
     },
     onError: (error) => {

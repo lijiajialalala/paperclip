@@ -1,11 +1,25 @@
 import type { Approval, ApprovalComment, Issue } from "@paperclipai/shared";
 import { api } from "./client";
 
+type ApprovalListOptions = {
+  status?: string;
+  scope?: "mine" | "all";
+};
+
 export const approvalsApi = {
-  list: (companyId: string, status?: string) =>
-    api.get<Approval[]>(
-      `/companies/${companyId}/approvals${status ? `?status=${encodeURIComponent(status)}` : ""}`,
-    ),
+  list: (companyId: string, options?: ApprovalListOptions) => {
+    const params = new URLSearchParams();
+    if (options?.status) {
+      params.set("status", options.status);
+    }
+    if (options?.scope) {
+      params.set("scope", options.scope);
+    }
+    const query = params.toString();
+    return api.get<Approval[]>(
+      `/companies/${companyId}/approvals${query ? `?${query}` : ""}`,
+    );
+  },
   create: (companyId: string, data: Record<string, unknown>) =>
     api.post<Approval>(`/companies/${companyId}/approvals`, data),
   get: (id: string) => api.get<Approval>(`/approvals/${id}`),

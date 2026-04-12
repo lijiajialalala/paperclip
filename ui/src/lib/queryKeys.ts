@@ -79,8 +79,15 @@ export const queryKeys = {
     overview: (companyId: string) => ["budgets", "overview", companyId] as const,
   },
   approvals: {
-    list: (companyId: string, status?: string) =>
-      ["approvals", companyId, status] as const,
+    all: (companyId: string) => ["approvals", companyId] as const,
+    list: (
+      companyId: string,
+      options?: {
+        status?: string;
+        scope?: "mine" | "all";
+      },
+    ) =>
+      ["approvals", companyId, options?.scope ?? "mine", options?.status ?? "__all__"] as const,
     detail: (approvalId: string) => ["approvals", "detail", approvalId] as const,
     comments: (approvalId: string) => ["approvals", "comments", approvalId] as const,
     issues: (approvalId: string) => ["approvals", "issues", approvalId] as const,

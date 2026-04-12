@@ -76,10 +76,7 @@ export function ApprovalDetail() {
     queryClient.invalidateQueries({ queryKey: queryKeys.approvals.comments(approvalId) });
     queryClient.invalidateQueries({ queryKey: queryKeys.approvals.issues(approvalId) });
     if (approval?.companyId) {
-      queryClient.invalidateQueries({ queryKey: queryKeys.approvals.list(approval.companyId) });
-      queryClient.invalidateQueries({
-        queryKey: queryKeys.approvals.list(approval.companyId, "pending"),
-      });
+      queryClient.invalidateQueries({ queryKey: queryKeys.approvals.all(approval.companyId) });
       queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(approval.companyId) });
     }
   };

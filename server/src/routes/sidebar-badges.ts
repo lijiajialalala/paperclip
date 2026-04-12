@@ -34,7 +34,20 @@ export function sidebarBadgeRoutes(db: Db) {
         .then((rows) => Number(rows[0]?.count ?? 0))
       : 0;
 
-    const badges = await svc.get(companyId, {
+    const approvalActor =
+      req.actor.type === "agent" && req.actor.agentId
+        ? {
+            actorType: "agent" as const,
+            agentId: req.actor.agentId,
+          }
+        : req.actor.type === "board"
+          ? {
+              actorType: "board" as const,
+              userId: req.actor.userId ?? "board",
+            }
+          : null;
+
+    const badges = await svc.get(companyId, approvalActor, {
       joinRequests: joinRequestCount,
     });
     const summary = await dashboard.summary(companyId);

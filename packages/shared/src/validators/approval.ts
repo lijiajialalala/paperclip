@@ -1,9 +1,17 @@
 import { z } from "zod";
-import { APPROVAL_TYPES } from "../constants.js";
+import {
+  APPROVAL_ESCALATION_REASONS,
+  APPROVAL_ROUTING_MODES,
+  APPROVAL_TYPES,
+} from "../constants.js";
 
 export const createApprovalSchema = z.object({
   type: z.enum(APPROVAL_TYPES),
   requestedByAgentId: z.string().uuid().optional().nullable(),
+  targetAgentId: z.string().uuid().optional().nullable(),
+  targetUserId: z.string().optional().nullable(),
+  routingMode: z.enum(APPROVAL_ROUTING_MODES).optional(),
+  escalationReason: z.enum(APPROVAL_ESCALATION_REASONS).optional().nullable(),
   payload: z.record(z.unknown()),
   issueIds: z.array(z.string().uuid()).optional(),
 });
@@ -12,14 +20,14 @@ export type CreateApproval = z.infer<typeof createApprovalSchema>;
 
 export const resolveApprovalSchema = z.object({
   decisionNote: z.string().optional().nullable(),
-  decidedByUserId: z.string().optional().default("board"),
+  decidedByUserId: z.string().optional().nullable(),
 });
 
 export type ResolveApproval = z.infer<typeof resolveApprovalSchema>;
 
 export const requestApprovalRevisionSchema = z.object({
   decisionNote: z.string().optional().nullable(),
-  decidedByUserId: z.string().optional().default("board"),
+  decidedByUserId: z.string().optional().nullable(),
 });
 
 export type RequestApprovalRevision = z.infer<typeof requestApprovalRevisionSchema>;
