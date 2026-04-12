@@ -220,10 +220,15 @@ export function approvalService(db: Db) {
       }
 
       const now = new Date();
+      // Reroute the approval back to the original requester so it appears
+      // in their "mine" list. The reviewer should no longer see it as
+      // actionable.
       return db
         .update(approvals)
         .set({
           status: "revision_requested",
+          targetAgentId: existing.requestedByAgentId ?? null,
+          targetUserId: existing.requestedByAgentId ? null : (existing.requestedByUserId ?? null),
           decidedByUserId: input.decidedByUserId,
           decidedByAgentId: input.decidedByAgentId,
           decisionNote: input.decisionNote ?? null,
@@ -241,11 +246,25 @@ export function approvalService(db: Db) {
         throw unprocessable("Only revision requested approvals can be resubmitted");
       }
 
+      // Restore the original routing stored before the revision was
+      // requested.  The decidedBy fields recorded who requested the
+      // revision — use them to point the approval back at the original
+      // reviewer.  If both are null fall back to board_pool.
+      const restoredTargetAgentId = existing.decidedByAgentId ?? null;
+      const restoredTargetUserId = existing.decidedByAgentId ? null : (existing.decidedByUserId ?? null);
+      const restoredRoutingMode =
+        restoredTargetAgentId ? "parent_assignee_agent" as const
+          : restoredTargetUserId ? "parent_assignee_user" as const
+          : "board_pool" as const;
+
       const now = new Date();
       return db
         .update(approvals)
         .set({
           status: "pending",
+          targetAgentId: restoredTargetAgentId,
+          targetUserId: restoredTargetUserId,
+          routingMode: restoredRoutingMode,
           payload: payload ?? existing.payload,
           decisionNote: null,
           decidedByUserId: null,
