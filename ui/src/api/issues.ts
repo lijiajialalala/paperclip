@@ -66,6 +66,7 @@ export const issuesApi = {
       touchedByUserId?: string;
       inboxArchivedByUserId?: string;
       unreadForUserId?: string;
+      replyNeededForUserId?: string;
       labelId?: string;
       executionWorkspaceId?: string;
       originKind?: string;
@@ -83,6 +84,7 @@ export const issuesApi = {
     if (filters?.touchedByUserId) params.set("touchedByUserId", filters.touchedByUserId);
     if (filters?.inboxArchivedByUserId) params.set("inboxArchivedByUserId", filters.inboxArchivedByUserId);
     if (filters?.unreadForUserId) params.set("unreadForUserId", filters.unreadForUserId);
+    if (filters?.replyNeededForUserId) params.set("replyNeededForUserId", filters.replyNeededForUserId);
     if (filters?.labelId) params.set("labelId", filters.labelId);
     if (filters?.executionWorkspaceId) params.set("executionWorkspaceId", filters.executionWorkspaceId);
     if (filters?.originKind) params.set("originKind", filters.originKind);
@@ -137,13 +139,14 @@ export const issuesApi = {
       allowSharing?: boolean;
     },
   ) => api.post<FeedbackVote>(`/issues/${id}/feedback-votes`, data),
-  addComment: (id: string, body: string, reopen?: boolean, interrupt?: boolean) =>
+  addComment: (id: string, body: string, reopen?: boolean, interrupt?: boolean, replyNeeded?: boolean) =>
     api.post<IssueComment>(
       `/issues/${id}/comments`,
       {
         body,
         ...(reopen === undefined ? {} : { reopen }),
         ...(interrupt === undefined ? {} : { interrupt }),
+        ...(replyNeeded === undefined ? {} : { replyNeeded }),
       },
     ),
   listDocuments: (id: string) => api.get<IssueDocument[]>(`/issues/${id}/documents`),
