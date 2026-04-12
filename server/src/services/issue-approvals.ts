@@ -1,6 +1,7 @@
 import { and, desc, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { approvals, issueApprovals, issues } from "@paperclipai/db";
+import type { ApprovalRoutingMode, ApprovalEscalationReason } from "@paperclipai/shared";
 import { notFound, unprocessable } from "../errors.js";
 import { redactEventPayload } from "../redaction.js";
 
@@ -72,6 +73,8 @@ export function issueApprovalService(db: Db) {
         .orderBy(desc(issueApprovals.createdAt));
       return result.map((approval) => ({
         ...approval,
+        routingMode: approval.routingMode as ApprovalRoutingMode,
+        escalationReason: approval.escalationReason as ApprovalEscalationReason | null,
         payload: redactEventPayload(approval.payload) ?? {},
       }));
     },
