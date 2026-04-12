@@ -33,7 +33,7 @@
     "dev": "tsx src/index.ts",
     "build": "node --input-type=module -e \"import esbuild from 'esbuild'; import config from './esbuild.config.mjs'; await esbuild.build(config);\" && tsx ../scripts/package-files.ts ensure-executable dist/index.js",
     "clean": "tsx ../scripts/package-files.ts remove dist",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
     "@clack/prompts": "^0.10.0",
