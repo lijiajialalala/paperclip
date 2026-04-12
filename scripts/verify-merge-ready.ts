@@ -6,7 +6,7 @@ import { findWorktreeIntegrityIssues, formatWorktreeIntegrityIssues } from "../c
 import { buildPnpmSpawnSpec } from "./pnpm-command.js";
 
 type VerificationStep = {
-  layer: "environment" | "migrations" | "code" | "build";
+  layer: "environment" | "migrations" | "code" | "tests" | "build";
   name: string;
   run: () => void;
 };
@@ -96,6 +96,11 @@ function buildVerificationSteps(options: ScriptOptions): VerificationStep[] {
 
   if (options.full) {
     steps.push(
+      {
+        layer: "tests",
+        name: "test:run",
+        run: () => runPnpmCommand(options.cwd, ["run", "test:run"], "root test:run"),
+      },
       {
         layer: "build",
         name: "server:build",

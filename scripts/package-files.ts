@@ -5,6 +5,8 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildPnpmSpawnSpec } from "./pnpm-command.js";
 
+export { buildPnpmSpawnSpec } from "./pnpm-command.js";
+
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "..");
 

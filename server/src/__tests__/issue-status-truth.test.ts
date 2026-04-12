@@ -1,9 +1,13 @@
 import { randomUUID } from "node:crypto";
+import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   activityLog,
+  agents,
   companies,
   createDb,
+  heartbeatRunEvents,
+  heartbeatRuns,
   issues,
 } from "@paperclipai/db";
 import {
@@ -33,7 +37,10 @@ describeEmbeddedPostgres("issueStatusTruthService activity signals", () => {
 
   afterEach(async () => {
     await db.delete(activityLog);
+    await db.delete(heartbeatRunEvents);
+    await db.delete(heartbeatRuns);
     await db.delete(issues);
+    await db.delete(agents);
     await db.delete(companies);
   });
 
@@ -64,6 +71,24 @@ describeEmbeddedPostgres("issueStatusTruthService activity signals", () => {
     });
 
     return { companyId, issueId };
+  }
+
+  async function seedAgent(companyId: string) {
+    const agentId = randomUUID();
+
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Status Truth Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    return agentId;
   }
 
   it("treats issue.checked_out as the latest in_progress status signal after a prior blocked update", async () => {
@@ -229,6 +254,46 @@ describeEmbeddedPostgres("issueStatusTruthService activity signals", () => {
       persistedStatus: "todo",
       authoritativeStatus: "todo",
       consistency: "consistent",
+    }));
+  });
+
+  it("handles aggregated heartbeat timestamps when computing execution state", async () => {
+    const { companyId, issueId } = await seedIssue("in_progress");
+    const agentId = await seedAgent(companyId);
+    const runId = randomUUID();
+
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId,
+      status: "running",
+      invocationSource: "issue_comment",
+      contextSnapshot: {
+        issueId,
+      },
+      updatedAt: new Date("2026-04-12T05:03:00.000Z"),
+    });
+
+    await db.update(issues).set({
+      executionRunId: runId,
+    }).where(eq(issues.id, issueId));
+
+    await db.insert(heartbeatRunEvents).values({
+      companyId,
+      runId,
+      agentId,
+      seq: 1,
+      eventType: "stdout",
+      message: "still running",
+      createdAt: new Date("2026-04-12T05:02:00.000Z"),
+    });
+
+    const summary = await issueStatusTruthService(db).getIssueStatusTruthSummary(issueId);
+
+    expect(summary).toEqual(expect.objectContaining({
+      effectiveStatus: "in_progress",
+      executionState: "active",
+      executionDiagnosis: null,
     }));
   });
 });

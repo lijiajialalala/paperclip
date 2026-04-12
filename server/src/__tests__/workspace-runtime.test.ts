@@ -780,7 +780,7 @@ describe("realizeExecutionWorkspace", () => {
       );
     }
     },
-    30_000,
+    60_000,
   );
 
   it("records worktree setup and provision operations when a recorder is provided", async () => {

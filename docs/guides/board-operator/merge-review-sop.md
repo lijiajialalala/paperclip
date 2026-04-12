@@ -15,6 +15,14 @@ Keep merge review failures separable:
 2. Run `pnpm verify:merge-ready`
 3. If you want the heavier pass, run `pnpm verify:merge-ready:full`
 
+Pushes now use the same heavy gate via `pnpm verify:push`, which maps to `pnpm verify:merge-ready:full`.
+
+The full pass adds:
+
+- repository-wide `pnpm test:run`
+- `server` production build
+- `ui` production build
+
 This order prevents a corrupted secondary worktree from being mistaken for a branch regression.
 
 ## If migrations collide

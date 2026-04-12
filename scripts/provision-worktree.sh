@@ -406,16 +406,34 @@ if [[ -f "$worktree_cwd/package.json" && -f "$worktree_cwd/pnpm-lock.yaml" ]]; t
     cleanup_moved_symlinks
   fi
 
-  node "$worktree_cwd/server/node_modules/tsx/dist/cli.mjs" \
-    "$worktree_cwd/scripts/verify-worktree-integrity.ts" \
-    --cwd \
-    "$worktree_cwd" \
-    --repair || {
-    if declare -f restore_moved_symlinks >/dev/null 2>&1; then
-      restore_moved_symlinks
+  integrity_script_path="$worktree_cwd/scripts/verify-worktree-integrity.ts"
+  integrity_tsx_path="$worktree_cwd/server/node_modules/tsx/dist/cli.mjs"
+  if [[ -f "$integrity_script_path" ]]; then
+    if [[ -f "$integrity_tsx_path" ]]; then
+      node "$integrity_tsx_path" \
+        "$integrity_script_path" \
+        --cwd \
+        "$worktree_cwd" \
+        --repair || {
+        if declare -f restore_moved_symlinks >/dev/null 2>&1; then
+          restore_moved_symlinks
+        fi
+        exit 1
+      }
+    elif command -v pnpm >/dev/null 2>&1; then
+      (
+        cd "$worktree_cwd"
+        pnpm exec tsx scripts/verify-worktree-integrity.ts --cwd "$worktree_cwd" --repair
+      ) || {
+        if declare -f restore_moved_symlinks >/dev/null 2>&1; then
+          restore_moved_symlinks
+        fi
+        exit 1
+      }
+    else
+      echo "Skipping Paperclip worktree integrity repair because tsx is not available." >&2
     fi
-    exit 1
-  }
+  fi
 
   exit 0
 fi

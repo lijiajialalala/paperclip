@@ -4,8 +4,10 @@ import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   agents,
+  agentRuntimeState,
   agentWakeupRequests,
   companies,
+  companySkills,
   createDb,
   heartbeatRunEvents,
   heartbeatRuns,
@@ -73,7 +75,9 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     await db.delete(issues);
     await db.delete(heartbeatRunEvents);
     await db.delete(heartbeatRuns);
+    await db.delete(agentRuntimeState);
     await db.delete(agentWakeupRequests);
+    await db.delete(companySkills);
     await db.delete(agents);
     await db.delete(companies);
   });
@@ -397,10 +401,12 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
 
   it("promotes deferred execution wakeups when an issue lock points at a terminal run", async () => {
     const { companyId, agentId, issueId, runId: staleRunId } = await seedRunFixture({
+      agentStatus: "idle",
       runStatus: "failed",
       processPid: null,
     });
     const deferredWakeupId = randomUUID();
+    const blockerRunId = randomUUID();
     const now = new Date("2026-03-19T00:06:00.000Z");
 
     await db.insert(agentWakeupRequests).values({
@@ -413,6 +419,19 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       payload: { issueId },
       status: "deferred_issue_execution",
       requestedAt: now,
+      updatedAt: now,
+    });
+
+    await db.insert(heartbeatRuns).values({
+      id: blockerRunId,
+      companyId,
+      agentId,
+      invocationSource: "automation",
+      triggerDetail: "system",
+      status: "running",
+      contextSnapshot: { note: "occupy-concurrency-slot" },
+      processPid: process.pid,
+      startedAt: now,
       updatedAt: now,
     });
 

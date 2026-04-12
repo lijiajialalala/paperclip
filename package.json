@@ -9,6 +9,7 @@
     "dev:list": "node server/node_modules/tsx/dist/cli.mjs scripts/dev-service.ts list",
     "dev:stop": "node server/node_modules/tsx/dist/cli.mjs scripts/dev-service.ts stop",
     "verify:dev-once": "node server/node_modules/tsx/dist/cli.mjs scripts/smoke-dev-once.ts",
+    "verify:push": "pnpm run verify:merge-ready:full",
     "verify:merge-ready": "node server/node_modules/tsx/dist/cli.mjs scripts/verify-merge-ready.ts",
     "verify:merge-ready:full": "node server/node_modules/tsx/dist/cli.mjs scripts/verify-merge-ready.ts --full",
     "dev:server": "pnpm --filter @paperclipai/server dev",

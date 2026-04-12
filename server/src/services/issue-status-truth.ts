@@ -56,8 +56,8 @@ type StatusActivityRow = {
 type ExecutionSignalRow = {
   issueId: string;
   hasActiveExecutionRun: boolean;
-  latestRunEventAt: Date | null;
-  latestRunUpdateAt: Date | null;
+  latestRunEventAt: Date | string | null;
+  latestRunUpdateAt: Date | string | null;
 };
 
 type EffectiveStatusIssue<T extends { status: string }> = Omit<T, "status"> & {
@@ -144,9 +144,20 @@ function canCloseForStatus(status: IssueStatus) {
   return status !== "blocked" && status !== "cancelled";
 }
 
-function maxDate(...values: Array<Date | null | undefined>) {
+function coerceDate(value: Date | string | null | undefined) {
+  if (value instanceof Date) {
+    return Number.isFinite(value.getTime()) ? value : null;
+  }
+  if (typeof value === "string") {
+    const parsed = new Date(value);
+    return Number.isFinite(parsed.getTime()) ? parsed : null;
+  }
+  return null;
+}
+
+function maxDate(...values: Array<Date | string | null | undefined>) {
   const timestamps = values
-    .map((value) => value?.getTime() ?? Number.NaN)
+    .map((value) => coerceDate(value)?.getTime() ?? Number.NaN)
     .filter((value) => Number.isFinite(value));
   if (timestamps.length === 0) return null;
   return new Date(Math.max(...timestamps));
@@ -421,8 +432,8 @@ export function issueStatusTruthService(db: Db) {
         hasActiveExecutionRun: sql<boolean>`
           coalesce(bool_or(${heartbeatRuns.status} in ('queued', 'running')), false)
         `,
-        latestRunEventAt: sql<Date | null>`MAX(${heartbeatRunEvents.createdAt})`,
-        latestRunUpdateAt: sql<Date | null>`MAX(${heartbeatRuns.updatedAt})`,
+        latestRunEventAt: sql<Date | string | null>`MAX(${heartbeatRunEvents.createdAt})`,
+        latestRunUpdateAt: sql<Date | string | null>`MAX(${heartbeatRuns.updatedAt})`,
       })
       .from(issues)
       .leftJoin(heartbeatRuns, runMatchesIssue)
@@ -432,7 +443,11 @@ export function issueStatusTruthService(db: Db) {
 
     const latestByIssueId = new Map<string, ExecutionSignalRow>();
     for (const row of rows) {
-      latestByIssueId.set(row.issueId, row);
+      latestByIssueId.set(row.issueId, {
+        ...row,
+        latestRunEventAt: coerceDate(row.latestRunEventAt),
+        latestRunUpdateAt: coerceDate(row.latestRunUpdateAt),
+      });
     }
     return latestByIssueId;
   }
