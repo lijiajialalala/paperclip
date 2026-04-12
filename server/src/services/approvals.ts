@@ -1,6 +1,6 @@
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, notExists, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { approvalComments, approvals } from "@paperclipai/db";
+import { approvalComments, approvals, budgetIncidents, issueApprovals } from "@paperclipai/db";
 import { notFound, unprocessable } from "../errors.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { agentService } from "./agents.js";
@@ -314,6 +314,39 @@ export function approvalService(db: Db) {
         })
         .returning()
         .then((rows) => redactApprovalComment(rows[0], currentUserRedactionOptions.enabled));
+    },
+
+    removeOrphanedByIds: async (approvalIds: string[], database: Db | any = db) => {
+      const uniqueApprovalIds = Array.from(new Set(approvalIds.filter((approvalId) => typeof approvalId === "string" && approvalId.length > 0)));
+      if (uniqueApprovalIds.length === 0) return [];
+
+      const orphanRows = await database
+        .select({ id: approvals.id })
+        .from(approvals)
+        .where(
+          and(
+            inArray(approvals.id, uniqueApprovalIds),
+            notExists(
+              database
+                .select({ one: sql`1` })
+                .from(issueApprovals)
+                .where(eq(issueApprovals.approvalId, approvals.id)),
+            ),
+            notExists(
+              database
+                .select({ one: sql`1` })
+                .from(budgetIncidents)
+                .where(eq(budgetIncidents.approvalId, approvals.id)),
+            ),
+          ),
+        );
+
+      const orphanIds = orphanRows.map((row: { id: string }) => row.id);
+      if (orphanIds.length === 0) return [];
+
+      await database.delete(approvalComments).where(inArray(approvalComments.approvalId, orphanIds));
+      await database.delete(approvals).where(inArray(approvals.id, orphanIds));
+      return orphanIds;
     },
   };
 }
