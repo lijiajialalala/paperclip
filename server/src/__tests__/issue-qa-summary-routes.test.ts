@@ -13,10 +13,12 @@ const mockIssueService = vi.hoisted(() => ({
   getAncestors: vi.fn(),
   getCommentCursor: vi.fn(),
   getComment: vi.fn(),
+  findMentionedProjectIds: vi.fn(),
 }));
 
 const mockStatusTruth = vi.hoisted(() => ({
   getIssueStatusTruthSummaries: vi.fn(),
+  getIssueStatusTruthSummary: vi.fn(),
 }));
 
 const mockQaIssueState = vi.hoisted(() => ({
@@ -35,7 +37,9 @@ vi.mock("../services/index.js", () => ({
   agentService: () => ({
     getById: vi.fn(),
   }),
-  documentService: () => ({}),
+  documentService: () => ({
+    getIssueDocumentPayload: vi.fn(async () => ({})),
+  }),
   executionWorkspaceService: () => ({
     getById: vi.fn(),
   }),
@@ -116,7 +120,7 @@ describe("issue QA summary routes", () => {
       companyId,
       identifier: "CMPA-39",
       title: "QA verification",
-      status: "blocked",
+      status: "in_progress",
       priority: "high",
       goalId: null,
       parentId: null,
@@ -126,13 +130,14 @@ describe("issue QA summary routes", () => {
       updatedAt: new Date("2026-04-08T00:00:00.000Z"),
     });
     mockIssueService.getAncestors.mockResolvedValue([]);
+    mockIssueService.findMentionedProjectIds.mockResolvedValue([]);
     mockIssueService.list.mockResolvedValue([
       {
         id: issueId,
         companyId,
         identifier: "CMPA-39",
         title: "QA verification",
-        status: "blocked",
+        status: "in_progress",
         priority: "high",
         goalId: null,
         parentId: null,
@@ -165,6 +170,21 @@ describe("issue QA summary routes", () => {
         evidence: [],
       }],
     ]));
+    mockStatusTruth.getIssueStatusTruthSummary.mockResolvedValue({
+      effectiveStatus: "blocked",
+      persistedStatus: "in_progress",
+      authoritativeStatus: "blocked",
+      consistency: "drifted",
+      authoritativeAt: "2026-04-08T01:01:00.000Z",
+      authoritativeSource: "status_activity",
+      authoritativeActorType: "system",
+      authoritativeActorId: "paperclip",
+      reasonSummary: "Latest explicit status activity set the issue to blocked.",
+      canExecute: false,
+      canClose: false,
+      driftCode: "blocked_checkout_reopen",
+      evidence: [],
+    });
     mockQaIssueState.getIssueQaSummary.mockResolvedValue({
       verdict: "fail",
       source: "platform",
@@ -191,6 +211,8 @@ describe("issue QA summary routes", () => {
       recommendedNextAction: "Repair writeback",
       recoveryCriteria: "Stable verdict",
       nextCheckpointAt: "2026-04-08T01:31:00.000Z",
+      blocksExecutionRetry: true,
+      blocksCloseOut: true,
       canRetryEngineering: false,
       canCloseUpstream: false,
       recoveryKind: null,
@@ -222,6 +244,14 @@ describe("issue QA summary routes", () => {
     const res = await request(createApp()).get(`/api/issues/${issueId}/heartbeat-context`);
 
     expect(res.status).toBe(200);
+    expect(res.body.issue).toEqual(expect.objectContaining({
+      id: issueId,
+      status: "blocked",
+      statusTruthSummary: expect.objectContaining({
+        effectiveStatus: "blocked",
+        consistency: "drifted",
+      }),
+    }));
     expect(res.body.qaSummary).toEqual(expect.objectContaining({
       verdict: "fail",
       latestRunId: "run-qa-1",
@@ -231,7 +261,22 @@ describe("issue QA summary routes", () => {
     }));
   });
 
-  it("filters issue lists by effective status instead of persisted row status", async () => {
+  it("surfaces effective status and truth summary in issue detail", async () => {
+    const res = await request(createApp()).get(`/api/issues/${issueId}`);
+
+    expect(res.status).toBe(200);
+    expect(mockStatusTruth.getIssueStatusTruthSummary).toHaveBeenCalledWith(issueId);
+    expect(res.body).toEqual(expect.objectContaining({
+      id: issueId,
+      status: "blocked",
+      statusTruthSummary: expect.objectContaining({
+        effectiveStatus: "blocked",
+        consistency: "drifted",
+      }),
+    }));
+  });
+
+  it("filters company issue lists by effective status instead of persisted row status", async () => {
     mockIssueService.list.mockResolvedValueOnce([
       {
         id: issueId,

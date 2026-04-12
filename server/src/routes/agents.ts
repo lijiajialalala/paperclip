@@ -72,6 +72,7 @@ import {
 import { getTelemetryClient } from "../telemetry.js";
 import { platformUnblockService } from "../services/platform-unblock.js";
 import { qaIssueStateService } from "../services/qa-issue-state.js";
+import { applyEffectiveStatus, issueStatusTruthService } from "../services/issue-status-truth.js";
 
 export function agentRoutes(db: Db) {
   const DEFAULT_INSTRUCTIONS_PATH_KEYS: Record<string, string> = {
@@ -108,6 +109,7 @@ export function agentRoutes(db: Db) {
   const instanceSettings = instanceSettingsService(db);
   const qaIssueState = qaIssueStateService(db);
   const platformUnblock = platformUnblockService(db);
+  const statusTruth = issueStatusTruthService(db);
   const canQueryDb = typeof (db as { select?: unknown }).select === "function";
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
 
@@ -1090,20 +1092,25 @@ export function agentRoutes(db: Db) {
       assigneeAgentId: req.actor.agentId,
       status: "todo,in_progress,blocked",
     });
+    const statusSummaries = await statusTruth.getIssueStatusTruthSummaries(rows.map((issue) => issue.id));
 
     res.json(
-      rows.map((issue) => ({
-        id: issue.id,
-        identifier: issue.identifier,
-        title: issue.title,
-        status: issue.status,
-        priority: issue.priority,
-        projectId: issue.projectId,
-        goalId: issue.goalId,
-        parentId: issue.parentId,
-        updatedAt: issue.updatedAt,
-        activeRun: issue.activeRun,
-      })),
+      rows.map((issue) => {
+        const serialized = applyEffectiveStatus(issue, statusSummaries.get(issue.id) ?? null);
+        return {
+          id: serialized.id,
+          identifier: serialized.identifier,
+          title: serialized.title,
+          status: serialized.status,
+          statusTruthSummary: serialized.statusTruthSummary ?? null,
+          priority: serialized.priority,
+          projectId: serialized.projectId,
+          goalId: serialized.goalId,
+          parentId: serialized.parentId,
+          updatedAt: serialized.updatedAt,
+          activeRun: serialized.activeRun,
+        };
+      }),
     );
   });
 
@@ -1120,8 +1127,9 @@ export function agentRoutes(db: Db) {
       inboxArchivedByUserId: query.userId,
       status: query.status,
     });
+    const statusSummaries = await statusTruth.getIssueStatusTruthSummaries(rows.map((issue) => issue.id));
 
-    res.json(rows);
+    res.json(rows.map((issue) => applyEffectiveStatus(issue, statusSummaries.get(issue.id) ?? null)));
   });
 
   router.get("/agents/:id", async (req, res) => {

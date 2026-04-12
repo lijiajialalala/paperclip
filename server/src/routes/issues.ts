@@ -789,6 +789,8 @@ export function issueRoutes(
     const touchedByUserFilterRaw = req.query.touchedByUserId as string | undefined;
     const inboxArchivedByUserFilterRaw = req.query.inboxArchivedByUserId as string | undefined;
     const unreadForUserFilterRaw = req.query.unreadForUserId as string | undefined;
+    const includeHidden = parseBooleanQuery(req.query.includeHidden);
+    const includeArchivedProjectIssues = parseBooleanQuery(req.query.includeArchivedProjectIssues);
     const assigneeUserId =
       assigneeUserFilterRaw === "me" && req.actor.type === "board"
         ? req.actor.userId
@@ -839,6 +841,8 @@ export function issueRoutes(
       originId: req.query.originId as string | undefined,
       includeRoutineExecutions:
         req.query.includeRoutineExecutions === "true" || req.query.includeRoutineExecutions === "1",
+      includeHidden,
+      includeArchivedProjectIssues,
       q: req.query.q as string | undefined,
     });
 
@@ -938,16 +942,18 @@ export function issueRoutes(
       svc.findMentionedProjectIds(issue.id),
       documentsSvc.getIssueDocumentPayload(issue),
     ]);
+    const statusSummary = await statusTruth.getIssueStatusTruthSummary(issue.id);
+    const serializedIssue = applyEffectiveStatus(issue, statusSummary);
     const mentionedProjects = mentionedProjectIds.length > 0
       ? await projectsSvc.listByIds(issue.companyId, mentionedProjectIds)
       : [];
-    const currentExecutionWorkspace = issue.executionWorkspaceId
-      ? await executionWorkspacesSvc.getById(issue.executionWorkspaceId)
+    const currentExecutionWorkspace = serializedIssue.executionWorkspaceId
+      ? await executionWorkspacesSvc.getById(serializedIssue.executionWorkspaceId)
       : null;
-    const workProducts = await workProductsSvc.listForIssue(issue.id);
+    const workProducts = await workProductsSvc.listForIssue(serializedIssue.id);
     res.json({
-      ...issue,
-      goalId: goal?.id ?? issue.goalId,
+      ...serializedIssue,
+      goalId: goal?.id ?? serializedIssue.goalId,
       ancestors,
       ...documentPayload,
       project: project ?? null,
@@ -966,6 +972,8 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, issue.companyId);
+    const statusSummary = await statusTruth.getIssueStatusTruthSummary(issue.id);
+    const serializedIssue = applyEffectiveStatus(issue, statusSummary);
 
     const wakeCommentId =
       typeof req.query.wakeCommentId === "string" && req.query.wakeCommentId.trim().length > 0
@@ -983,20 +991,21 @@ export function issueRoutes(
 
     res.json({
       issue: {
-        id: issue.id,
-        identifier: issue.identifier,
-        title: issue.title,
-        description: issue.description,
-        status: issue.status,
-        priority: issue.priority,
-        projectId: issue.projectId,
-        goalId: goal?.id ?? issue.goalId,
-        parentId: issue.parentId,
-        assigneeAgentId: issue.assigneeAgentId,
-        assigneeUserId: issue.assigneeUserId,
-        planProposedAt: issue.planProposedAt,
-        planApprovedAt: issue.planApprovedAt,
-        updatedAt: issue.updatedAt,
+        id: serializedIssue.id,
+        identifier: serializedIssue.identifier,
+        title: serializedIssue.title,
+        description: serializedIssue.description,
+        status: serializedIssue.status,
+        statusTruthSummary: serializedIssue.statusTruthSummary ?? null,
+        priority: serializedIssue.priority,
+        projectId: serializedIssue.projectId,
+        goalId: goal?.id ?? serializedIssue.goalId,
+        parentId: serializedIssue.parentId,
+        assigneeAgentId: serializedIssue.assigneeAgentId,
+        assigneeUserId: serializedIssue.assigneeUserId,
+        planProposedAt: serializedIssue.planProposedAt,
+        planApprovedAt: serializedIssue.planApprovedAt,
+        updatedAt: serializedIssue.updatedAt,
       },
       ancestors: ancestors.map((ancestor) => ({
         id: ancestor.id,
@@ -1931,6 +1940,7 @@ export function issueRoutes(
 
     if (hiddenAtRaw !== undefined) {
       updateFields.hiddenAt = hiddenAtRaw ? new Date(hiddenAtRaw) : null;
+      (updateFields as typeof updateFields & { hiddenReason?: "manual" | null }).hiddenReason = hiddenAtRaw ? "manual" : null;
     }
 
     // Agents cannot manually change status while a plan is pending review

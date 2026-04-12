@@ -71,6 +71,9 @@ const mockIssueApprovalService = vi.hoisted(() => ({
 const mockIssueService = vi.hoisted(() => ({
   list: vi.fn(),
 }));
+const mockStatusTruth = vi.hoisted(() => ({
+  getIssueStatusTruthSummaries: vi.fn(),
+}));
 
 const mockSecretService = vi.hoisted(() => ({
   normalizeAdapterConfigForPersistence: vi.fn(),
@@ -101,6 +104,13 @@ vi.mock("../services/index.js", () => ({
   secretService: () => mockSecretService,
   syncInstructionsBundleConfigFromFilePath: vi.fn((_agent, config) => config),
   workspaceOperationService: () => mockWorkspaceOperationService,
+}));
+
+vi.mock("../services/issue-status-truth.js", () => ({
+  applyEffectiveStatus: <T extends { status: string }>(issue: T, summary: any) => summary
+    ? { ...issue, status: summary.effectiveStatus, statusTruthSummary: summary }
+    : issue,
+  issueStatusTruthService: () => mockStatusTruth,
 }));
 
 function createDbStub() {
@@ -175,6 +185,7 @@ describe("agent permission routes", () => {
     mockSecretService.normalizeAdapterConfigForPersistence.mockImplementation(async (_companyId, config) => config);
     mockSecretService.resolveAdapterConfigForRuntime.mockImplementation(async (_companyId, config) => ({ config }));
     mockLogActivity.mockResolvedValue(undefined);
+    mockStatusTruth.getIssueStatusTruthSummaries.mockResolvedValue(new Map());
   });
 
   it("grants tasks:assign by default when board creates a new agent", async () => {
@@ -309,6 +320,116 @@ describe("agent permission routes", () => {
         title: "Inbox follow-up",
         status: "todo",
       },
+    ]);
+  });
+
+  it("surfaces effective status and status truth summary in inbox-lite", async () => {
+    mockIssueService.list.mockResolvedValueOnce([
+      {
+        id: "issue-1",
+        identifier: "PAP-910",
+        title: "Inbox follow-up",
+        status: "in_progress",
+        priority: "high",
+        projectId: null,
+        goalId: null,
+        parentId: null,
+        updatedAt: new Date("2026-03-19T00:00:00.000Z"),
+        activeRun: null,
+      },
+    ]);
+    mockStatusTruth.getIssueStatusTruthSummaries.mockResolvedValueOnce(new Map([
+      ["issue-1", {
+        effectiveStatus: "blocked",
+        persistedStatus: "in_progress",
+        authoritativeStatus: "blocked",
+        consistency: "drifted",
+        authoritativeAt: "2026-03-19T00:01:00.000Z",
+        authoritativeSource: "status_activity",
+        authoritativeActorType: "system",
+        authoritativeActorId: "paperclip",
+        reasonSummary: "Latest explicit status activity set the issue to blocked.",
+        canExecute: false,
+        canClose: false,
+        driftCode: "blocked_checkout_reopen",
+        evidence: [],
+      }],
+    ]));
+
+    const app = createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      runId: "run-1",
+      source: "agent_key",
+    });
+
+    const res = await request(app).get("/api/agents/me/inbox-lite");
+
+    expect(res.status).toBe(200);
+    expect(mockStatusTruth.getIssueStatusTruthSummaries).toHaveBeenCalledWith(["issue-1"]);
+    expect(res.body).toEqual([
+      expect.objectContaining({
+        id: "issue-1",
+        status: "blocked",
+        statusTruthSummary: expect.objectContaining({
+          effectiveStatus: "blocked",
+          consistency: "drifted",
+        }),
+      }),
+    ]);
+  });
+
+  it("surfaces effective status and status truth summary in inbox mine", async () => {
+    mockIssueService.list.mockResolvedValueOnce([
+      {
+        id: "issue-1",
+        identifier: "PAP-910",
+        title: "Inbox follow-up",
+        status: "in_progress",
+      },
+    ]);
+    mockStatusTruth.getIssueStatusTruthSummaries.mockResolvedValueOnce(new Map([
+      ["issue-1", {
+        effectiveStatus: "blocked",
+        persistedStatus: "in_progress",
+        authoritativeStatus: "blocked",
+        consistency: "drifted",
+        authoritativeAt: "2026-03-19T00:01:00.000Z",
+        authoritativeSource: "status_activity",
+        authoritativeActorType: "system",
+        authoritativeActorId: "paperclip",
+        reasonSummary: "Latest explicit status activity set the issue to blocked.",
+        canExecute: false,
+        canClose: false,
+        driftCode: "blocked_checkout_reopen",
+        evidence: [],
+      }],
+    ]));
+
+    const app = createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      runId: "run-1",
+      source: "agent_key",
+    });
+
+    const res = await request(app)
+      .get("/api/agents/me/inbox/mine")
+      .query({ userId: "board-user" });
+
+    expect(res.status).toBe(200);
+    expect(mockStatusTruth.getIssueStatusTruthSummaries).toHaveBeenCalledWith(["issue-1"]);
+    expect(res.body).toEqual([
+      expect.objectContaining({
+        id: "issue-1",
+        status: "blocked",
+        statusTruthSummary: expect.objectContaining({
+          effectiveStatus: "blocked",
+          consistency: "drifted",
+        }),
+      }),
     ]);
   });
 });

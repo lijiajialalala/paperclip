@@ -21,6 +21,9 @@ const mockGoalService = vi.hoisted(() => ({
   getById: vi.fn(),
   getDefaultCompanyGoal: vi.fn(),
 }));
+const mockStatusTruth = vi.hoisted(() => ({
+  getIssueStatusTruthSummary: vi.fn(),
+}));
 
 vi.mock("../services/index.js", () => ({
   accessService: () => ({
@@ -65,6 +68,13 @@ vi.mock("../services/index.js", () => ({
   workProductService: () => ({
     listForIssue: vi.fn(async () => []),
   }),
+}));
+
+vi.mock("../services/issue-status-truth.js", () => ({
+  applyEffectiveStatus: <T extends { status: string }>(issue: T, summary: any) => summary
+    ? { ...issue, status: summary.effectiveStatus, statusTruthSummary: summary }
+    : issue,
+  issueStatusTruthService: () => mockStatusTruth,
 }));
 
 function createApp() {
@@ -167,6 +177,21 @@ describe("issue goal context routes", () => {
       id === projectGoal.id ? projectGoal : null,
     );
     mockGoalService.getDefaultCompanyGoal.mockResolvedValue(null);
+    mockStatusTruth.getIssueStatusTruthSummary.mockResolvedValue({
+      effectiveStatus: "todo",
+      persistedStatus: "todo",
+      authoritativeStatus: "todo",
+      consistency: "consistent",
+      authoritativeAt: "2026-03-24T12:00:00.000Z",
+      authoritativeSource: "issue_row",
+      authoritativeActorType: null,
+      authoritativeActorId: null,
+      reasonSummary: "Using the persisted issue row because no explicit status activity exists.",
+      canExecute: true,
+      canClose: true,
+      driftCode: null,
+      evidence: [],
+    });
   });
 
   it("surfaces the project goal from GET /issues/:id when the issue has no direct goal", async () => {

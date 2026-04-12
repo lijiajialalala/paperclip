@@ -1209,7 +1209,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       ).resolves.toBeUndefined();
     });
 
-    it("blocks agent-driven done transitions when status truth is drifted", async () => {
+    it("blocks markDone when status truth still says the issue is blocked", async () => {
       const { companyId, agentId, issueId } = await seedDoneGuardFixture();
 
       await db
@@ -1247,9 +1247,8 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
         details: expect.objectContaining({
           code: "issue_done_blocked_by_status_truth",
           effectiveStatus: "blocked",
-          persistedStatus: "in_progress",
           authoritativeStatus: "blocked",
-          consistency: "drifted",
+          driftCode: "blocked_checkout_reopen",
         }),
       });
     });
@@ -1302,7 +1301,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       });
     });
 
-    it("blocks agent-driven done transitions when a runtime platform unblock is active", async () => {
+    it("allows done when the only active platform blocker is runtime process loss", async () => {
       const { companyId, agentId, issueId } = await seedDoneGuardFixture();
       const actorRunId = randomUUID();
 
@@ -1326,14 +1325,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
           actorAgentId: agentId,
           actorRunId,
         }),
-      ).rejects.toMatchObject({
-        status: 422,
-        details: expect.objectContaining({
-          code: "issue_done_blocked_by_platform_unblock",
-          primaryCategory: "runtime_process",
-          canRetryEngineering: false,
-        }),
-      });
+      ).resolves.toBeUndefined();
     });
   });
 
@@ -1405,8 +1397,24 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       return { companyId, agentId, rootId, parentId, childId };
     }
 
-    it("recomputes blocked ancestors back to in_progress when a child resumes execution", async () => {
+    it("does not reopen blocked ancestors when a child resumes execution", async () => {
       const { agentId, rootId, parentId, childId } = await seedAncestorFixture();
+
+      await svc.checkout(childId, agentId, ["todo"], null);
+
+      const parent = await svc.getById(parentId);
+      const root = await svc.getById(rootId);
+
+      expect(parent?.status).toBe("blocked");
+      expect(root?.status).toBe("blocked");
+    });
+
+    it("reopens done ancestors when a child branch resumes execution", async () => {
+      const { agentId, rootId, parentId, childId } = await seedAncestorFixture({
+        rootStatus: "done",
+        parentStatus: "done",
+        childStatus: "todo",
+      });
 
       await svc.checkout(childId, agentId, ["todo"], null);
 
@@ -1415,6 +1423,81 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
 
       expect(parent?.status).toBe("in_progress");
       expect(root?.status).toBe("in_progress");
+    });
+
+    it("preserves blocked status when checking out a blocked issue", async () => {
+      const companyId = randomUUID();
+      const agentId = randomUUID();
+      const issueId = randomUUID();
+      const runId = randomUUID();
+
+      await db.insert(companies).values({
+        id: companyId,
+        name: "Paperclip",
+        issuePrefix: "CMPA",
+        requireBoardApprovalForNewAgents: false,
+      });
+
+      await db.insert(agents).values({
+        id: agentId,
+        companyId,
+        name: "Engineer",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      });
+
+      await db.insert(issues).values({
+        id: issueId,
+        companyId,
+        issueNumber: 77,
+        identifier: "CMPA-77",
+        title: "Blocked issue",
+        status: "blocked",
+        priority: "medium",
+      });
+
+      await db.insert(heartbeatRuns).values({
+        id: runId,
+        companyId,
+        agentId,
+        invocationSource: "assignment",
+        triggerDetail: "system",
+        status: "running",
+        contextSnapshot: { issueId },
+        resultJson: {},
+        errorCode: null,
+        error: null,
+        processLossRetryCount: 0,
+        startedAt: new Date("2026-04-08T00:00:00.000Z"),
+        finishedAt: null,
+        createdAt: new Date("2026-04-08T00:00:00.000Z"),
+        updatedAt: new Date("2026-04-08T00:00:00.000Z"),
+      });
+
+      const checkedOut = await svc.checkout(issueId, agentId, ["blocked"], runId);
+
+      expect(checkedOut?.status).toBe("blocked");
+      expect(checkedOut?.assigneeAgentId).toBe(agentId);
+      expect(checkedOut?.checkoutRunId).toBe(runId);
+      expect(checkedOut?.executionRunId).toBe(runId);
+
+      const persisted = await db
+        .select({
+          status: issues.status,
+          startedAt: issues.startedAt,
+          executionLockedAt: issues.executionLockedAt,
+        })
+        .from(issues)
+        .where(eq(issues.id, issueId))
+        .then((rows) => rows[0]!);
+
+      expect(persisted.status).toBe("blocked");
+      expect(persisted.startedAt).toBeNull();
+      expect(persisted.executionLockedAt).not.toBeNull();
     });
 
     it("marks ancestors done when their only child branch is completed", async () => {
@@ -1433,7 +1516,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       expect(root?.status).toBe("done");
     });
 
-    it("records status activity for recomputed ancestors so status truth stays consistent", async () => {
+    it("keeps blocked ancestors authoritative without reopening them when descendants finish", async () => {
       const { companyId, rootId, parentId, childId } = await seedAncestorFixture({
         rootStatus: "blocked",
         parentStatus: "blocked",
@@ -1482,15 +1565,15 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
         .where(eq(activityLog.action, "issue.updated"));
 
       expect(parentSummary).toEqual(expect.objectContaining({
-        effectiveStatus: "done",
-        persistedStatus: "done",
-        authoritativeStatus: "done",
+        effectiveStatus: "blocked",
+        persistedStatus: "blocked",
+        authoritativeStatus: "blocked",
         consistency: "consistent",
       }));
       expect(rootSummary).toEqual(expect.objectContaining({
-        effectiveStatus: "done",
-        persistedStatus: "done",
-        authoritativeStatus: "done",
+        effectiveStatus: "blocked",
+        persistedStatus: "blocked",
+        authoritativeStatus: "blocked",
         consistency: "consistent",
       }));
       expect(
@@ -1500,7 +1583,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
             && details?.source === "ancestor_recompute"
             && details?.status === "done";
         }),
-      ).toHaveLength(2);
+      ).toHaveLength(0);
     });
   });
 });
@@ -1508,7 +1591,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
 // ---------------------------------------------------------------------------
 // Fix #1 — status drift self-repair
 // ---------------------------------------------------------------------------
-describeEmbeddedPostgres("issueService.markDone — status drift self-repair", () => {
+describeEmbeddedPostgres("issueService.markDone — status truth close gate", () => {
   let db!: ReturnType<typeof createDb>;
   let svc!: ReturnType<typeof issueService>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
@@ -1533,11 +1616,7 @@ describeEmbeddedPostgres("issueService.markDone — status drift self-repair", (
     await tempDb?.cleanup();
   });
 
-  it("allows markDone when authoritativeStatus is done even if DB row is still in_progress (positive drift)", async () => {
-    // Fix #1 regression:
-    // Before the fix, canClose required consistency === "consistent". With a positive drift
-    // (event log says done, DB row still says in_progress), markDone was incorrectly blocked.
-    // After the fix, canClose is based on authoritativeStatus, and markDone also repairs the DB row.
+  it("blocks markDone when drifted status truth still says the issue is blocked", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const issueId = randomUUID();
@@ -1574,7 +1653,8 @@ describeEmbeddedPostgres("issueService.markDone — status drift self-repair", (
       assigneeAgentId: agentId,
     });
 
-    // Event log authoritatively says done (agent marked it done already)
+    // Event log authoritatively says blocked while the persisted row drifted back
+    // to in_progress.
     await db.insert(activityLog).values({
       companyId,
       actorType: "agent",
@@ -1585,12 +1665,11 @@ describeEmbeddedPostgres("issueService.markDone — status drift self-repair", (
       entityId: issueId,
       createdAt: new Date("2026-04-08T00:05:00.000Z"),
       details: {
-        status: "done",
-        _previous: { status: "in_progress" },
+        status: "blocked",
+        _previous: { status: "todo" },
       },
     });
 
-    // markDone must succeed (not throw "issue_done_blocked_by_status_truth")
     await expect(
       svc.assertCanTransitionIssueToDone({
         issueId,
@@ -1599,11 +1678,21 @@ describeEmbeddedPostgres("issueService.markDone — status drift self-repair", (
         actorAgentId: agentId,
         actorRunId: runId,
       }),
-    ).resolves.not.toThrow();
+    ).rejects.toMatchObject({
+      status: 422,
+      details: expect.objectContaining({
+        code: "issue_done_blocked_by_status_truth",
+        effectiveStatus: "blocked",
+        authoritativeStatus: "blocked",
+      }),
+    });
 
-    // After assertCanTransitionIssueToDone, the DB row must be repaired to 'done' (repairDrift)
-    const updatedIssue = await db.select({ status: issues.status }).from(issues).where(eq(issues.id, issueId)).then((r) => r[0]!);
-    expect(updatedIssue.status).toBe("done");
+    const updatedIssue = await db
+      .select({ status: issues.status })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((r) => r[0]!);
+    expect(updatedIssue.status).toBe("in_progress");
   });
 });
 
