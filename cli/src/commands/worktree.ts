@@ -79,6 +79,23 @@ import {
   type PlannedIssueInsert,
 } from "./worktree-merge-history-lib.js";
 
+function buildPnpmExecFileSpec(args: string[]): {
+  args: string[];
+  command: string;
+} {
+  if (process.platform === "win32") {
+    return {
+      command: process.env.ComSpec ?? "cmd.exe",
+      args: ["/d", "/s", "/c", "pnpm.cmd", ...args],
+    };
+  }
+
+  return {
+    command: "pnpm",
+    args,
+  };
+}
+
 type WorktreeInitOptions = {
   name?: string;
   instance?: string;
@@ -1113,7 +1130,8 @@ export async function worktreeMakeCommand(nameArg: string, opts: WorktreeMakeOpt
   const installSpinner = p.spinner();
   installSpinner.start("Installing dependencies...");
   try {
-    execFileSync("pnpm", ["install"], {
+    const pnpmInstall = buildPnpmExecFileSpec(["install"]);
+    execFileSync(pnpmInstall.command, pnpmInstall.args, {
       cwd: targetPath,
       stdio: ["ignore", "pipe", "pipe"],
     });

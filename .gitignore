@@ -9,6 +9,7 @@ coverage/
 data/
 .paperclip/
 .pnpm-store/
+.pnpm/
 tmp-*
 cli/tmp/
 

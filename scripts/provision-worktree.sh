@@ -406,6 +406,17 @@ if [[ -f "$worktree_cwd/package.json" && -f "$worktree_cwd/pnpm-lock.yaml" ]]; t
     cleanup_moved_symlinks
   fi
 
+  node "$worktree_cwd/server/node_modules/tsx/dist/cli.mjs" \
+    "$worktree_cwd/scripts/verify-worktree-integrity.ts" \
+    --cwd \
+    "$worktree_cwd" \
+    --repair || {
+    if declare -f restore_moved_symlinks >/dev/null 2>&1; then
+      restore_moved_symlinks
+    fi
+    exit 1
+  }
+
   exit 0
 fi
 

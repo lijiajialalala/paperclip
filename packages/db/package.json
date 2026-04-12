@@ -36,6 +36,7 @@
   ],
   "scripts": {
     "check:migrations": "tsx src/check-migration-numbering.ts",
+    "renumber:migrations": "tsx src/renumber-migrations.ts",
     "build": "pnpm run check:migrations && tsc && tsx ../../scripts/package-files.ts copy-dir src/migrations dist/migrations",
     "clean": "tsx ../../scripts/package-files.ts remove dist",
     "typecheck": "pnpm run check:migrations && tsc --noEmit",

@@ -3,36 +3,13 @@ import { existsSync } from "node:fs";
 import { chmod, cp, mkdir, rm, stat } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { buildPnpmSpawnSpec } from "./pnpm-command.js";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "..");
 
 function fail(message: string): never {
   throw new Error(message);
-}
-
-export function buildPnpmSpawnSpec(
-  args: string[],
-  options: {
-    comSpec?: string;
-    platform?: NodeJS.Platform;
-  } = {},
-): {
-  args: string[];
-  command: string;
-} {
-  const platform = options.platform ?? process.platform;
-  if (platform === "win32") {
-    return {
-      command: options.comSpec ?? process.env.ComSpec ?? "cmd.exe",
-      args: ["/d", "/s", "/c", "pnpm.cmd", ...args],
-    };
-  }
-
-  return {
-    command: "pnpm",
-    args,
-  };
 }
 
 async function copyDir(source: string, destination: string): Promise<void> {

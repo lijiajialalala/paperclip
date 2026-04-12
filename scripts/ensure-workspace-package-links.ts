@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { repoRoot } from "./dev-service-profile.ts";
+import { buildPnpmSpawnSpec } from "./pnpm-command.js";
 
 type WorkspaceLinkMismatch = {
   packageName: string;
@@ -106,10 +107,10 @@ async function ensureServerWorkspaceLinksCurrent() {
     );
   }
 
-  const pnpmBin = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
+  const spawnSpec = buildPnpmSpawnSpec(["install", "--force", "--config.confirmModulesPurge=false"]);
   await runCommand(
-    pnpmBin,
-    ["install", "--force", "--config.confirmModulesPurge=false"],
+    spawnSpec.command,
+    spawnSpec.args,
     repoRoot,
   );
 
