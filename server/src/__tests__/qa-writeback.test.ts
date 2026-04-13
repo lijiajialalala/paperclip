@@ -185,6 +185,57 @@ describeEmbeddedPostgres("qaWritebackService", () => {
     expect(comments).toHaveLength(0);
   });
 
+  it("keeps plan-pending issues in review and raises a platform gate instead of auto-closing them", async () => {
+    const { companyId, qaAgentId, issueId } = await seedFixture();
+    const createdAt = new Date("2026-04-08T00:20:00.000Z");
+    const agent = await getAgent(qaAgentId);
+
+    await db
+      .update(issues)
+      .set({
+        planProposedAt: new Date("2026-04-08T00:15:00.000Z"),
+        planApprovedAt: null,
+      })
+      .where(eq(issues.id, issueId));
+
+    await db.insert(heartbeatRuns).values({
+      id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      companyId,
+      agentId: qaAgentId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "succeeded",
+      contextSnapshot: { issueId },
+      resultJson: {
+        verdict: "pass",
+        summary: "Verdict: pass\nAll checks green.",
+      },
+      startedAt: new Date(createdAt.getTime() - 60_000),
+      finishedAt: createdAt,
+      createdAt,
+      updatedAt: createdAt,
+    });
+
+    const run = await getRun("dddddddd-dddd-4ddd-8ddd-dddddddddddd");
+    const settlement = await qaWritebackService(db).settleTerminalQaRun({
+      run,
+      runAgent: agent,
+      issueId,
+    });
+
+    const updatedRun = await getRun(run.id);
+    const updatedIssue = await getIssue(issueId);
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+
+    expect(settlement.issueWriteback.status).toBe("alerted_inconclusive");
+    expect(settlement.issueWriteback.alertType).toBe("plan_pending_review");
+    expect(settlement.issueWriteback.canCloseUpstream).toBe(false);
+    expect(readQaIssueWriteback(updatedRun.resultJson)?.alertType).toBe("plan_pending_review");
+    expect(updatedIssue.status).toBe("in_review");
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.body).toContain("Type: plan_pending_review");
+  });
+
   it("is idempotent: calling settleTerminalQaRun twice does not write extra comments", async () => {
     // Fix #3: concurrent / retry invocations must not produce duplicate verdict comments.
     const { companyId, qaAgentId, issueId } = await seedFixture();

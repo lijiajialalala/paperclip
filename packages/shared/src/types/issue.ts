@@ -63,6 +63,7 @@ export type QaIssueWritebackStatus =
 export type QaIssueWritebackAlertType =
   | "partial_writeback_conflict"
   | "missing_writeback"
+  | "plan_pending_review"
   | "inconclusive";
 
 export interface QaIssueWriteback {

@@ -47,6 +47,7 @@
               "guides/board-operator/org-structure",
               "guides/board-operator/managing-tasks",
               "guides/board-operator/execution-workspaces-and-runtime-services",
+              "guides/board-operator/platform-bugfix-workflow",
               "guides/board-operator/delegation",
               "guides/board-operator/approvals",
               "guides/board-operator/costs-and-budgets",

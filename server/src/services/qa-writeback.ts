@@ -20,6 +20,7 @@ export type QaIssueWritebackStatus =
 export type QaIssueWritebackAlertType =
   | "partial_writeback_conflict"
   | "missing_writeback"
+  | "plan_pending_review"
   | "inconclusive";
 
 export interface QaIssueWriteback {
@@ -275,6 +276,10 @@ function buildQaAlertComment(input: {
   manager: AgentRow | null;
   alertType: QaIssueWritebackAlertType;
 }): string {
+  const nextStep =
+    input.alertType === "plan_pending_review"
+      ? "- Next step: keep the issue in review, block automatic close-out, and repair the premature execution or approval gating path."
+      : "- Next step: inspect the run output and repair the QA verdict writeback.";
   return [
     "## QA Writeback Alert",
     "",
@@ -283,7 +288,7 @@ function buildQaAlertComment(input: {
     `- Triggered at: ${new Date().toISOString()}`,
     `- Current owner: ${renderAgentLink(input.prefix, input.owner)}`,
     `- Manager: ${renderAgentLink(input.prefix, input.manager)}`,
-    "- Next step: inspect the run output and repair the QA verdict writeback.",
+    nextStep,
   ].join("\n");
 }
 
@@ -469,11 +474,77 @@ export function qaWritebackService(db: Db) {
         const details = asRecord(entry.details);
         return readNonEmptyString(details?.status) === desiredStatus;
       });
+      const planPendingReview = Boolean(issue.planProposedAt) && !issue.planApprovedAt;
 
       let issueWriteback: QaIssueWriteback;
       const writebackAt = new Date().toISOString();
 
-      if (resolvedVerdict && !hasVerdictConflict) {
+      if (planPendingReview) {
+        const existingAlertComment =
+          runComments.find((comment) => comment.body.includes("## QA Writeback Alert")) ?? null;
+        let commentId = existingAlertComment?.id ?? null;
+        const alertType: QaIssueWritebackAlertType = "plan_pending_review";
+
+        if (!existingAlertComment) {
+          const alertComment = await insertIssueComment(
+            issue,
+            buildQaAlertComment({
+              prefix,
+              run: input.run,
+              runAgent: input.runAgent,
+              owner,
+              manager,
+              alertType,
+            }),
+            { agentId: input.runAgent.id, runId: input.run.id },
+          );
+          commentId = alertComment.id;
+
+          await logActivity(db, {
+            companyId: issue.companyId,
+            actorType: "agent",
+            actorId: input.runAgent.id,
+            agentId: input.runAgent.id,
+            runId: input.run.id,
+            action: "issue.comment_added",
+            entityType: "issue",
+            entityId: issue.id,
+            details: {
+              commentId: alertComment.id,
+              identifier: issue.identifier,
+              issueTitle: issue.title,
+              source: "qa_writeback_alert",
+            },
+          });
+        }
+
+        issueWriteback = buildQaIssueWriteback({
+          status: "alerted_inconclusive",
+          verdict: resolvedVerdict ?? verdictFromRun.verdict,
+          source: "alert",
+          canCloseUpstream: false,
+          commentId,
+          writebackAt,
+          alertType,
+        });
+
+        await logActivity(db, {
+          companyId: issue.companyId,
+          actorType: "system",
+          actorId: "paperclip",
+          agentId: input.runAgent.id,
+          runId: input.run.id,
+          action: "issue.qa_writeback_alerted",
+          entityType: "issue",
+          entityId: issue.id,
+          details: {
+            identifier: issue.identifier,
+            alertType,
+            verdict: resolvedVerdict ?? verdictFromRun.verdict,
+            commentId,
+          },
+        });
+      } else if (resolvedVerdict && !hasVerdictConflict) {
         const shouldAddComment = !existingVerdictComment;
         const shouldPatchStatus = issue.status !== desiredStatus || !hasMatchingStatusActivity;
         let commentId = existingVerdictComment?.id ?? null;
