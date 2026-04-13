@@ -11,6 +11,7 @@ export {
   AGENT_ROLE_LABELS,
   AGENT_ICON_NAMES,
   ISSUE_STATUSES,
+  ISSUE_WRITABLE_STATUSES,
   INBOX_MINE_ISSUE_STATUSES,
   INBOX_MINE_ISSUE_STATUS_FILTER,
   ISSUE_PRIORITIES,
@@ -83,6 +84,7 @@ export {
   type AgentRole,
   type AgentIconName,
   type IssueStatus,
+  type IssueWritableStatus,
   type IssuePriority,
   type IssueOriginKind,
   type GoalLevel,
@@ -242,6 +244,14 @@ export type {
   LegacyPlanDocument,
   IssueAttachment,
   IssueLabel,
+  IssueRuntimeState,
+  IssueLifecycleRuntimeState,
+  IssueExecutionRuntimeState,
+  IssueReviewRuntimeState,
+  IssueHumanWaitRuntimeState,
+  IssueRuntimeExecutionState,
+  IssueRuntimeActivationState,
+  IssueRuntimeExecutionDiagnosis,
   Goal,
   Approval,
   ApprovalComment,
@@ -602,6 +612,14 @@ export {
 export { API_PREFIX, API } from "./api.js";
 export { normalizeAgentUrlKey, deriveAgentUrlKey, isUuidLike } from "./agent-url-key.js";
 export { deriveProjectUrlKey, normalizeProjectUrlKey, hasNonAsciiContent } from "./project-url-key.js";
+export {
+  formatIssueDisplayStatus,
+  getIssueDisplayStatus,
+  getIssueDisplayStatusFilterKeys,
+  issueMatchesDisplayStatusFilter,
+  REVIEW_PENDING_DISPLAY_STATUS,
+  type IssueDisplayStatusInput,
+} from "./issue-display-status.js";
 export {
   AGENT_MENTION_SCHEME,
   PROJECT_MENTION_SCHEME,

@@ -54,6 +54,7 @@ import { issueStatusText, issueStatusTextDefault, priorityColor, priorityColorDe
 import { MarkdownEditor, type MarkdownEditorRef, type MentionOption } from "./MarkdownEditor";
 import { AgentIcon } from "./AgentIconPicker";
 import { InlineEntitySelector, type InlineEntityOption } from "./InlineEntitySelector";
+import { ISSUE_WRITABLE_STATUSES } from "@paperclipai/shared/constants";
 
 const DRAFT_KEY = "paperclip:issue-draft";
 const DEBOUNCE_MS = 800;
@@ -86,6 +87,11 @@ type StagedIssueFile = {
 
 const ISSUE_OVERRIDE_ADAPTER_TYPES = new Set(["claude_local", "codex_local", "opencode_local"]);
 const STAGED_FILE_ACCEPT = "image/*,application/pdf,text/plain,text/markdown,application/json,text/csv,text/html,.md,.markdown";
+const writableIssueStatusSet = new Set<string>(ISSUE_WRITABLE_STATUSES);
+
+function coerceWritableIssueStatus(status: string | null | undefined, fallback = "todo") {
+  return status && writableIssueStatusSet.has(status) ? status : fallback;
+}
 
 const ISSUE_THINKING_EFFORT_OPTIONS = {
   claude_local: [
@@ -223,8 +229,9 @@ const statuses = [
   { value: "backlog", label: "Backlog", color: issueStatusText.backlog ?? issueStatusTextDefault },
   { value: "todo", label: "Todo", color: issueStatusText.todo ?? issueStatusTextDefault },
   { value: "in_progress", label: "In Progress", color: issueStatusText.in_progress ?? issueStatusTextDefault },
-  { value: "in_review", label: "In Review", color: issueStatusText.in_review ?? issueStatusTextDefault },
   { value: "done", label: "Done", color: issueStatusText.done ?? issueStatusTextDefault },
+  { value: "blocked", label: "Blocked", color: issueStatusText.blocked ?? issueStatusTextDefault },
+  { value: "cancelled", label: "Cancelled", color: issueStatusText.cancelled ?? issueStatusTextDefault },
 ];
 
 const priorities = [
@@ -513,7 +520,7 @@ export function NewIssueDialog() {
     if (newIssueDefaults.title) {
       setTitle(newIssueDefaults.title);
       setDescription(newIssueDefaults.description ?? "");
-      setStatus(newIssueDefaults.status ?? "todo");
+      setStatus(coerceWritableIssueStatus(newIssueDefaults.status));
       setPriority(newIssueDefaults.priority ?? "");
       const defaultProjectId = newIssueDefaults.projectId ?? "";
       const defaultProject = orderedProjects.find((project) => project.id === defaultProjectId);
@@ -531,7 +538,7 @@ export function NewIssueDialog() {
       const restoredProject = orderedProjects.find((project) => project.id === restoredProjectId);
       setTitle(draft.title);
       setDescription(draft.description);
-      setStatus(draft.status || "todo");
+      setStatus(coerceWritableIssueStatus(draft.status));
       setPriority(draft.priority);
       setAssigneeValue(
         newIssueDefaults.assigneeAgentId || newIssueDefaults.assigneeUserId
@@ -552,7 +559,7 @@ export function NewIssueDialog() {
     } else {
       const defaultProjectId = newIssueDefaults.projectId ?? "";
       const defaultProject = orderedProjects.find((project) => project.id === defaultProjectId);
-      setStatus(newIssueDefaults.status ?? "todo");
+      setStatus(coerceWritableIssueStatus(newIssueDefaults.status));
       setPriority(newIssueDefaults.priority ?? "");
       setProjectId(defaultProjectId);
       setProjectWorkspaceId(defaultProjectWorkspaceIdForProject(defaultProject));

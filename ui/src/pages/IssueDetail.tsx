@@ -74,6 +74,7 @@ import {
 } from "lucide-react";
 import {
   getClosedIsolatedExecutionWorkspaceMessage,
+  getIssueDisplayStatus,
   isClosedIsolatedExecutionWorkspace,
   type ActivityEvent,
   type Agent,
@@ -160,6 +161,7 @@ export function IssueTruthfulnessBanner({
 }) {
   const summary = issue.statusTruthSummary;
   if (!summary) return null;
+  const displayStatus = getIssueDisplayStatus(issue);
 
   const isDrifted = summary.consistency === "drifted";
   const isGuarded = isDrifted || !summary.canExecute || !summary.canClose;
@@ -225,7 +227,7 @@ export function IssueTruthfulnessBanner({
       <div className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
         <div className="space-y-1">
           <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Effective status</p>
-          <StatusBadge status={issue.status} />
+          <StatusBadge status={displayStatus} />
         </div>
         <div className="space-y-1">
           <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Persisted status</p>
@@ -621,6 +623,10 @@ export function IssueDetail() {
       .filter((i) => i.parentId === issue.id)
       .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
   }, [allIssues, issue]);
+  const displayStatus = useMemo(
+    () => (issue ? getIssueDisplayStatus(issue) : null),
+    [issue],
+  );
 
   const commentReassignOptions = useMemo(() => {
     const options: Array<{ id: string; label: string; searchText?: string }> = [];
@@ -1339,7 +1345,7 @@ export function IssueDetail() {
       <div className="space-y-3">
         <div className="flex items-center gap-2 min-w-0 flex-wrap">
           <StatusIcon
-            status={issue.status}
+            status={displayStatus ?? issue.status}
             onChange={(status) => updateIssue.mutate({ status })}
           />
           <PriorityIcon
@@ -1809,7 +1815,7 @@ export function IssueDetail() {
                   className="flex items-center justify-between px-3 py-2 text-sm hover:bg-accent/20 transition-colors"
                 >
                   <div className="flex items-center gap-2 min-w-0">
-                    <StatusIcon status={child.status} />
+                    <StatusIcon status={getIssueDisplayStatus(child)} />
                     <PriorityIcon priority={child.priority} />
                     <span className="font-mono text-muted-foreground shrink-0">
                       {child.identifier ?? child.id.slice(0, 8)}

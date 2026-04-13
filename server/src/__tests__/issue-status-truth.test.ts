@@ -48,7 +48,7 @@ describeEmbeddedPostgres("issueStatusTruthService activity signals", () => {
     await tempDb?.cleanup();
   });
 
-  async function seedIssue(initialStatus: "todo" | "in_progress" | "blocked") {
+  async function seedIssue(initialStatus: "todo" | "in_progress" | "blocked" | "in_review") {
     const companyId = randomUUID();
     const issueId = randomUUID();
     const issueNumber = Math.floor(Math.random() * 10_000) + 1;
@@ -254,6 +254,31 @@ describeEmbeddedPostgres("issueStatusTruthService activity signals", () => {
       persistedStatus: "todo",
       authoritativeStatus: "todo",
       consistency: "consistent",
+    }));
+  });
+
+  it("does not classify a pending plan review as a stalled execution signal", async () => {
+    const { issueId } = await seedIssue("in_progress");
+
+    await db
+      .update(issues)
+      .set({
+        planProposedAt: new Date("2026-04-12T04:10:00.000Z"),
+        planApprovedAt: null,
+        executionRunId: null,
+        updatedAt: new Date("2026-04-12T04:10:00.000Z"),
+      })
+      .where(eq(issues.id, issueId));
+
+    const summary = await issueStatusTruthService(db).getIssueStatusTruthSummary(issueId);
+
+    expect(summary).toEqual(expect.objectContaining({
+      effectiveStatus: "in_progress",
+      persistedStatus: "in_progress",
+      authoritativeStatus: "in_progress",
+      executionState: "idle",
+      executionDiagnosis: null,
+      canExecute: false,
     }));
   });
 

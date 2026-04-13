@@ -21,19 +21,24 @@ import { StatusIcon } from "./StatusIcon";
 import { PriorityIcon } from "./PriorityIcon";
 import { Identity } from "./Identity";
 import type { Issue } from "@paperclipai/shared";
+import {
+  formatIssueDisplayStatus,
+  getIssueDisplayStatus,
+  REVIEW_PENDING_DISPLAY_STATUS,
+} from "@paperclipai/shared/issue-display-status";
 
 const boardStatuses = [
   "backlog",
   "todo",
   "in_progress",
-  "in_review",
+  REVIEW_PENDING_DISPLAY_STATUS,
   "blocked",
   "done",
   "cancelled",
 ];
 
 function statusLabel(status: string): string {
-  return status.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  return formatIssueDisplayStatus(status);
 }
 
 interface Agent {
@@ -61,7 +66,11 @@ function KanbanColumn({
   agents?: Agent[];
   liveIssueIds?: Set<string>;
 }) {
-  const { setNodeRef, isOver } = useDroppable({ id: status });
+  const acceptsDrop = status !== REVIEW_PENDING_DISPLAY_STATUS;
+  const { setNodeRef, isOver } = useDroppable({
+    id: status,
+    disabled: !acceptsDrop,
+  });
 
   return (
     <div className="flex flex-col min-w-[260px] w-[260px] shrink-0">
@@ -118,7 +127,11 @@ function KanbanCard({
     transform,
     transition,
     isDragging,
-  } = useSortable({ id: issue.id, data: { issue } });
+  } = useSortable({
+    id: issue.id,
+    data: { issue },
+    disabled: getIssueDisplayStatus(issue) === REVIEW_PENDING_DISPLAY_STATUS,
+  });
 
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -198,8 +211,9 @@ export function KanbanBoard({
       grouped[status] = [];
     }
     for (const issue of issues) {
-      if (grouped[issue.status]) {
-        grouped[issue.status].push(issue);
+      const displayStatus = getIssueDisplayStatus(issue);
+      if (grouped[displayStatus]) {
+        grouped[displayStatus].push(issue);
       }
     }
     return grouped;
@@ -222,18 +236,22 @@ export function KanbanBoard({
     const issueId = active.id as string;
     const issue = issues.find((i) => i.id === issueId);
     if (!issue) return;
+    if (getIssueDisplayStatus(issue) === REVIEW_PENDING_DISPLAY_STATUS) return;
 
     // Determine target status: the "over" could be a column id (status string)
     // or another card's id. Find which column the "over" belongs to.
     let targetStatus: string | null = null;
 
-    if (boardStatuses.includes(over.id as string)) {
+    if (boardStatuses.includes(over.id as string) && over.id !== REVIEW_PENDING_DISPLAY_STATUS) {
       targetStatus = over.id as string;
     } else {
       // It's a card - find which column it's in
       const targetIssue = issues.find((i) => i.id === over.id);
       if (targetIssue) {
-        targetStatus = targetIssue.status;
+        const targetDisplayStatus = getIssueDisplayStatus(targetIssue);
+        if (targetDisplayStatus !== REVIEW_PENDING_DISPLAY_STATUS) {
+          targetStatus = targetIssue.status;
+        }
       }
     }
 

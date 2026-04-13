@@ -193,7 +193,7 @@ describe("approval routes idempotent retries", () => {
     mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([
       {
         id: "issue-1",
-        status: "in_review",
+        status: "in_progress",
         planProposedAt: new Date("2026-04-10T04:55:00.000Z"),
         planApprovedAt: null,
       },
@@ -207,10 +207,10 @@ describe("approval routes idempotent retries", () => {
     expect(mockIssueService.update).toHaveBeenCalledWith(
       "issue-1",
       expect.objectContaining({
-        status: "todo",
         planApprovedAt: decidedAt,
       }),
     );
+    expect(mockIssueService.update.mock.calls[0]?.[1]).not.toHaveProperty("status");
     expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
       "agent-1",
       expect.objectContaining({
@@ -234,7 +234,7 @@ describe("approval routes idempotent retries", () => {
     mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([
       {
         id: "issue-1",
-        status: "in_review",
+        status: "in_progress",
         planProposedAt: new Date("2026-04-10T04:55:00.000Z"),
         planApprovedAt: null,
       },
@@ -248,11 +248,11 @@ describe("approval routes idempotent retries", () => {
     expect(mockIssueService.update).toHaveBeenCalledWith(
       "issue-1",
       expect.objectContaining({
-        status: "todo",
         planProposedAt: null,
         planApprovedAt: null,
       }),
     );
+    expect(mockIssueService.update.mock.calls[0]?.[1]).not.toHaveProperty("status");
   });
 
   it("allows the targeted lead agent to approve a routed work-plan approval", async () => {

@@ -1,9 +1,15 @@
 import { and, desc, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { approvals, issueApprovals, issues } from "@paperclipai/db";
-import type { ApprovalRoutingMode, ApprovalEscalationReason } from "@paperclipai/shared";
+import {
+  APPROVAL_ESCALATION_REASONS,
+  APPROVAL_ROUTING_MODES,
+} from "@paperclipai/shared/constants";
 import { notFound, unprocessable } from "../errors.js";
 import { redactEventPayload } from "../redaction.js";
+
+type ApprovalRoutingMode = (typeof APPROVAL_ROUTING_MODES)[number];
+type ApprovalEscalationReason = (typeof APPROVAL_ESCALATION_REASONS)[number];
 
 interface LinkActor {
   agentId?: string | null;

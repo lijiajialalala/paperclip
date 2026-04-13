@@ -26,6 +26,7 @@ import {
   isClosedIsolatedExecutionWorkspace,
   type ExecutionWorkspace,
 } from "@paperclipai/shared";
+import { issueMatchesDisplayStatusFilter } from "@paperclipai/shared/issue-display-status";
 import { trackAgentTaskCompleted } from "@paperclipai/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";
 import type { StorageService } from "../storage/types.js";
@@ -58,6 +59,7 @@ import { shouldWakeAssigneeOnCheckout } from "./issues-checkout-wakeup.js";
 import { isAllowedContentType, MAX_ATTACHMENT_BYTES } from "../attachment-types.js";
 import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
 import { applyEffectiveStatus, issueStatusTruthService } from "../services/issue-status-truth.js";
+import { attachIssueRuntimeState } from "../services/issue-runtime-state.js";
 import { platformUnblockService } from "../services/platform-unblock.js";
 import { qaIssueStateService } from "../services/qa-issue-state.js";
 
@@ -783,7 +785,7 @@ export function issueRoutes(
     assertCompanyAccess(req, companyId);
     const includePlatformUnblock = parseBooleanQuery(req.query.includePlatformUnblock);
     const requestedStatusFilter = typeof req.query.status === "string" && req.query.status.trim().length > 0
-      ? new Set(req.query.status.split(",").map((status) => status.trim()).filter(Boolean))
+      ? new Set(req.query.status.split(",").map((status) => status.trim().toLowerCase()).filter(Boolean))
       : null;
     const assigneeUserFilterRaw = req.query.assigneeUserId as string | undefined;
     const touchedByUserFilterRaw = req.query.touchedByUserId as string | undefined;
@@ -869,7 +871,7 @@ export function issueRoutes(
     ]);
 
     const serializedIssues = result.map((issue) => {
-      const serialized = applyEffectiveStatus(issue, statusSummaries.get(issue.id) ?? null);
+      const serialized = attachIssueRuntimeState(applyEffectiveStatus(issue, statusSummaries.get(issue.id) ?? null));
       if (!includePlatformUnblock) return serialized;
       return {
         ...serialized,
@@ -879,7 +881,7 @@ export function issueRoutes(
 
     res.json(
       requestedStatusFilter
-        ? serializedIssues.filter((issue) => requestedStatusFilter.has(issue.status))
+        ? serializedIssues.filter((issue) => issueMatchesDisplayStatusFilter(issue, requestedStatusFilter))
         : serializedIssues,
     );
   });
@@ -953,7 +955,7 @@ export function issueRoutes(
       documentsSvc.getIssueDocumentPayload(issue),
     ]);
     const statusSummary = await statusTruth.getIssueStatusTruthSummary(issue.id);
-    const serializedIssue = applyEffectiveStatus(issue, statusSummary);
+    const serializedIssue = attachIssueRuntimeState(applyEffectiveStatus(issue, statusSummary));
     const mentionedProjects = mentionedProjectIds.length > 0
       ? await projectsSvc.listByIds(issue.companyId, mentionedProjectIds)
       : [];
@@ -983,7 +985,7 @@ export function issueRoutes(
     }
     assertCompanyAccess(req, issue.companyId);
     const statusSummary = await statusTruth.getIssueStatusTruthSummary(issue.id);
-    const serializedIssue = applyEffectiveStatus(issue, statusSummary);
+    const serializedIssue = attachIssueRuntimeState(applyEffectiveStatus(issue, statusSummary));
 
     const wakeCommentId =
       typeof req.query.wakeCommentId === "string" && req.query.wakeCommentId.trim().length > 0
@@ -1007,6 +1009,7 @@ export function issueRoutes(
         description: serializedIssue.description,
         status: serializedIssue.status,
         statusTruthSummary: serializedIssue.statusTruthSummary ?? null,
+        runtimeState: serializedIssue.runtimeState ?? null,
         priority: serializedIssue.priority,
         projectId: serializedIssue.projectId,
         goalId: goal?.id ?? serializedIssue.goalId,
@@ -1961,7 +1964,7 @@ export function issueRoutes(
       existing.planProposedAt &&
       !existing.planApprovedAt
     ) {
-      res.status(409).json({ error: "Cannot change issue status while a proposed plan is pending review. Status is locked to in_review." });
+      res.status(409).json({ error: "Cannot change lifecycle status while a proposed plan is pending review." });
       return;
     }
     if (commentBody && reopenRequested === true && isClosed && updateFields.status === undefined) {
@@ -2276,8 +2279,7 @@ export function issueRoutes(
     const planReviewPending =
       req.actor.type === "agent" &&
       !!issue.planProposedAt &&
-      !issue.planApprovedAt &&
-      issue.status === "in_review";
+      !issue.planApprovedAt;
 
     if (planReviewPending) {
       res.status(409).json({
@@ -2390,31 +2392,18 @@ export function issueRoutes(
       runId: actor.runId,
     });
 
-    // 2. Update issue: set planProposedAt, status → in_review
+    // 2. Freeze execution and register the review request without mutating lifecycle status
     const now = new Date();
     const updated = await svc.update(id, {
-      status: "in_review",
       planProposedAt: now,
       planApprovedAt: null,
+      checkoutRunId: null,
+      executionRunId: null,
+      executionLockedAt: null,
     });
-    try {
-      await logActivity(db, {
-        companyId: issue.companyId,
-        actorType: actor.actorType,
-        actorId: actor.actorId,
-        agentId: actor.agentId,
-        runId: actor.runId,
-        action: "issue.updated",
-        entityType: "issue",
-        entityId: issue.id,
-        details: {
-          status: "in_review",
-          source: "plan_proposed",
-          _previous: { status: issue.status },
-        },
-      });
-    } catch (err) {
-      logger.warn({ err, issueId: issue.id }, "failed to log plan proposed status transition");
+    if (!updated) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
     }
 
     // 3. Create a formal Approval record so the plan appears in the Inbox
@@ -2549,7 +2538,7 @@ export function issueRoutes(
       }
     })();
 
-    res.status(201).json({ issue: updated, comment, approvalId: planApproval.id });
+    res.status(201).json({ issue: attachIssueRuntimeState(updated), comment, approvalId: planApproval.id });
   });
 
   // ── Approve Plan ──────────────────────────────────────────────────────────
@@ -2574,28 +2563,11 @@ export function issueRoutes(
     if (!(await assertCanReviewPlan(req, res, issue, "approve"))) return;
 
     const updated = await svc.update(id, {
-      status: "todo",
       planApprovedAt: new Date(),
     });
-    const actor = getActorInfo(req);
-    try {
-      await logActivity(db, {
-        companyId: issue.companyId,
-        actorType: actor.actorType,
-        actorId: actor.actorId,
-        agentId: actor.agentId,
-        runId: actor.runId,
-        action: "issue.updated",
-        entityType: "issue",
-        entityId: issue.id,
-        details: {
-          status: "todo",
-          source: "plan_approved",
-          _previous: { status: issue.status },
-        },
-      });
-    } catch (err) {
-      logger.warn({ err, issueId: issue.id }, "failed to log plan approved status transition");
+    if (!updated) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
     }
 
     // Sync linked work_plan approval to approved
@@ -2621,7 +2593,7 @@ export function issueRoutes(
 
     await notifyPlanReview(req, issue, "approved");
 
-    res.json({ issue: updated });
+    res.json({ issue: attachIssueRuntimeState(updated) });
   });
 
   // ── Reject Plan ──────────────────────────────────────────────────────────
@@ -2653,29 +2625,12 @@ export function issueRoutes(
     if (!(await assertCanReviewPlan(req, res, issue, "reject"))) return;
 
     const updated = await svc.update(id, {
-      status: "todo",
       planProposedAt: null,
       planApprovedAt: null,
     });
-    const actor = getActorInfo(req);
-    try {
-      await logActivity(db, {
-        companyId: issue.companyId,
-        actorType: actor.actorType,
-        actorId: actor.actorId,
-        agentId: actor.agentId,
-        runId: actor.runId,
-        action: "issue.updated",
-        entityType: "issue",
-        entityId: issue.id,
-        details: {
-          status: "todo",
-          source: "plan_rejected",
-          _previous: { status: issue.status },
-        },
-      });
-    } catch (err) {
-      logger.warn({ err, issueId: issue.id }, "failed to log plan rejected status transition");
+    if (!updated) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
     }
 
     // Sync linked work_plan approval to rejected
@@ -2701,7 +2656,7 @@ export function issueRoutes(
 
     await notifyPlanReview(req, issue, "rejected", feedback);
 
-    res.json({ issue: updated });
+    res.json({ issue: attachIssueRuntimeState(updated) });
   });
 
   router.post("/issues/:id/release", async (req, res) => {

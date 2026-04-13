@@ -3,7 +3,7 @@ import { approvals } from "@paperclipai/db";
 import {
   APPROVAL_ESCALATION_REASONS,
   APPROVAL_ROUTING_MODES,
-} from "@paperclipai/shared";
+} from "@paperclipai/shared/constants";
 
 type ApprovalRoutingMode = (typeof APPROVAL_ROUTING_MODES)[number];
 type ApprovalEscalationReason = (typeof APPROVAL_ESCALATION_REASONS)[number];

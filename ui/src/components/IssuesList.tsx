@@ -24,14 +24,19 @@ import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/component
 import { CircleDot, Plus, Filter, ArrowUpDown, Layers, Check, X, ChevronRight, List, Columns3, User, Search } from "lucide-react";
 import { KanbanBoard } from "./KanbanBoard";
 import type { Issue } from "@paperclipai/shared";
+import {
+  formatIssueDisplayStatus,
+  getIssueDisplayStatus,
+  REVIEW_PENDING_DISPLAY_STATUS,
+} from "@paperclipai/shared/issue-display-status";
 
 /* ── Helpers ── */
 
-const statusOrder = ["in_progress", "todo", "backlog", "in_review", "blocked", "done", "cancelled"];
+const statusOrder = ["in_progress", "todo", "backlog", REVIEW_PENDING_DISPLAY_STATUS, "blocked", "done", "cancelled"];
 const priorityOrder = ["critical", "high", "medium", "low"];
 
 function statusLabel(status: string): string {
-  return status.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  return formatIssueDisplayStatus(status);
 }
 
 /* ── View state ── */
@@ -64,14 +69,21 @@ const defaultViewState: IssueViewState = {
 
 const quickFilterPresets = [
   { label: "All", statuses: [] as string[] },
-  { label: "Active", statuses: ["todo", "in_progress", "in_review", "blocked"] },
+  { label: "Active", statuses: ["todo", "in_progress", REVIEW_PENDING_DISPLAY_STATUS, "blocked"] },
   { label: "Backlog", statuses: ["backlog"] },
   { label: "Done", statuses: ["done", "cancelled"] },
 ];
 function getViewState(key: string): IssueViewState {
   try {
     const raw = localStorage.getItem(key);
-    if (raw) return { ...defaultViewState, ...JSON.parse(raw) };
+    if (raw) {
+      const next = { ...defaultViewState, ...JSON.parse(raw) } as IssueViewState;
+      return {
+        ...next,
+        statuses: next.statuses.map((status) =>
+          status === "in_review" ? REVIEW_PENDING_DISPLAY_STATUS : status),
+      };
+    }
   } catch { /* ignore */ }
   return { ...defaultViewState };
 }
@@ -93,7 +105,9 @@ function toggleInArray(arr: string[], value: string): string[] {
 
 function applyFilters(issues: Issue[], state: IssueViewState, currentUserId?: string | null): Issue[] {
   let result = issues;
-  if (state.statuses.length > 0) result = result.filter((i) => state.statuses.includes(i.status));
+  if (state.statuses.length > 0) {
+    result = result.filter((issue) => state.statuses.includes(getIssueDisplayStatus(issue)));
+  }
   if (state.priorities.length > 0) result = result.filter((i) => state.priorities.includes(i.priority));
   if (state.assignees.length > 0) {
     result = result.filter((issue) => {
@@ -116,7 +130,10 @@ function sortIssues(issues: Issue[], state: IssueViewState): Issue[] {
   sorted.sort((a, b) => {
     switch (state.sortField) {
       case "status":
-        return dir * (statusOrder.indexOf(a.status) - statusOrder.indexOf(b.status));
+        return dir * (
+          statusOrder.indexOf(getIssueDisplayStatus(a))
+          - statusOrder.indexOf(getIssueDisplayStatus(b))
+        );
       case "priority":
         return dir * (priorityOrder.indexOf(a.priority) - priorityOrder.indexOf(b.priority));
       case "title":
@@ -272,7 +289,7 @@ export function IssuesList({
       return [{ key: "__all", label: null as string | null, items: filtered }];
     }
     if (viewState.groupBy === "status") {
-      const groups = groupBy(filtered, (i) => i.status);
+      const groups = groupBy(filtered, (issue) => getIssueDisplayStatus(issue));
       return statusOrder
         .filter((s) => groups[s]?.length)
         .map((s) => ({ key: s, label: statusLabel(s), items: groups[s]! }));
@@ -304,9 +321,11 @@ export function IssuesList({
     const defaults: Record<string, string> = {};
     if (projectId) defaults.projectId = projectId;
     if (groupKey) {
-      if (viewState.groupBy === "status") defaults.status = groupKey;
-      else if (viewState.groupBy === "priority") defaults.priority = groupKey;
-      else if (viewState.groupBy === "assignee" && groupKey !== "__unassigned") {
+      if (viewState.groupBy === "status" && groupKey !== REVIEW_PENDING_DISPLAY_STATUS) {
+        defaults.status = groupKey;
+      } else if (viewState.groupBy === "priority") {
+        defaults.priority = groupKey;
+      } else if (viewState.groupBy === "assignee" && groupKey !== "__unassigned") {
         if (groupKey.startsWith("__user:")) defaults.assigneeUserId = groupKey.slice("__user:".length);
         else defaults.assigneeAgentId = groupKey;
       }
@@ -363,87 +382,89 @@ export function IssuesList({
           </div>
         )}
         <CollapsibleContent>
-          {group.items.map((issue) => (
-            <IssueRow
-              key={issue.id}
-              issue={issue}
-              issueLinkState={issueLinkState}
-              desktopLeadingSpacer
-              mobileLeading={(
-                <span
-                  onClick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                  }}
-                >
-                  <StatusIcon
-                    status={issue.status}
-                    onChange={(s) => onUpdateIssue(issue.id, { status: s })}
-                  />
-                </span>
-              )}
-              desktopMetaLeading={(
-                <>
+          {group.items.map((issue) => {
+            const displayStatus = getIssueDisplayStatus(issue);
+            return (
+              <IssueRow
+                key={issue.id}
+                issue={issue}
+                issueLinkState={issueLinkState}
+                desktopLeadingSpacer
+                mobileLeading={(
                   <span
-                    className="hidden shrink-0 sm:inline-flex"
                     onClick={(e) => {
                       e.preventDefault();
                       e.stopPropagation();
                     }}
                   >
                     <StatusIcon
-                      status={issue.status}
+                      status={displayStatus}
                       onChange={(s) => onUpdateIssue(issue.id, { status: s })}
                     />
                   </span>
-                  <span className="shrink-0 font-mono text-xs text-muted-foreground">
-                    {issue.identifier ?? issue.id.slice(0, 8)}
-                  </span>
-                  {liveIssueIds?.has(issue.id) && (
-                    <span className="inline-flex items-center gap-1 rounded-full bg-blue-500/10 px-1.5 py-0.5 sm:gap-1.5 sm:px-2">
-                      <span className="relative flex h-2 w-2">
-                        <span className="absolute inline-flex h-full w-full animate-pulse rounded-full bg-blue-400 opacity-75" />
-                        <span className="relative inline-flex h-2 w-2 rounded-full bg-blue-500" />
-                      </span>
-                      <span className="hidden text-[11px] font-medium text-blue-600 dark:text-blue-400 sm:inline">
-                        Live
-                      </span>
+                )}
+                desktopMetaLeading={(
+                  <>
+                    <span
+                      className="hidden shrink-0 sm:inline-flex"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                      }}
+                    >
+                      <StatusIcon
+                        status={displayStatus}
+                        onChange={(s) => onUpdateIssue(issue.id, { status: s })}
+                      />
                     </span>
-                  )}
-                </>
-              )}
-              mobileMeta={timeAgo(issue.updatedAt)}
-              desktopTrailing={(
-                <>
-                  {(issue.labels ?? []).length > 0 && (
-                    <span className="hidden items-center gap-1 overflow-hidden md:flex md:max-w-[240px]">
-                      {(issue.labels ?? []).slice(0, 3).map((label) => (
-                        <span
-                          key={label.id}
-                          className="inline-flex items-center rounded-full border px-1.5 py-0.5 text-[10px] font-medium"
-                          style={{
-                            borderColor: label.color,
-                            color: pickTextColorForPillBg(label.color, 0.12),
-                            backgroundColor: `${label.color}1f`,
-                          }}
-                        >
-                          {label.name}
-                        </span>
-                      ))}
-                      {(issue.labels ?? []).length > 3 && (
-                        <span className="text-[10px] text-muted-foreground">
-                          +{(issue.labels ?? []).length - 3}
-                        </span>
-                      )}
+                    <span className="shrink-0 font-mono text-xs text-muted-foreground">
+                      {issue.identifier ?? issue.id.slice(0, 8)}
                     </span>
-                  )}
-                  <Popover
-                    open={assigneePickerIssueId === issue.id}
-                    onOpenChange={(open) => {
-                      setAssigneePickerIssueId(open ? issue.id : null);
-                      if (!open) setAssigneeSearch("");
-                    }}
-                  >
+                    {liveIssueIds?.has(issue.id) && (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-blue-500/10 px-1.5 py-0.5 sm:gap-1.5 sm:px-2">
+                        <span className="relative flex h-2 w-2">
+                          <span className="absolute inline-flex h-full w-full animate-pulse rounded-full bg-blue-400 opacity-75" />
+                          <span className="relative inline-flex h-2 w-2 rounded-full bg-blue-500" />
+                        </span>
+                        <span className="hidden text-[11px] font-medium text-blue-600 dark:text-blue-400 sm:inline">
+                          Live
+                        </span>
+                      </span>
+                    )}
+                  </>
+                )}
+                mobileMeta={timeAgo(issue.updatedAt)}
+                desktopTrailing={(
+                  <>
+                    {(issue.labels ?? []).length > 0 && (
+                      <span className="hidden items-center gap-1 overflow-hidden md:flex md:max-w-[240px]">
+                        {(issue.labels ?? []).slice(0, 3).map((label) => (
+                          <span
+                            key={label.id}
+                            className="inline-flex items-center rounded-full border px-1.5 py-0.5 text-[10px] font-medium"
+                            style={{
+                              borderColor: label.color,
+                              color: pickTextColorForPillBg(label.color, 0.12),
+                              backgroundColor: `${label.color}1f`,
+                            }}
+                          >
+                            {label.name}
+                          </span>
+                        ))}
+                        {(issue.labels ?? []).length > 3 && (
+                          <span className="text-[10px] text-muted-foreground">
+                            +{(issue.labels ?? []).length - 3}
+                          </span>
+                        )}
+                      </span>
+                    )}
+                    <Popover
+                      open={assigneePickerIssueId === issue.id}
+                      onOpenChange={(open) => {
+                        setAssigneePickerIssueId(open ? issue.id : null);
+                        if (!open) setAssigneeSearch("");
+                      }}
+                    >
                     <PopoverTrigger asChild>
                       <button
                         className="flex w-[180px] shrink-0 items-center rounded-md px-2 py-1 transition-colors hover:bg-accent/50"
@@ -544,7 +565,8 @@ export function IssuesList({
               )}
               trailingMeta={formatDate(issue.createdAt)}
             />
-          ))}
+            );
+          })}
         </CollapsibleContent>
       </Collapsible>
     ));

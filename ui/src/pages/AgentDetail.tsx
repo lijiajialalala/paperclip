@@ -78,6 +78,7 @@ import { Input } from "@/components/ui/input";
 import { AgentIcon, AgentIconPicker } from "../components/AgentIconPicker";
 import { RunTranscriptView, type TranscriptMode } from "../components/transcript/RunTranscriptView";
 import {
+  getIssueDisplayStatus,
   isUuidLike,
   type Agent,
   type AgentSkillEntry,
@@ -1307,7 +1308,7 @@ function AgentOverview({
                 identifier={issue.identifier ?? issue.id.slice(0, 8)}
                 title={issue.title}
                 to={`/issues/${issue.identifier ?? issue.id}`}
-                trailing={<StatusBadge status={issue.status} />}
+                trailing={<StatusBadge status={getIssueDisplayStatus(issue)} />}
               />
             ))}
             {assignedIssues.length > 10 && (
@@ -3358,7 +3359,7 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
                 className="flex items-center justify-between w-full px-3 py-2 text-xs hover:bg-accent/20 transition-colors text-left no-underline text-inherit"
               >
                 <div className="flex items-center gap-2 min-w-0">
-                  <StatusBadge status={issue.status} />
+                  <StatusBadge status={getIssueDisplayStatus(issue)} />
                   <span className="truncate">{issue.title}</span>
                 </div>
                 <span className="font-mono text-muted-foreground shrink-0 ml-2">{issue.identifier ?? issue.issueId.slice(0, 8)}</span>

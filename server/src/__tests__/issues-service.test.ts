@@ -1510,6 +1510,87 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       expect(persisted.executionLockedAt).not.toBeNull();
     });
 
+    it("clears execution metadata when an issue leaves in_progress through a status update", async () => {
+      const companyId = randomUUID();
+      const agentId = randomUUID();
+      const issueId = randomUUID();
+      const runId = randomUUID();
+
+      await db.insert(companies).values({
+        id: companyId,
+        name: "Paperclip",
+        issuePrefix: "CMPA",
+        requireBoardApprovalForNewAgents: false,
+      });
+
+      await db.insert(agents).values({
+        id: agentId,
+        companyId,
+        name: "Engineer",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      });
+
+      await db.insert(heartbeatRuns).values({
+        id: runId,
+        companyId,
+        agentId,
+        invocationSource: "assignment",
+        triggerDetail: "system",
+        status: "running",
+        contextSnapshot: { issueId },
+        resultJson: {},
+        errorCode: null,
+        error: null,
+        processLossRetryCount: 0,
+        startedAt: new Date("2026-04-08T00:00:00.000Z"),
+        finishedAt: null,
+        createdAt: new Date("2026-04-08T00:00:00.000Z"),
+        updatedAt: new Date("2026-04-08T00:00:00.000Z"),
+      });
+
+      await db.insert(issues).values({
+        id: issueId,
+        companyId,
+        issueNumber: 78,
+        identifier: "CMPA-78",
+        title: "Execution cleanup issue",
+        status: "in_progress",
+        priority: "medium",
+        assigneeAgentId: agentId,
+        checkoutRunId: runId,
+        executionRunId: runId,
+        executionLockedAt: new Date("2026-04-08T00:00:00.000Z"),
+      });
+
+      const updated = await svc.update(issueId, { status: "todo" });
+
+      expect(updated?.status).toBe("todo");
+      expect(updated?.checkoutRunId).toBeNull();
+      expect(updated?.executionRunId).toBeNull();
+      expect(updated?.executionLockedAt).toBeNull();
+
+      const persisted = await db
+        .select({
+          status: issues.status,
+          checkoutRunId: issues.checkoutRunId,
+          executionRunId: issues.executionRunId,
+          executionLockedAt: issues.executionLockedAt,
+        })
+        .from(issues)
+        .where(eq(issues.id, issueId))
+        .then((rows) => rows[0]!);
+
+      expect(persisted.status).toBe("todo");
+      expect(persisted.checkoutRunId).toBeNull();
+      expect(persisted.executionRunId).toBeNull();
+      expect(persisted.executionLockedAt).toBeNull();
+    });
+
     it("marks ancestors done when their only child branch is completed", async () => {
       const { rootId, parentId, childId } = await seedAncestorFixture({
         rootStatus: "in_progress",

@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { pickTextColorForPillBg } from "@/lib/color-contrast";
 import { Link } from "@/lib/router";
 import type { Issue } from "@paperclipai/shared";
+import { getIssueDisplayStatus } from "@paperclipai/shared/issue-display-status";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { agentsApi } from "../api/agents";
 import { authApi } from "../api/auth";
@@ -221,6 +222,7 @@ export function IssueProperties({ issue, onUpdate, inline }: IssuePropertiesProp
   const userLabel = (userId: string | null | undefined) => formatAssigneeUserLabel(userId, currentUserId);
   const assigneeUserLabel = userLabel(issue.assigneeUserId);
   const creatorUserLabel = userLabel(issue.createdByUserId);
+  const displayStatus = getIssueDisplayStatus(issue);
 
   const labelsTrigger = (issue.labels ?? []).length > 0 ? (
     <div className="flex items-center gap-1 flex-wrap">
@@ -493,7 +495,7 @@ export function IssueProperties({ issue, onUpdate, inline }: IssuePropertiesProp
       <div className="space-y-1">
         <PropertyRow label="Status">
           <StatusIcon
-            status={issue.status}
+            status={displayStatus}
             onChange={(status) => onUpdate({ status })}
             showLabel
           />

@@ -110,6 +110,8 @@ export function activityService(db: Db) {
           title: issues.title,
           status: issues.status,
           priority: issues.priority,
+          planProposedAt: issues.planProposedAt,
+          planApprovedAt: issues.planApprovedAt,
         })
         .from(activityLog)
         .innerJoin(issues, eq(activityLog.entityId, issueIdAsText))
@@ -138,6 +140,8 @@ export function activityService(db: Db) {
           title: issues.title,
           status: issues.status,
           priority: issues.priority,
+          planProposedAt: issues.planProposedAt,
+          planApprovedAt: issues.planApprovedAt,
         })
         .from(issues)
         .where(

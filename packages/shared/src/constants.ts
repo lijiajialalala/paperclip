@@ -119,11 +119,21 @@ export const ISSUE_STATUSES = [
 ] as const;
 export type IssueStatus = (typeof ISSUE_STATUSES)[number];
 
+export const ISSUE_WRITABLE_STATUSES = [
+  "backlog",
+  "todo",
+  "in_progress",
+  "done",
+  "blocked",
+  "cancelled",
+] as const;
+export type IssueWritableStatus = (typeof ISSUE_WRITABLE_STATUSES)[number];
+
 export const INBOX_MINE_ISSUE_STATUSES = [
   "backlog",
   "todo",
   "in_progress",
-  "in_review",
+  "review_pending",
   "blocked",
   "done",
 ] as const;

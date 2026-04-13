@@ -19,6 +19,8 @@ export interface IssueForRun {
   title: string;
   status: string;
   priority: string;
+  planProposedAt?: string | null;
+  planApprovedAt?: string | null;
 }
 
 export const activityApi = {

@@ -85,11 +85,10 @@ export function approvalRoutes(db: Db) {
       if (approval.status === "approved") {
         const planStillPending =
           !linkedIssue.planApprovedAt
-          && (Boolean(linkedIssue.planProposedAt) || linkedIssue.status === "in_review");
+          && Boolean(linkedIssue.planProposedAt);
         if (!planStillPending) continue;
 
         await issuesSvc.update(linkedIssue.id, {
-          status: "todo",
           planApprovedAt: resolvedAt,
         });
         continue;
@@ -97,13 +96,11 @@ export function approvalRoutes(db: Db) {
 
       if (approval.status === "rejected") {
         const planNeedsReset =
-          linkedIssue.status === "in_review"
-          || Boolean(linkedIssue.planProposedAt)
+          Boolean(linkedIssue.planProposedAt)
           || Boolean(linkedIssue.planApprovedAt);
         if (!planNeedsReset) continue;
 
         await issuesSvc.update(linkedIssue.id, {
-          status: "todo",
           planProposedAt: null,
           planApprovedAt: null,
         });

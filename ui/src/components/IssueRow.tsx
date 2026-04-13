@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import type { Issue } from "@paperclipai/shared";
 import { Link } from "@/lib/router";
 import { X } from "lucide-react";
+import { getIssueDisplayStatus } from "@paperclipai/shared/issue-display-status";
 import { createIssueDetailPath } from "../lib/issueDetailBreadcrumb";
 import { cn } from "../lib/utils";
 import { StatusIcon } from "./StatusIcon";
@@ -46,6 +47,7 @@ export function IssueRow({
   const showUnreadSlot = unreadState !== null;
   const showUnreadDot = unreadState === "visible" || unreadState === "fading";
   const selectedStatusClass = selected ? "!text-muted-foreground !border-muted-foreground" : undefined;
+  const displayStatus = getIssueDisplayStatus(issue);
 
   return (
     <Link
@@ -59,7 +61,7 @@ export function IssueRow({
       )}
     >
       <span className="shrink-0 pt-px sm:hidden">
-        {mobileLeading ?? <StatusIcon status={issue.status} className={selectedStatusClass} />}
+        {mobileLeading ?? <StatusIcon status={displayStatus} className={selectedStatusClass} />}
       </span>
       <span className="flex min-w-0 flex-1 flex-col gap-1 sm:contents">
         <span className="line-clamp-2 text-sm sm:order-2 sm:min-w-0 sm:flex-1 sm:truncate sm:line-clamp-none">
@@ -72,7 +74,7 @@ export function IssueRow({
           {desktopMetaLeading ?? (
             <>
               <span className="hidden shrink-0 sm:inline-flex">
-                <StatusIcon status={issue.status} className={selectedStatusClass} />
+                <StatusIcon status={displayStatus} className={selectedStatusClass} />
               </span>
               <span className="shrink-0 font-mono text-xs text-muted-foreground">
                 {identifier}

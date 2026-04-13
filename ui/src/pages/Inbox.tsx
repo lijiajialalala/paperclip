@@ -2,6 +2,7 @@ import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } fro
 import { Link, useLocation, useNavigate } from "@/lib/router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { INBOX_MINE_ISSUE_STATUS_FILTER } from "@paperclipai/shared";
+import { getIssueDisplayStatus } from "@paperclipai/shared/issue-display-status";
 import { approvalsApi } from "../api/approvals";
 import { accessApi } from "../api/access";
 import { authApi } from "../api/auth";
@@ -188,11 +189,13 @@ export function InboxIssueMetaLeading({
   showStatus?: boolean;
   showIdentifier?: boolean;
 }) {
+  const displayStatus = getIssueDisplayStatus(issue);
+
   return (
     <>
       {showStatus ? (
         <span className="hidden shrink-0 sm:inline-flex">
-          <StatusIcon status={issue.status} />
+          <StatusIcon status={displayStatus} />
         </span>
       ) : null}
       {showIdentifier ? (

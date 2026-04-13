@@ -3,11 +3,13 @@ import { cn } from "../lib/utils";
 import { issueStatusIcon, issueStatusIconDefault } from "../lib/status-colors";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Button } from "@/components/ui/button";
+import { formatIssueDisplayStatus } from "@paperclipai/shared/issue-display-status";
+import { ISSUE_WRITABLE_STATUSES } from "@paperclipai/shared/constants";
 
-const allStatuses = ["backlog", "todo", "in_progress", "in_review", "done", "cancelled", "blocked"];
+const allStatuses = [...ISSUE_WRITABLE_STATUSES];
 
 function statusLabel(status: string): string {
-  return status.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  return formatIssueDisplayStatus(status);
 }
 
 interface StatusIconProps {

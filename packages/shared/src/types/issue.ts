@@ -184,6 +184,59 @@ export interface IssueStatusTruthSummary {
   evidence: PlatformEvidenceRef[];
 }
 
+export type IssueRuntimeExecutionState = "idle" | "active" | "stalled";
+
+export type IssueRuntimeActivationState =
+  | "runnable"
+  | "awaiting_review"
+  | "awaiting_human"
+  | "blocked"
+  | "closed";
+
+export type IssueRuntimeExecutionDiagnosis =
+  | "plan_review_pending"
+  | "waiting_for_human_reply"
+  | "no_active_run"
+  | null;
+
+export interface IssueLifecycleRuntimeState {
+  status: IssueStatus;
+  isTerminal: boolean;
+  isBlocked: boolean;
+}
+
+export interface IssueExecutionRuntimeState {
+  state: IssueRuntimeExecutionState;
+  activation: IssueRuntimeActivationState;
+  diagnosis: IssueRuntimeExecutionDiagnosis;
+  canStart: boolean;
+  checkoutRunId: string | null;
+  executionRunId: string | null;
+  executionLockedAt: Date | string | null;
+  lastExecutionSignalAt: string | null;
+  stalledSince: string | null;
+}
+
+export interface IssueReviewRuntimeState {
+  state: "none" | "pending" | "approved";
+  kind: "work_plan" | null;
+  requestedAt: Date | string | null;
+  approvedAt: Date | string | null;
+}
+
+export interface IssueHumanWaitRuntimeState {
+  state: "none" | "reply_needed";
+  requestedAt: Date | string | null;
+  commentId: string | null;
+}
+
+export interface IssueRuntimeState {
+  lifecycle: IssueLifecycleRuntimeState;
+  execution: IssueExecutionRuntimeState;
+  review: IssueReviewRuntimeState;
+  humanWait: IssueHumanWaitRuntimeState;
+}
+
 export type DocumentFormat = "markdown";
 
 export interface IssueDocumentSummary {
@@ -275,6 +328,7 @@ export interface Issue {
   project?: Project | null;
   goal?: Goal | null;
   statusTruthSummary?: IssueStatusTruthSummary | null;
+  runtimeState?: IssueRuntimeState | null;
   qaSummary?: IssueQaSummary | null;
   platformUnblockSummary?: IssuePlatformUnblockSummary | null;
   currentExecutionWorkspace?: ExecutionWorkspace | null;

@@ -8,7 +8,7 @@ const ISSUE_STALLED_RUN_THRESHOLD_MS = 5 * 60 * 1000;
 export interface PlatformEvidenceRef {
   kind: "activity" | "run" | "comment";
   label: string;
-  href: string | null;
+  href: string;
   at: string | null;
 }
 
@@ -21,7 +21,7 @@ export interface IssueStatusTruthSummary {
   authoritativeSource: "status_activity" | "bootstrap" | "issue_row";
   authoritativeActorType: "agent" | "user" | "system" | null;
   authoritativeActorId: string | null;
-  reasonSummary: string;
+  reasonSummary: string | null;
   canExecute: boolean;
   canClose: boolean;
   executionState: "idle" | "active" | "stalled";
@@ -39,8 +39,10 @@ type IssueRow = {
   identifier: string | null;
   status: string;
   executionRunId: string | null;
-  createdAt: Date;
-  updatedAt: Date;
+  planProposedAt: Date | string | null;
+  planApprovedAt: Date | string | null;
+  createdAt: Date | string;
+  updatedAt: Date | string;
 };
 
 type StatusActivityRow = {
@@ -49,7 +51,7 @@ type StatusActivityRow = {
   action: string;
   actorType: string;
   actorId: string;
-  createdAt: Date;
+  createdAt: Date | string;
   details: Record<string, unknown> | null;
 };
 
@@ -105,13 +107,13 @@ function createEvidence(
   issue: IssueRow,
   kind: PlatformEvidenceRef["kind"],
   label: string,
-  at: Date | null,
+  at: Date | string | null,
 ): PlatformEvidenceRef {
   return {
     kind,
     label,
     href: issueHref(issue),
-    at: at?.toISOString() ?? null,
+    at: coerceDate(at)?.toISOString() ?? null,
   };
 }
 
@@ -163,6 +165,10 @@ function maxDate(...values: Array<Date | string | null | undefined>) {
   return new Date(Math.max(...timestamps));
 }
 
+function hasPendingPlanReview(issue: Pick<IssueRow, "planProposedAt" | "planApprovedAt">) {
+  return Boolean(issue.planProposedAt) && !issue.planApprovedAt;
+}
+
 function resolveExecutionDiagnosis(input: {
   effectiveStatus: IssueStatus;
   authoritativeStatus: IssueStatus;
@@ -171,10 +177,13 @@ function resolveExecutionDiagnosis(input: {
   now: Date;
 }) {
   const statusSuggestsExecution =
-    input.effectiveStatus === "in_progress"
-    || input.effectiveStatus === "in_review"
-    || input.authoritativeStatus === "in_progress"
-    || input.authoritativeStatus === "in_review";
+    !hasPendingPlanReview(input.issue)
+    && (
+      input.effectiveStatus === "in_progress"
+      || input.effectiveStatus === "in_review"
+      || input.authoritativeStatus === "in_progress"
+      || input.authoritativeStatus === "in_review"
+    );
 
   if (!statusSuggestsExecution) {
     return {
@@ -190,7 +199,7 @@ function resolveExecutionDiagnosis(input: {
     maxDate(
       input.latestSignal?.latestRunEventAt ?? null,
       input.latestSignal?.latestRunUpdateAt ?? null,
-    ) ?? input.issue.updatedAt;
+    ) ?? coerceDate(input.issue.updatedAt);
   const latestExecutionSignalIso = latestExecutionSignalAt?.toISOString() ?? null;
 
   if (input.latestSignal?.hasActiveExecutionRun) {
@@ -235,9 +244,11 @@ function buildSummary(
   const details = asRecord(latestActivity?.details);
   const persistedStatus = coerceIssueStatus(issue.status);
   const authoritativeStatus = coerceIssueStatus(readNonEmptyString(details?.status), persistedStatus);
+  const issueUpdatedAt = coerceDate(issue.updatedAt);
+  const issueCreatedAt = coerceDate(issue.createdAt);
   const authoritativeSource: IssueStatusTruthSummary["authoritativeSource"] = latestActivity
     ? "status_activity"
-    : issue.updatedAt.getTime() === issue.createdAt.getTime()
+    : issueUpdatedAt?.getTime() === issueCreatedAt?.getTime()
       ? "bootstrap"
       : "issue_row";
   const consistency: IssueStatusTruthSummary["consistency"] =
@@ -303,12 +314,15 @@ function buildSummary(
     persistedStatus,
     authoritativeStatus,
     consistency,
-    authoritativeAt: (latestActivity?.createdAt ?? issue.updatedAt)?.toISOString() ?? null,
+    authoritativeAt: coerceDate(latestActivity?.createdAt ?? issue.updatedAt)?.toISOString() ?? null,
     authoritativeSource,
     authoritativeActorType: coerceActorType(latestActivity?.actorType),
     authoritativeActorId: latestActivity?.actorId ?? null,
     reasonSummary: summarizeReason(authoritativeStatus, details, authoritativeSource),
-    canExecute: consistency === "consistent" && canExecuteForStatus(effectiveStatus),
+    canExecute:
+      consistency === "consistent"
+      && canExecuteForStatus(effectiveStatus)
+      && !hasPendingPlanReview(issue),
     canClose: canCloseForStatus(authoritativeStatus),
     executionState: executionDiagnosis.executionState,
     executionDiagnosis: executionDiagnosis.executionDiagnosis,
@@ -381,6 +395,8 @@ export function issueStatusTruthService(db: Db) {
         identifier: issues.identifier,
         status: issues.status,
         executionRunId: issues.executionRunId,
+        planProposedAt: issues.planProposedAt,
+        planApprovedAt: issues.planApprovedAt,
         createdAt: issues.createdAt,
         updatedAt: issues.updatedAt,
       })

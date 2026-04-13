@@ -340,13 +340,12 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
     expect(res.status).toBe(403);
   });
 
-  it("creates a plan approval and moves the issue to in_review", async () => {
+  it("creates a plan approval without mutating lifecycle status, and exposes pending review runtime state", async () => {
     const issue = makeIssue({ assigneeAgentId: AGENT_ASSIGNEE });
     const commentId = randomUUID();
     const approvalId = randomUUID();
     const updated = makeIssue({
       ...issue,
-      status: "in_review",
       planProposedAt: new Date("2026-04-12T12:00:00.000Z"),
     });
 
@@ -366,16 +365,32 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
       .send({ plan: "Ship the implementation in three checkpoints." });
 
     expect(res.status).toBe(201);
-    expect(res.body.issue.status).toBe("in_review");
+    expect(res.body.issue.status).toBe("todo");
+    expect(res.body.issue.runtimeState).toEqual(expect.objectContaining({
+      lifecycle: expect.objectContaining({ status: "todo" }),
+      review: expect.objectContaining({
+        state: "pending",
+        kind: "work_plan",
+      }),
+      execution: expect.objectContaining({
+        state: "idle",
+        activation: "awaiting_review",
+        diagnosis: "plan_review_pending",
+        canStart: false,
+      }),
+    }));
     expect(res.body.comment.id).toBe(commentId);
     expect(res.body.approvalId).toBe(approvalId);
     expect(mockIssueSvc.update).toHaveBeenCalledWith(
       ISSUE_ID,
       expect.objectContaining({
-        status: "in_review",
         planApprovedAt: null,
+        checkoutRunId: null,
+        executionRunId: null,
+        executionLockedAt: null,
       }),
     );
+    expect(mockIssueSvc.update.mock.calls[0]?.[1]).not.toHaveProperty("status");
     expect(mockIssueApprovalSvc.linkManyForApproval).toHaveBeenCalledWith(
       approvalId,
       [ISSUE_ID],
@@ -386,13 +401,8 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
-        action: "issue.updated",
+        action: "issue.plan_proposed",
         entityId: ISSUE_ID,
-        details: expect.objectContaining({
-          status: "in_review",
-          source: "plan_proposed",
-          _previous: { status: "todo" },
-        }),
       }),
     );
   });
@@ -413,7 +423,6 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
       .mockResolvedValueOnce(parent);
     mockIssueSvc.update.mockResolvedValue({
       ...issue,
-      status: "in_review",
       planProposedAt: new Date(),
     });
 
@@ -440,7 +449,6 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
     const rootAncestor = makeIssue({ id: PARENT_ID, identifier: "PC-ROOT", assigneeAgentId: AGENT_PARENT });
     const updated = makeIssue({
       ...issue,
-      status: "in_review",
       planProposedAt: new Date("2026-04-12T12:05:00.000Z"),
     });
 
@@ -480,7 +488,6 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
     const approvalId = randomUUID();
     const updated = makeIssue({
       ...issue,
-      status: "in_review",
       planProposedAt: new Date("2026-04-12T12:10:00.000Z"),
     });
 
@@ -504,18 +511,18 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
     expect(res.body.comment.id).toBe(commentId);
     expect(res.body.approvalId).toBe(approvalId);
   });
-  // 3. planProposedAt set + in_review → checkout blocked
-  it("blocks checkout if a plan has been proposed but not approved (in_review)", async () => {
+  // 3. planProposedAt set → checkout blocked regardless of lifecycle status
+  it("blocks checkout if a plan has been proposed but not approved, even without in_review lifecycle", async () => {
     const issue = makeIssue({
       assigneeAgentId: AGENT_ASSIGNEE,
-      status: "in_review",
+      status: "in_progress",
       planProposedAt: new Date(),
     });
     mockIssueSvc.getById.mockResolvedValue(issue);
 
     const res = await request(makeApp(agentActor(AGENT_ASSIGNEE)))
       .post(`/api/issues/${ISSUE_ID}/checkout`)
-      .send({ agentId: AGENT_ASSIGNEE, expectedStatuses: ["in_review"] });
+      .send({ agentId: AGENT_ASSIGNEE, expectedStatuses: ["in_progress"] });
 
     expect(res.status).toBe(409);
     expect(res.body.error).toMatch(/must be approved before checkout/);
@@ -525,7 +532,7 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
   it("forbids an assignee from self-approving their own plan", async () => {
     const issue = makeIssue({
       assigneeAgentId: AGENT_ASSIGNEE,
-      status: "in_review",
+      status: "in_progress",
       planProposedAt: new Date(),
     });
     mockIssueSvc.getById.mockResolvedValue(issue);
@@ -548,7 +555,7 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
     const issue = makeIssue({
       assigneeAgentId: AGENT_ASSIGNEE,
       parentId: PARENT_ID,
-      status: "in_review",
+      status: "in_progress",
       planProposedAt: new Date(),
     });
     const parent = makeIssue({ id: PARENT_ID, assigneeAgentId: AGENT_PARENT });
@@ -584,10 +591,10 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
   it("includes the approval comment when waking the assignee after plan approval", async () => {
     const issue = makeIssue({
       assigneeAgentId: AGENT_ASSIGNEE,
-      status: "in_review",
+      status: "in_progress",
       planProposedAt: new Date(),
     });
-    const updated = makeIssue({ ...issue, status: "todo", planApprovedAt: new Date() });
+    const updated = makeIssue({ ...issue, status: "in_progress", planApprovedAt: new Date() });
     const approvalCommentId = randomUUID();
 
     mockIssueSvc.getById.mockResolvedValue(issue);
@@ -624,11 +631,11 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
     const issue = makeIssue({
       assigneeAgentId: AGENT_ASSIGNEE,
       parentId: PARENT_ID,
-      status: "in_review",
+      status: "in_progress",
       planProposedAt: new Date(),
     });
     const parent = makeIssue({ id: PARENT_ID, assigneeAgentId: AGENT_PARENT });
-    const updated = { ...issue, status: "todo", planApprovedAt: new Date() };
+    const updated = { ...issue, status: "in_progress", planApprovedAt: new Date() };
 
     mockIssueSvc.getById
       .mockResolvedValueOnce(issue)   // first call: the issue
@@ -656,7 +663,15 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
       .send();
 
     expect(res.status).toBe(200);
-    expect(res.body.issue.status).toBe("todo");
+    expect(res.body.issue.status).toBe("in_progress");
+    expect(res.body.issue.runtimeState).toEqual(expect.objectContaining({
+      lifecycle: expect.objectContaining({ status: "in_progress" }),
+      review: expect.objectContaining({ state: "approved" }),
+      execution: expect.objectContaining({
+        activation: "runnable",
+        canStart: true,
+      }),
+    }));
   });
 
   // 7. Board can no longer short-circuit a child plan that is routed to its lead
@@ -664,7 +679,7 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
     const issue = makeIssue({
       assigneeAgentId: AGENT_ASSIGNEE,
       parentId: PARENT_ID,
-      status: "in_review",
+      status: "in_progress",
       planProposedAt: new Date(),
     });
     const parent = makeIssue({ id: PARENT_ID, assigneeAgentId: AGENT_PARENT });
@@ -694,10 +709,10 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
   it("still allows Board to approve a root issue plan routed to the board pool", async () => {
     const issue = makeIssue({
       assigneeAgentId: AGENT_ASSIGNEE,
-      status: "in_review",
+      status: "in_progress",
       planProposedAt: new Date(),
     });
-    const updated = { ...issue, status: "todo", planApprovedAt: new Date() };
+    const updated = { ...issue, status: "in_progress", planApprovedAt: new Date() };
 
     mockIssueSvc.getById.mockResolvedValue(issue);
     mockIssueSvc.update.mockResolvedValue(updated);
@@ -717,17 +732,12 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
       .send();
 
     expect(res.status).toBe(200);
-    expect(res.body.issue.status).toBe("todo");
+    expect(res.body.issue.status).toBe("in_progress");
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
-        action: "issue.updated",
+        action: "issue.plan_approved",
         entityId: ISSUE_ID,
-        details: expect.objectContaining({
-          status: "todo",
-          source: "plan_approved",
-          _previous: { status: "in_review" },
-        }),
       }),
     );
   });
@@ -743,13 +753,13 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
   });
 
   // 2. Rejection enforces status logic
-  it("reject-plan returns todo status and clears planProposedAt timeframe", async () => {
+  it("reject-plan preserves lifecycle status while clearing the pending review request", async () => {
     const issue = makeIssue({
       assigneeAgentId: AGENT_ASSIGNEE,
-      status: "in_review",
+      status: "in_progress",
       planProposedAt: new Date(),
     });
-    const updated = { ...issue, status: "todo", planProposedAt: null, planApprovedAt: null };
+    const updated = { ...issue, status: "in_progress", planProposedAt: null, planApprovedAt: null };
 
     mockIssueSvc.getById.mockResolvedValue(issue);
     mockIssueSvc.update.mockResolvedValue(updated);
@@ -759,18 +769,21 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
       .send({ feedback: "This is terrible, do it again." });
 
     expect(res.status).toBe(200);
-    expect(res.body.issue.status).toBe("todo");
+    expect(res.body.issue.status).toBe("in_progress");
     expect(res.body.issue.planProposedAt).toBeNull();
+    expect(res.body.issue.runtimeState).toEqual(expect.objectContaining({
+      lifecycle: expect.objectContaining({ status: "in_progress" }),
+      review: expect.objectContaining({ state: "none" }),
+      execution: expect.objectContaining({
+        activation: "runnable",
+        canStart: true,
+      }),
+    }));
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
-        action: "issue.updated",
+        action: "issue.plan_rejected",
         entityId: ISSUE_ID,
-        details: expect.objectContaining({
-          status: "todo",
-          source: "plan_rejected",
-          _previous: { status: "in_review" },
-        }),
       }),
     );
   });
@@ -779,7 +792,7 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
   it("forbids an assignee from self-rejecting their own plan", async () => {
     const issue = makeIssue({
       assigneeAgentId: AGENT_ASSIGNEE,
-      status: "in_review",
+      status: "in_progress",
       planProposedAt: new Date(),
     });
     mockIssueSvc.getById.mockResolvedValue(issue);
@@ -801,10 +814,10 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
   it("reject-plan properly triggers wakeup system with rejection reason", async () => {
     const issue = makeIssue({
       assigneeAgentId: AGENT_ASSIGNEE,
-      status: "in_review",
+      status: "in_progress",
       planProposedAt: new Date(),
     });
-    const updated = { ...issue, status: "todo", planProposedAt: null, planApprovedAt: null };
+    const updated = { ...issue, status: "in_progress", planProposedAt: null, planApprovedAt: null };
     const rejectionCommentId = randomUUID();
 
     mockIssueSvc.getById.mockResolvedValue(issue);

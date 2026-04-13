@@ -112,6 +112,13 @@ describe("issue list routes", () => {
         title: "Drifted issue",
         status: "in_progress",
         priority: "medium",
+        planProposedAt: "2026-04-12T01:50:00.000Z",
+        planApprovedAt: null,
+        replyNeededForMe: true,
+        replyNeededCommentId: "comment-1",
+        replyNeededAt: "2026-04-12T01:58:00.000Z",
+        checkoutRunId: null,
+        executionLockedAt: null,
       },
     ]);
     mockIssueService.getById.mockResolvedValue({
@@ -125,6 +132,13 @@ describe("issue list routes", () => {
       goalId: null,
       executionWorkspaceId: null,
       executionRunId: null,
+      checkoutRunId: null,
+      executionLockedAt: null,
+      planProposedAt: "2026-04-12T01:50:00.000Z",
+      planApprovedAt: null,
+      replyNeededForMe: true,
+      replyNeededCommentId: "comment-1",
+      replyNeededAt: "2026-04-12T01:58:00.000Z",
     });
     mockIssueService.getByIdentifier.mockResolvedValue(null);
     mockIssueService.getAncestors.mockResolvedValue([]);
@@ -178,8 +192,73 @@ describe("issue list routes", () => {
           executionState: "idle",
           lastExecutionSignalAt: "2026-04-12T01:55:00.000Z",
         }),
+        runtimeState: expect.objectContaining({
+          lifecycle: expect.objectContaining({ status: "blocked" }),
+          review: expect.objectContaining({
+            state: "pending",
+            kind: "work_plan",
+          }),
+          humanWait: expect.objectContaining({
+            state: "reply_needed",
+            commentId: "comment-1",
+          }),
+          execution: expect.objectContaining({
+            state: "idle",
+            activation: "blocked",
+            canStart: false,
+          }),
+        }),
       }),
     ]);
+  });
+
+  it("filters pending plan review issues through the derived review_pending display status", async () => {
+    mockStatusTruth.getIssueStatusTruthSummaries.mockResolvedValue(new Map([
+      ["issue-1", {
+        effectiveStatus: "in_progress",
+        persistedStatus: "in_progress",
+        authoritativeStatus: "in_progress",
+        consistency: "consistent",
+        authoritativeAt: "2026-04-12T02:00:00.000Z",
+        authoritativeSource: "issue_row",
+        authoritativeActorType: "system",
+        authoritativeActorId: "paperclip",
+        reasonSummary: "Using the persisted issue row because no explicit status activity exists.",
+        canExecute: false,
+        canClose: true,
+        executionState: "idle",
+        executionDiagnosis: null,
+        lastExecutionSignalAt: "2026-04-12T01:55:00.000Z",
+        stalledSince: null,
+        stalledThresholdMs: 300000,
+        driftCode: null,
+        evidence: [],
+      }],
+    ]));
+
+    const reviewPendingRes = await request(createApp())
+      .get("/api/companies/company-1/issues")
+      .query({ status: "review_pending" });
+
+    expect(reviewPendingRes.status).toBe(200);
+    expect(reviewPendingRes.body).toEqual([
+      expect.objectContaining({
+        id: "issue-1",
+        status: "in_progress",
+        runtimeState: expect.objectContaining({
+          review: expect.objectContaining({
+            state: "pending",
+          }),
+        }),
+      }),
+    ]);
+
+    const inProgressRes = await request(createApp())
+      .get("/api/companies/company-1/issues")
+      .query({ status: "in_progress" });
+
+    expect(inProgressRes.status).toBe(200);
+    expect(inProgressRes.body).toEqual([]);
   });
 
   it("serializes stalled execution diagnostics on list responses", async () => {
@@ -219,6 +298,16 @@ describe("issue list routes", () => {
           lastExecutionSignalAt: "2026-04-12T01:40:00.000Z",
           stalledSince: "2026-04-12T01:40:00.000Z",
         }),
+        runtimeState: expect.objectContaining({
+          review: expect.objectContaining({ state: "pending" }),
+          humanWait: expect.objectContaining({ state: "reply_needed" }),
+          execution: expect.objectContaining({
+            state: "idle",
+            activation: "awaiting_review",
+            diagnosis: "plan_review_pending",
+            canStart: false,
+          }),
+        }),
       }),
     ]);
   });
@@ -256,6 +345,16 @@ describe("issue list routes", () => {
         executionDiagnosis: "no_active_run",
         lastExecutionSignalAt: "2026-04-12T01:40:00.000Z",
         stalledSince: "2026-04-12T01:40:00.000Z",
+      }),
+      runtimeState: expect.objectContaining({
+        review: expect.objectContaining({ state: "pending" }),
+        humanWait: expect.objectContaining({ state: "reply_needed" }),
+        execution: expect.objectContaining({
+          state: "idle",
+          activation: "awaiting_review",
+          diagnosis: "plan_review_pending",
+          canStart: false,
+        }),
       }),
     }));
   });

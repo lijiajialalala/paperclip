@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { getIssueDisplayStatus } from "@paperclipai/shared/issue-display-status";
 import { issuesApi } from "../api/issues";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
@@ -56,7 +57,7 @@ export function MyIssues() {
               title={issue.title}
               to={`/issues/${issue.identifier ?? issue.id}`}
               leading={
-                <StatusIcon status={issue.status} />
+                <StatusIcon status={getIssueDisplayStatus(issue)} />
               }
               trailing={
                 <span className="text-xs text-muted-foreground">
