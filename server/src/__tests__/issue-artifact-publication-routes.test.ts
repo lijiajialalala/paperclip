@@ -123,6 +123,7 @@ describe("issue artifact publication routes", () => {
           title: "Source task",
           status: "in_progress",
           assigneeAgentId: "agent-source",
+          planApprovedAt: new Date("2026-04-10T00:00:00.000Z"),
         };
       }
       if (id === targetIssueId) {
@@ -211,6 +212,7 @@ describe("issue artifact publication routes", () => {
         title: "Source task",
         status: "in_progress",
         assigneeAgentId: "agent-source",
+        planApprovedAt: new Date("2026-04-10T00:00:00.000Z"),
       },
       {
         id: targetIssueId,

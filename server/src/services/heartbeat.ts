@@ -853,6 +853,7 @@ function parseIssueAssigneeAdapterOverrides(
  * simpler `agentRuntimeState.sessionId` fallback.
  */
 const HEARTBEAT_TASK_KEY = "__heartbeat__";
+const BLOCKED_QUEUE_ORPHAN_REAP_THRESHOLD_MS = 2 * 60 * 1000;
 
 function deriveTaskKey(
   contextSnapshot: Record<string, unknown> | null | undefined,
@@ -2371,9 +2372,17 @@ export function heartbeatService(db: Db) {
     }
   }
 
-  async function reapOrphanedRuns(opts?: { staleThresholdMs?: number }) {
+  async function reapOrphanedRuns(opts?: {
+    staleThresholdMs?: number;
+    agentId?: string;
+    startQueuedRuns?: boolean;
+  }) {
     const staleThresholdMs = opts?.staleThresholdMs ?? 0;
     const now = new Date();
+    const whereClauses = [eq(heartbeatRuns.status, "running")];
+    if (opts?.agentId) {
+      whereClauses.push(eq(heartbeatRuns.agentId, opts.agentId));
+    }
 
     // Find all runs stuck in "running" state (queued runs are legitimately waiting; resumeQueuedRuns handles them)
     const activeRuns = await db
@@ -2383,7 +2392,7 @@ export function heartbeatService(db: Db) {
       })
       .from(heartbeatRuns)
       .innerJoin(agents, eq(heartbeatRuns.agentId, agents.id))
-      .where(eq(heartbeatRuns.status, "running"));
+      .where(and(...whereClauses));
 
     const reaped: string[] = [];
 
@@ -2478,7 +2487,9 @@ export function heartbeatService(db: Db) {
       });
 
       await finalizeAgentStatus(run.agentId, "failed");
-      await startNextQueuedRunForAgent(run.agentId);
+      if (opts?.startQueuedRuns !== false) {
+        await startNextQueuedRunForAgent(run.agentId);
+      }
 
       // Fix #4: Write a traceable blocker comment to the linked Issue when
       // process_lost exhausts retries on an ENGINEERING run.
@@ -2627,8 +2638,19 @@ export function heartbeatService(db: Db) {
         return [];
       }
       const policy = parseHeartbeatPolicy(agent);
-      const runningCount = await countRunningRunsForAgent(agentId);
-      const availableSlots = Math.max(0, policy.maxConcurrentRuns - runningCount);
+      let runningCount = await countRunningRunsForAgent(agentId);
+      let availableSlots = Math.max(0, policy.maxConcurrentRuns - runningCount);
+      if (availableSlots <= 0) {
+        const recovered = await reapOrphanedRuns({
+          agentId,
+          staleThresholdMs: BLOCKED_QUEUE_ORPHAN_REAP_THRESHOLD_MS,
+          startQueuedRuns: false,
+        });
+        if (recovered.reaped > 0) {
+          runningCount = await countRunningRunsForAgent(agentId);
+          availableSlots = Math.max(0, policy.maxConcurrentRuns - runningCount);
+        }
+      }
       if (availableSlots <= 0) return [];
 
       const queuedRuns = await db

@@ -275,6 +275,57 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     );
   });
 
+  it("removes issue rows even when non-cascading comments and inbox metadata exist", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Disposable smoke issue",
+      status: "todo",
+      priority: "medium",
+    });
+
+    await db.insert(issueComments).values({
+      companyId,
+      issueId,
+      authorUserId: "user-1",
+      body: "Comment that used to block deletion.",
+    });
+    await db.insert(issueInboxArchives).values({
+      companyId,
+      issueId,
+      userId: "user-1",
+    });
+    await db.insert(issueReadStates).values({
+      companyId,
+      issueId,
+      userId: "user-1",
+    });
+
+    await expect(svc.remove(issueId)).resolves.toEqual(
+      expect.objectContaining({ id: issueId }),
+    );
+    await expect(svc.getById(issueId)).resolves.toBeNull();
+    await expect(
+      db.select({ id: issueComments.id }).from(issueComments).where(eq(issueComments.issueId, issueId)),
+    ).resolves.toHaveLength(0);
+    await expect(
+      db.select({ id: issueInboxArchives.id }).from(issueInboxArchives).where(eq(issueInboxArchives.issueId, issueId)),
+    ).resolves.toHaveLength(0);
+    await expect(
+      db.select({ id: issueReadStates.id }).from(issueReadStates).where(eq(issueReadStates.issueId, issueId)),
+    ).resolves.toHaveLength(0);
+  });
+
   it("returns null instead of throwing for malformed non-uuid issue refs", async () => {
     await expect(svc.getById("not-a-uuid")).resolves.toBeNull();
   });
@@ -1407,7 +1458,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       return { companyId, agentId, rootId, parentId, childId };
     }
 
-    it("does not reopen blocked ancestors when a child resumes execution", async () => {
+    it("leaves blocked ancestors blocked when a child resumes execution", async () => {
       const { agentId, rootId, parentId, childId } = await seedAncestorFixture();
 
       await svc.checkout(childId, agentId, ["todo"], null);
@@ -1435,79 +1486,75 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       expect(root?.status).toBe("in_progress");
     });
 
-    it("preserves blocked status when checking out a blocked issue", async () => {
-      const companyId = randomUUID();
-      const agentId = randomUUID();
-      const issueId = randomUUID();
-      const runId = randomUUID();
-
-      await db.insert(companies).values({
-        id: companyId,
-        name: "Paperclip",
-        issuePrefix: "CMPA",
-        requireBoardApprovalForNewAgents: false,
+    it("records an in_progress status activity when a blocked issue is checked out again", async () => {
+      const { companyId, agentId, childId } = await seedAncestorFixture({
+        childStatus: "blocked",
       });
+      const checkoutRunId = randomUUID();
 
-      await db.insert(agents).values({
-        id: agentId,
+      await db.insert(activityLog).values({
         companyId,
-        name: "Engineer",
-        role: "engineer",
-        status: "active",
-        adapterType: "codex_local",
-        adapterConfig: {},
-        runtimeConfig: {},
-        permissions: {},
+        actorType: "system",
+        actorId: "paperclip",
+        action: "issue.updated",
+        entityType: "issue",
+        entityId: childId,
+        createdAt: new Date("2026-04-05T16:00:00.000Z"),
+        details: {
+          status: "blocked",
+          _previous: { status: "todo" },
+        },
       });
-
-      await db.insert(issues).values({
-        id: issueId,
-        companyId,
-        issueNumber: 77,
-        identifier: "CMPA-77",
-        title: "Blocked issue",
-        status: "blocked",
-        priority: "medium",
-      });
-
       await db.insert(heartbeatRuns).values({
-        id: runId,
+        id: checkoutRunId,
         companyId,
         agentId,
         invocationSource: "assignment",
         triggerDetail: "system",
         status: "running",
-        contextSnapshot: { issueId },
+        contextSnapshot: { issueId: childId },
         resultJson: {},
-        errorCode: null,
-        error: null,
-        processLossRetryCount: 0,
-        startedAt: new Date("2026-04-08T00:00:00.000Z"),
+        startedAt: new Date("2026-04-05T16:04:00.000Z"),
         finishedAt: null,
-        createdAt: new Date("2026-04-08T00:00:00.000Z"),
-        updatedAt: new Date("2026-04-08T00:00:00.000Z"),
+        createdAt: new Date("2026-04-05T16:04:00.000Z"),
+        updatedAt: new Date("2026-04-05T16:04:00.000Z"),
       });
 
-      const checkedOut = await svc.checkout(issueId, agentId, ["blocked"], runId);
+      await svc.checkout(childId, agentId, ["blocked"], checkoutRunId);
 
-      expect(checkedOut?.status).toBe("blocked");
-      expect(checkedOut?.assigneeAgentId).toBe(agentId);
-      expect(checkedOut?.checkoutRunId).toBe(runId);
-      expect(checkedOut?.executionRunId).toBe(runId);
-
-      const persisted = await db
+      const statusSummary = await issueStatusTruthService(db).getIssueStatusTruthSummary(childId);
+      const checkoutStatusActivities = await db
         .select({
-          status: issues.status,
-          startedAt: issues.startedAt,
-          executionLockedAt: issues.executionLockedAt,
+          details: activityLog.details,
         })
-        .from(issues)
-        .where(eq(issues.id, issueId))
-        .then((rows) => rows[0]!);
+        .from(activityLog)
+        .where(eq(activityLog.entityId, childId));
 
-      expect(persisted.status).toBe("blocked");
-      expect(persisted.startedAt).toBeNull();
-      expect(persisted.executionLockedAt).not.toBeNull();
+      expect(statusSummary).toEqual(expect.objectContaining({
+        effectiveStatus: "in_progress",
+        persistedStatus: "blocked",
+        authoritativeStatus: "in_progress",
+        consistency: "drifted",
+        driftCode: "status_mismatch",
+        executionState: "active",
+        canExecute: false,
+      }));
+      expect(
+        checkoutStatusActivities.filter((entry) => {
+          const details = entry.details as Record<string, unknown> | null;
+          return details?.status === "in_progress" && details?.source === "checkout";
+        }),
+      ).toHaveLength(1);
+
+      await expect(
+        svc.assertCanTransitionIssueToDone({
+          issueId: childId,
+          companyId,
+          actorType: "agent",
+          actorAgentId: agentId,
+          actorRunId: checkoutRunId,
+        }),
+      ).resolves.toBeUndefined();
     });
 
     it("clears execution metadata when an issue leaves in_progress through a status update", async () => {
@@ -1591,7 +1638,56 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       expect(persisted.executionLockedAt).toBeNull();
     });
 
-    it("marks ancestors done when their only child branch is completed", async () => {
+    it("records a single todo status activity when an in_progress issue is released", async () => {
+      const { companyId, agentId, childId } = await seedAncestorFixture({
+        childStatus: "in_progress",
+      });
+
+      await db.insert(activityLog).values({
+        companyId,
+        actorType: "agent",
+        actorId: agentId,
+        agentId,
+        action: "issue.updated",
+        entityType: "issue",
+        entityId: childId,
+        createdAt: new Date("2026-04-05T16:00:00.000Z"),
+        details: {
+          status: "in_progress",
+          source: "checkout",
+          _previous: { status: "todo" },
+        },
+      });
+
+      const released = await svc.release(childId, agentId, null, {
+        actorType: "agent",
+        actorId: agentId,
+      });
+      const statusSummary = await issueStatusTruthService(db).getIssueStatusTruthSummary(childId);
+      const releaseStatusActivities = await db
+        .select({
+          details: activityLog.details,
+        })
+        .from(activityLog)
+        .where(eq(activityLog.entityId, childId));
+
+      expect(released?.status).toBe("todo");
+      expect(statusSummary).toEqual(expect.objectContaining({
+        effectiveStatus: "todo",
+        persistedStatus: "todo",
+        authoritativeStatus: "todo",
+        consistency: "consistent",
+        driftCode: null,
+      }));
+      expect(
+        releaseStatusActivities.filter((entry) => {
+          const details = entry.details as Record<string, unknown> | null;
+          return details?.status === "todo" && details?.source === "release";
+        }),
+      ).toHaveLength(1);
+    });
+
+    it("keeps ancestors open for explicit closeout when their only child branch is completed", async () => {
       const { rootId, parentId, childId } = await seedAncestorFixture({
         rootStatus: "in_progress",
         parentStatus: "in_progress",
@@ -1603,11 +1699,11 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       const parent = await svc.getById(parentId);
       const root = await svc.getById(rootId);
 
-      expect(parent?.status).toBe("done");
-      expect(root?.status).toBe("done");
+      expect(parent?.status).toBe("in_progress");
+      expect(root?.status).toBe("in_progress");
     });
 
-    it("keeps blocked ancestors authoritative without reopening them when descendants finish", async () => {
+    it("does not reopen blocked ancestors for closeout-pending when their child branch completes", async () => {
       const { companyId, rootId, parentId, childId } = await seedAncestorFixture({
         rootStatus: "blocked",
         parentStatus: "blocked",
@@ -1670,9 +1766,18 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       expect(
         recomputeActivities.filter((entry) => {
           const details = entry.status as Record<string, unknown> | null;
-          return (entry.entityId === parentId || entry.entityId === rootId)
+          return entry.entityId === parentId
             && details?.source === "ancestor_recompute"
-            && details?.status === "done";
+            && details?.status === "in_progress"
+            && details?.closeoutPending === true;
+        }),
+      ).toHaveLength(0);
+      expect(
+        recomputeActivities.filter((entry) => {
+          const details = entry.status as Record<string, unknown> | null;
+          return entry.entityId === rootId
+            && details?.source === "ancestor_recompute"
+            && details?.status === "in_progress";
         }),
       ).toHaveLength(0);
     });
@@ -1815,9 +1920,10 @@ describeEmbeddedPostgres("recomputeAncestorStatuses — parent batch auto-commen
     await tempDb?.cleanup();
   });
 
-  it("posts a system comment on the parent when all child lanes are done", async () => {
-    // Fix #7: when a child lane transitions to done and causes the parent to recompute
-    // to 'done', a summary comment must appear on the parent recording that change.
+  it("posts a system closeout comment on the parent when all child lanes are done", async () => {
+    // When a child lane transitions to done and completes the batch, the parent
+    // must stay open until its assignee explicitly closes it. Paperclip should
+    // leave an audit comment explaining that closeout is now manual.
     const companyId = randomUUID();
     const parentId = randomUUID();
     const childId = randomUUID();
@@ -1854,16 +1960,15 @@ describeEmbeddedPostgres("recomputeAncestorStatuses — parent batch auto-commen
     // Transition child to done — this triggers recomputeAncestorStatuses
     await svc.update(childId, { status: "done" });
 
-    // Parent should now be done
+    // Parent stays open pending explicit closeout
     const parentRow = await db.select({ status: issues.status }).from(issues).where(eq(issues.id, parentId)).then((r) => r[0]!);
-    expect(parentRow.status).toBe("done");
+    expect(parentRow.status).toBe("in_progress");
 
-    // A system comment must have been written to the parent (Fix #7)
+    // A system comment must have been written to the parent
     const parentComments = await db.select({ body: issueComments.body }).from(issueComments).where(eq(issueComments.issueId, parentId));
     expect(parentComments.length).toBeGreaterThanOrEqual(1);
-    const batchComment = parentComments.find((c) => c.body.includes("Batch status updated"));
+    const batchComment = parentComments.find((c) => c.body.includes("explicit parent closeout required"));
     expect(batchComment).toBeDefined();
-    expect(batchComment?.body).toContain("`done`");
     expect(batchComment?.body).toContain("1/1 lanes done");
   });
 
@@ -1921,6 +2026,62 @@ describeEmbeddedPostgres("recomputeAncestorStatuses — parent batch auto-commen
     expect(batchComment).toBeDefined();
     // Should show 1 out of 2 lanes (not cancelled count)
     expect(batchComment?.body).toContain("1/2 lanes done");
+  });
+
+  it("posts the closeout comment when the final child finishes even if parent status remains in_progress", async () => {
+    const companyId = randomUUID();
+    const parentId = randomUUID();
+    const child1Id = randomUUID();
+    const child2Id = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "CMPA",
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(issues).values([
+      {
+        id: parentId,
+        companyId,
+        issueNumber: 95,
+        identifier: "CMPA-95",
+        title: "Batch 3",
+        status: "in_progress",
+        priority: "medium",
+      },
+      {
+        id: child1Id,
+        companyId,
+        issueNumber: 96,
+        identifier: "CMPA-96",
+        title: "Lane 1",
+        status: "done",
+        priority: "medium",
+        parentId,
+      },
+      {
+        id: child2Id,
+        companyId,
+        issueNumber: 97,
+        identifier: "CMPA-97",
+        title: "Lane 2",
+        status: "in_progress",
+        priority: "medium",
+        parentId,
+      },
+    ]);
+
+    await svc.update(child2Id, { status: "done" });
+
+    const parentRow = await db.select({ status: issues.status }).from(issues).where(eq(issues.id, parentId)).then((r) => r[0]!);
+    expect(parentRow.status).toBe("in_progress");
+
+    const parentComments = await db.select({ body: issueComments.body }).from(issueComments).where(eq(issueComments.issueId, parentId));
+    const closeoutComment = parentComments.find((c) => c.body.includes("explicit parent closeout required"));
+    expect(closeoutComment).toBeDefined();
+    expect(closeoutComment?.body).toContain("2/2 lanes done");
   });
 });
 

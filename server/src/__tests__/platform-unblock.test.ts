@@ -218,4 +218,71 @@ describeEmbeddedPostgres("platformUnblockService", () => {
       closeGateBlocked: true,
     });
   });
+
+  it("classifies plan-pending QA writeback alerts as a qa_writeback_gate blocker", async () => {
+    const { companyId, issueId, backendId } = await seedCompany();
+    const qaAgentId = randomUUID();
+
+    await db.insert(agents).values({
+      id: qaAgentId,
+      companyId,
+      name: "QA Agent",
+      role: "qa",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+      reportsTo: backendId,
+    });
+
+    await db
+      .update(issues)
+      .set({
+        status: "in_review",
+        planProposedAt: new Date("2026-04-08T00:05:00.000Z"),
+        planApprovedAt: null,
+      })
+      .where(eq(issues.id, issueId));
+
+    await db.insert(heartbeatRuns).values({
+      id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      companyId,
+      agentId: qaAgentId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "succeeded",
+      contextSnapshot: { issueId },
+      resultJson: {
+        issueWriteback: {
+          status: "alerted_inconclusive",
+          verdict: "pass",
+          source: "alert",
+          canCloseUpstream: false,
+          commentId: null,
+          writebackAt: "2026-04-08T00:10:00.000Z",
+          alertType: "plan_pending_review",
+          latest: true,
+        },
+      },
+      errorCode: null,
+      error: null,
+      processLossRetryCount: 0,
+      startedAt: new Date("2026-04-08T00:09:00.000Z"),
+      finishedAt: new Date("2026-04-08T00:10:00.000Z"),
+      createdAt: new Date("2026-04-08T00:10:00.000Z"),
+      updatedAt: new Date("2026-04-08T00:10:00.000Z"),
+    });
+
+    const summary = await platformUnblockService(db).getIssuePlatformUnblockSummary(issueId);
+
+    expect(summary).toEqual(expect.objectContaining({
+      mode: "platform",
+      primaryCategory: "qa_writeback_gate",
+      primaryOwnerRole: "qa_writeback_owner",
+      canRetryEngineering: false,
+      canCloseUpstream: false,
+      authoritativeSignalSource: "qa_summary",
+    }));
+  });
 });

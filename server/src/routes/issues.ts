@@ -62,6 +62,10 @@ import { applyEffectiveStatus, issueStatusTruthService } from "../services/issue
 import { attachIssueRuntimeState } from "../services/issue-runtime-state.js";
 import { platformUnblockService } from "../services/platform-unblock.js";
 import { qaIssueStateService } from "../services/qa-issue-state.js";
+import {
+  describeIssueExecutionPlanGateError,
+  getIssueExecutionPlanGateReason,
+} from "../services/issue-plan-policy.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
 const updateIssueRouteSchema = updateIssueSchema.extend({
@@ -561,6 +565,31 @@ export function issueRoutes(
     }
 
     return true;
+  }
+
+  async function assertAgentExecutionPlanAllowed(
+    req: Request,
+    res: Response,
+    issue: {
+      parentId?: string | null;
+      assigneeAgentId?: string | null;
+      planProposedAt?: Date | null;
+      planApprovedAt?: Date | null;
+      status?: string | null;
+    },
+    action: string,
+  ) {
+    if (req.actor.type !== "agent") return true;
+    const gateReason = getIssueExecutionPlanGateReason(issue);
+    if (!gateReason) return true;
+
+    res.status(409).json({
+      error: describeIssueExecutionPlanGateError(gateReason, action),
+      planGate: gateReason,
+      planProposedAt: issue.planProposedAt ?? null,
+      planApprovedAt: issue.planApprovedAt ?? null,
+    });
+    return false;
   }
 
   async function notifyPlanReview(req: Request, issue: any, action: "approved" | "rejected", feedback?: string) {
@@ -1151,6 +1180,7 @@ export function issueRoutes(
       res.status(400).json({ error: "Invalid document key", details: keyParsed.error.issues });
       return;
     }
+    if (!(await assertAgentExecutionPlanAllowed(req, res, issue, "writing issue documents"))) return;
 
     const actor = getActorInfo(req);
     const result = await documentsSvc.upsertIssueDocument({
@@ -1196,6 +1226,7 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, sourceIssue.companyId);
+    if (!(await assertAgentExecutionPlanAllowed(req, res, sourceIssue, "publishing artifacts"))) return;
 
     const actor = getActorInfo(req);
     const requestedSummary = req.body.summary?.trim() || null;
@@ -1475,6 +1506,7 @@ export function issueRoutes(
         res.status(400).json({ error: "Invalid document key", details: keyParsed.error.issues });
         return;
       }
+      if (!(await assertAgentExecutionPlanAllowed(req, res, issue, "restoring issue documents"))) return;
 
       const actor = getActorInfo(req);
       const result = await documentsSvc.restoreIssueDocumentRevision({
@@ -1558,6 +1590,7 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, issue.companyId);
+    if (!(await assertAgentExecutionPlanAllowed(req, res, issue, "creating work products"))) return;
     const product = await workProductsSvc.createForIssue(issue.id, issue.companyId, {
       ...req.body,
       projectId: req.body.projectId ?? issue.projectId ?? null,
@@ -1589,6 +1622,12 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, existing.companyId);
+    const issue = await svc.getById(existing.issueId);
+    if (!issue) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+    if (!(await assertAgentExecutionPlanAllowed(req, res, issue, "updating work products"))) return;
     const product = await workProductsSvc.update(id, req.body);
     if (!product) {
       res.status(404).json({ error: "Work product not found" });
@@ -1617,6 +1656,12 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, existing.companyId);
+    const issue = await svc.getById(existing.issueId);
+    if (!issue) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+    if (!(await assertAgentExecutionPlanAllowed(req, res, issue, "deleting work products"))) return;
     const removed = await workProductsSvc.remove(id);
     if (!removed) {
       res.status(404).json({ error: "Work product not found" });
@@ -1842,6 +1887,14 @@ export function issueRoutes(
     if (req.body.assigneeAgentId || req.body.assigneeUserId) {
       await assertCanAssignTasks(req, companyId);
     }
+    if (req.actor.type === "agent" && req.body.parentId) {
+      const parentIssue = await svc.getById(req.body.parentId);
+      if (!parentIssue) {
+        res.status(404).json({ error: "Parent issue not found" });
+        return;
+      }
+      if (!(await assertAgentExecutionPlanAllowed(req, res, parentIssue, "creating child issues"))) return;
+    }
 
     const actor = getActorInfo(req);
     const issue = await svc.create(companyId, {
@@ -1914,12 +1967,6 @@ export function issueRoutes(
     } = req.body;
     let interruptedRunId: string | null = null;
     const closedExecutionWorkspace = await getClosedIssueExecutionWorkspace(existing);
-    const isAgentWorkUpdate = req.actor.type === "agent" && Object.keys(updateFields).length > 0;
-
-    if (closedExecutionWorkspace && (commentBody || isAgentWorkUpdate)) {
-      respondClosedIssueExecutionWorkspace(res, closedExecutionWorkspace);
-      return;
-    }
 
     if (interruptRequested) {
       if (!commentBody) {
@@ -1970,6 +2017,17 @@ export function issueRoutes(
     if (commentBody && reopenRequested === true && isClosed && updateFields.status === undefined) {
       updateFields.status = "todo";
     }
+    const isAgentWorkUpdate = req.actor.type === "agent" && Object.keys(updateFields).length > 0;
+
+    if (isAgentWorkUpdate) {
+      if (!(await assertAgentExecutionPlanAllowed(req, res, existing, "updating issue fields"))) return;
+    }
+
+    if (closedExecutionWorkspace && (commentBody || isAgentWorkUpdate)) {
+      respondClosedIssueExecutionWorkspace(res, closedExecutionWorkspace);
+      return;
+    }
+
     if (updateFields.status === "done" && existing.status !== "done") {
       await svc.assertCanTransitionIssueToDone({
         issueId: existing.id,
@@ -2274,20 +2332,7 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, issue.companyId);
-
-    // Plan approval gate: only blocks if an unapproved plan is explicitly pending review
-    const planReviewPending =
-      req.actor.type === "agent" &&
-      !!issue.planProposedAt &&
-      !issue.planApprovedAt;
-
-    if (planReviewPending) {
-      res.status(409).json({
-        error: "Plan is pending review and must be approved before checkout",
-        planProposedAt: issue.planProposedAt,
-      });
-      return;
-    }
+    if (!(await assertAgentExecutionPlanAllowed(req, res, issue, "checkout"))) return;
 
     if (issue.projectId) {
       const project = await projectsSvc.getById(issue.projectId);
@@ -2560,6 +2605,24 @@ export function issueRoutes(
       return;
     }
 
+    const executionAlreadyStarted = Boolean(
+      issue.status === "in_progress"
+      || issue.status === "done"
+      || issue.status === "blocked"
+      || issue.executionRunId
+      || issue.checkoutRunId,
+    );
+    if (executionAlreadyStarted) {
+      res.status(409).json({
+        error: "Cannot approve a plan after execution has already started. Return the issue to review and rerun after approval.",
+      });
+      return;
+    }
+    if (issue.status !== "in_review") {
+      res.status(409).json({ error: "Plan can only be approved while the issue is in_review." });
+      return;
+    }
+
     if (!(await assertCanReviewPlan(req, res, issue, "approve"))) return;
 
     const updated = await svc.update(id, {
@@ -2671,17 +2734,15 @@ export function issueRoutes(
     const actorRunId = requireAgentRunId(req, res);
     if (req.actor.type === "agent" && !actorRunId) return;
 
-    const released = await svc.release(
-      id,
-      req.actor.type === "agent" ? req.actor.agentId : undefined,
-      actorRunId,
-    );
+    const actor = getActorInfo(req);
+    const released = await svc.release(id, req.actor.type === "agent" ? req.actor.agentId : undefined, actorRunId, {
+      actorType: actor.actorType === "agent" ? "agent" : "system",
+      actorId: actor.actorId,
+    });
     if (!released) {
       res.status(404).json({ error: "Issue not found" });
       return;
     }
-
-    const actor = getActorInfo(req);
     await logActivity(db, {
       companyId: released.companyId,
       actorType: actor.actorType,
@@ -3233,6 +3294,7 @@ export function issueRoutes(
       res.status(422).json({ error: "Issue does not belong to company" });
       return;
     }
+    if (!(await assertAgentExecutionPlanAllowed(req, res, issue, "uploading attachments"))) return;
 
     try {
       await runSingleFileUpload(req, res);
@@ -3341,6 +3403,12 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, attachment.companyId);
+    const issue = await svc.getById(attachment.issueId);
+    if (!issue) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+    if (!(await assertAgentExecutionPlanAllowed(req, res, issue, "deleting attachments"))) return;
 
     try {
       await storage.deleteObject(attachment.companyId, attachment.objectKey);

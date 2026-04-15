@@ -49,7 +49,9 @@ function readNonEmptyString(value: unknown): string | null {
 function summarizeAlertMessage(writeback: QaIssueWriteback | null): string | null {
   if (!writeback?.alertType) return null;
   if (writeback.alertType === "missing_writeback") return "QA run reached terminal state without a durable verdict writeback.";
+  if (writeback.alertType === "missing_plan_approval") return "Execution reached a terminal QA state before the assigned child issue had any approved work plan.";
   if (writeback.alertType === "partial_writeback_conflict") return "QA run produced conflicting writeback signals that require manual repair.";
+  if (writeback.alertType === "plan_pending_review") return "QA run reached terminal state while the issue plan was still pending review.";
   return "QA run completed without a unique, durable verdict.";
 }
 

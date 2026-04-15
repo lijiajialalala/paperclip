@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   agents,
@@ -18,7 +18,12 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
-import { runningProcesses } from "../adapters/index.ts";
+import {
+  registerServerAdapter,
+  runningProcesses,
+  unregisterServerAdapter,
+  type ServerAdapterModule,
+} from "../adapters/index.ts";
 const mockTelemetryClient = vi.hoisted(() => ({ track: vi.fn() }));
 const mockTrackAgentFirstHeartbeat = vi.hoisted(() => vi.fn());
 
@@ -54,6 +59,42 @@ function spawnAliveProcess() {
   });
 }
 
+const staleQueueRecoveryAdapter: ServerAdapterModule = {
+  type: "stale_queue_recovery_test",
+  execute: async () => ({
+    exitCode: 0,
+    signal: null,
+    timedOut: false,
+  }),
+  testEnvironment: async () => ({
+    adapterType: "stale_queue_recovery_test",
+    status: "pass",
+    checks: [],
+    testedAt: new Date(0).toISOString(),
+  }),
+  models: [],
+  supportsLocalAgentJwt: false,
+};
+
+async function waitForRunStatus(
+  heartbeat: ReturnType<typeof heartbeatService>,
+  runId: string,
+  statuses: Array<"queued" | "running" | "succeeded" | "failed" | "cancelled" | "timed_out">,
+  timeoutMs = 10_000,
+  intervalMs = 50,
+) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const run = await heartbeat.getRun(runId);
+    if (run && statuses.includes(run.status)) {
+      return run;
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+
+  throw new Error(`Timed out waiting for run ${runId} to enter one of: ${statuses.join(", ")}`);
+}
+
 describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
@@ -67,6 +108,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   afterEach(async () => {
     vi.clearAllMocks();
     runningProcesses.clear();
+    unregisterServerAdapter("stale_queue_recovery_test");
     for (const child of childProcesses) {
       child.kill("SIGKILL");
     }
@@ -327,6 +369,53 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(mockTrackAgentFirstHeartbeat).toHaveBeenCalledWith(mockTelemetryClient, {
       agentRole: "engineer",
     });
+  });
+
+  it("reaps stale running runs immediately when queued work is blocked for the same agent", async () => {
+    registerServerAdapter(staleQueueRecoveryAdapter);
+
+    const { companyId, agentId, runId: staleRunId } = await seedRunFixture({
+      adapterType: "stale_queue_recovery_test",
+      agentStatus: "running",
+      includeIssue: false,
+    });
+
+    const queuedWakeupRequestId = randomUUID();
+    const queuedRunId = randomUUID();
+
+    await db.insert(agentWakeupRequests).values({
+      id: queuedWakeupRequestId,
+      companyId,
+      agentId,
+      source: "on_demand",
+      triggerDetail: "manual",
+      reason: "manual_retry",
+      payload: { taskKey: "fresh-work" },
+      status: "queued",
+      runId: queuedRunId,
+    });
+
+    await db.insert(heartbeatRuns).values({
+      id: queuedRunId,
+      companyId,
+      agentId,
+      invocationSource: "on_demand",
+      triggerDetail: "manual",
+      status: "queued",
+      wakeupRequestId: queuedWakeupRequestId,
+      contextSnapshot: { taskKey: "fresh-work" },
+    });
+
+    const heartbeat = heartbeatService(db);
+
+    await heartbeat.resumeQueuedRuns();
+
+    const staleRun = await waitForRunStatus(heartbeat, staleRunId, ["failed"]);
+    const queuedRun = await waitForRunStatus(heartbeat, queuedRunId, ["succeeded", "failed"]);
+
+    expect(staleRun.status).toBe("failed");
+    expect(staleRun.errorCode).toBe("process_lost");
+    expect(queuedRun.status).toBe("succeeded");
   });
 
   it("posts a blocker comment to the issue when an engineering agent exhausts all process_lost retries", async () => {

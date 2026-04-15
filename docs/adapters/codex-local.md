@@ -54,3 +54,35 @@ The environment test checks:
 - Working directory is absolute and available (auto-created if missing and permitted)
 - Authentication signal (`OPENAI_API_KEY` presence)
 - A live hello probe (`codex exec --json -` with prompt `Respond with hello.`) to verify the CLI can actually run
+
+## Known Environment Noise
+
+### Remote plugin sync 403 is not a Paperclip regression
+
+Some Codex Desktop environments emit warnings about remote plugin sync on startup, for example:
+
+- `startup remote plugin sync failed`
+- `failed to warm featured plugin ids cache`
+- `chatgpt authentication required`
+- `403 Forbidden` from `https://chatgpt.com/backend-api/plugins/featured`
+
+This warning is outside the Paperclip control plane. It comes from Codex's remote plugin marketplace/authentication path, not from the `codex_local` adapter contract itself.
+
+Use this rule:
+
+- If Paperclip health is normal and `codex_local` runs still execute, classify the warning as **environment noise**.
+- Only escalate as a Paperclip bug if there is a matching adapter/runtime failure in actual runs.
+
+Typical examples that are **not** sufficient on their own to file a Paperclip regression:
+
+- the server starts normally
+- heartbeat runs succeed
+- the warning appears only during Codex startup or plugin-cache warmup
+
+Typical cases that **are** actionable:
+
+- Codex cannot launch local runs at all
+- the warning coincides with adapter auth failures for actual work
+- you explicitly depend on Codex cloud/plugin-marketplace features
+
+Fix direction, when needed: adjust Codex-side authentication or cloud/plugin settings rather than changing Paperclip business logic.

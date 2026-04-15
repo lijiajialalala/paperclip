@@ -185,6 +185,173 @@ describeEmbeddedPostgres("qaWritebackService", () => {
     expect(comments).toHaveLength(0);
   });
 
+  it("keeps plan-pending issues in review and raises a platform gate instead of auto-closing them", async () => {
+    const { companyId, qaAgentId, issueId } = await seedFixture();
+    const createdAt = new Date("2026-04-08T00:20:00.000Z");
+    const agent = await getAgent(qaAgentId);
+
+    await db
+      .update(issues)
+      .set({
+        planProposedAt: new Date("2026-04-08T00:15:00.000Z"),
+        planApprovedAt: null,
+      })
+      .where(eq(issues.id, issueId));
+
+    await db.insert(heartbeatRuns).values({
+      id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      companyId,
+      agentId: qaAgentId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "succeeded",
+      contextSnapshot: { issueId },
+      resultJson: {
+        verdict: "pass",
+        summary: "Verdict: pass\nAll checks green.",
+      },
+      startedAt: new Date(createdAt.getTime() - 60_000),
+      finishedAt: createdAt,
+      createdAt,
+      updatedAt: createdAt,
+    });
+
+    const run = await getRun("dddddddd-dddd-4ddd-8ddd-dddddddddddd");
+    const settlement = await qaWritebackService(db).settleTerminalQaRun({
+      run,
+      runAgent: agent,
+      issueId,
+    });
+
+    const updatedRun = await getRun(run.id);
+    const updatedIssue = await getIssue(issueId);
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+
+    expect(settlement.issueWriteback.status).toBe("alerted_inconclusive");
+    expect(settlement.issueWriteback.alertType).toBe("plan_pending_review");
+    expect(settlement.issueWriteback.canCloseUpstream).toBe(false);
+    expect(readQaIssueWriteback(updatedRun.resultJson)?.alertType).toBe("plan_pending_review");
+    expect(updatedIssue.status).toBe("in_review");
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.body).toContain("Type: plan_pending_review");
+  });
+
+  it("does not let a late approval wash a run that started before plan approval", async () => {
+    const { companyId, qaAgentId, issueId } = await seedFixture();
+    const startedAt = new Date("2026-04-08T00:19:00.000Z");
+    const finishedAt = new Date("2026-04-08T00:20:00.000Z");
+    const agent = await getAgent(qaAgentId);
+
+    await db
+      .update(issues)
+      .set({
+        planProposedAt: new Date("2026-04-08T00:15:00.000Z"),
+        planApprovedAt: new Date("2026-04-08T00:25:00.000Z"),
+      })
+      .where(eq(issues.id, issueId));
+
+    await db.insert(heartbeatRuns).values({
+      id: "d1d1d1d1-d1d1-41d1-81d1-d1d1d1d1d1d1",
+      companyId,
+      agentId: qaAgentId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "succeeded",
+      contextSnapshot: { issueId },
+      resultJson: {
+        verdict: "pass",
+        summary: "Verdict: pass\nApproved after execution had already started.",
+      },
+      startedAt,
+      finishedAt,
+      createdAt: finishedAt,
+      updatedAt: finishedAt,
+    });
+
+    const run = await getRun("d1d1d1d1-d1d1-41d1-81d1-d1d1d1d1d1d1");
+    const settlement = await qaWritebackService(db).settleTerminalQaRun({
+      run,
+      runAgent: agent,
+      issueId,
+    });
+
+    const updatedRun = await getRun(run.id);
+    const updatedIssue = await getIssue(issueId);
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+
+    expect(settlement.issueWriteback.status).toBe("alerted_inconclusive");
+    expect(settlement.issueWriteback.alertType).toBe("plan_pending_review");
+    expect(readQaIssueWriteback(updatedRun.resultJson)?.alertType).toBe("plan_pending_review");
+    expect(updatedIssue.status).toBe("in_review");
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.body).toContain("Type: plan_pending_review");
+  });
+
+  it("blocks auto-close when an assigned child issue never proposed a plan before execution", async () => {
+    const { companyId, qaAgentId, issueId } = await seedFixture();
+    const createdAt = new Date("2026-04-08T00:30:00.000Z");
+    const agent = await getAgent(qaAgentId);
+    const parentIssueId = randomUUID();
+
+    await db.insert(issues).values({
+      id: parentIssueId,
+      companyId,
+      issueNumber: 40,
+      identifier: "CMPA-40",
+      title: "Parent task",
+      status: "in_progress",
+      priority: "high",
+      assigneeAgentId: qaAgentId,
+    });
+
+    await db
+      .update(issues)
+      .set({
+        parentId: parentIssueId,
+        status: "in_progress",
+        planProposedAt: null,
+        planApprovedAt: null,
+      })
+      .where(eq(issues.id, issueId));
+
+    await db.insert(heartbeatRuns).values({
+      id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      companyId,
+      agentId: qaAgentId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "succeeded",
+      contextSnapshot: { issueId },
+      resultJson: {
+        verdict: "pass",
+        summary: "Verdict: pass\nImplemented without an approved plan.",
+      },
+      startedAt: new Date(createdAt.getTime() - 60_000),
+      finishedAt: createdAt,
+      createdAt,
+      updatedAt: createdAt,
+    });
+
+    const run = await getRun("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee");
+    const settlement = await qaWritebackService(db).settleTerminalQaRun({
+      run,
+      runAgent: agent,
+      issueId,
+    });
+
+    const updatedRun = await getRun(run.id);
+    const updatedIssue = await getIssue(issueId);
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+
+    expect(settlement.issueWriteback.status).toBe("alerted_inconclusive");
+    expect(settlement.issueWriteback.alertType).toBe("missing_plan_approval");
+    expect(settlement.issueWriteback.canCloseUpstream).toBe(false);
+    expect(readQaIssueWriteback(updatedRun.resultJson)?.alertType).toBe("missing_plan_approval");
+    expect(updatedIssue.status).toBe("blocked");
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.body).toContain("Type: missing_plan_approval");
+  });
+
   it("is idempotent: calling settleTerminalQaRun twice does not write extra comments", async () => {
     // Fix #3: concurrent / retry invocations must not produce duplicate verdict comments.
     const { companyId, qaAgentId, issueId } = await seedFixture();
