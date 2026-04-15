@@ -13,6 +13,8 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../
 const rootPackageJson = JSON.parse(readFileSync(path.join(repoRoot, "package.json"), "utf8")) as {
   scripts?: Record<string, string>;
 };
+const rootDockerfile = readFileSync(path.join(repoRoot, "Dockerfile"), "utf8");
+const smokeDevOnceScript = readFileSync(path.join(repoRoot, "scripts", "smoke-dev-once.ts"), "utf8");
 
 describe("root dev command coverage", () => {
   it("keeps root dev scripts on the explicit server tsx runner", () => {
@@ -37,5 +39,15 @@ describe("root dev command coverage", () => {
       "src/migration-status.ts",
       "--json",
     ]);
+  });
+
+  it("installs github cli in Docker without pinning a stale keyring checksum", () => {
+    expect(rootDockerfile).toContain("curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg");
+    expect(rootDockerfile).not.toContain("sha256sum -c -");
+  });
+
+  it("stops dev:once smoke runs by terminating the spawned process tree directly", () => {
+    expect(smokeDevOnceScript).toContain('detached: process.platform !== "win32"');
+    expect(smokeDevOnceScript).not.toContain('runPnpm(["dev:stop"]');
   });
 });
