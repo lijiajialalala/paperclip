@@ -130,13 +130,14 @@ function toError(error: unknown, fallback = "Command failed"): Error {
 function spawnPnpm(
   args: string[],
   env: NodeJS.ProcessEnv,
-  options: { stdio?: "inherit" | ["ignore", "pipe", "pipe"] } = {},
+  options: { stdio?: "inherit" | ["ignore", "pipe", "pipe"]; detached?: boolean } = {},
 ) {
   return spawn(pnpmCommand, args, {
     cwd: repoRoot,
     env,
     stdio: options.stdio ?? ["ignore", "pipe", "pipe"],
     shell: spawnUsesShell,
+    detached: options.detached ?? false,
   });
 }
 
@@ -196,15 +197,44 @@ async function forceKillProcessTree(pid: number) {
   }
 
   try {
-    process.kill(pid, "SIGTERM");
+    process.kill(-pid, "SIGTERM");
   } catch {
-    return;
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {
+      return;
+    }
   }
   await delay(1_000);
   try {
-    process.kill(pid, "SIGKILL");
+    process.kill(-pid, "SIGKILL");
   } catch {
-    // Best effort only.
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // Best effort only.
+    }
+  }
+}
+
+function requestProcessTreeShutdown(child: ReturnType<typeof spawn>) {
+  if (typeof child.pid !== "number") return;
+  if (process.platform === "win32") {
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      // Best effort only; taskkill fallback handles the full tree.
+    }
+    return;
+  }
+  try {
+    process.kill(-child.pid, "SIGTERM");
+  } catch {
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      // Best effort only; forceKillProcessTree fallback handles the full tree.
+    }
   }
 }
 
@@ -258,18 +288,11 @@ async function waitForHealthyServer(
 }
 
 async function stopManagedDevRunner(
-  env: NodeJS.ProcessEnv,
   child: ReturnType<typeof spawn>,
   stdoutRef: { value: string },
   stderrRef: { value: string },
 ) {
-  const stopResult = await runPnpm(["dev:stop"], env);
-  if (stopResult.code !== 0) {
-    throw new Error(
-      `pnpm dev:stop failed with code ${stopResult.code}.\nSTDOUT:\n${stopResult.stdout}\nSTDERR:\n${stopResult.stderr}\nDEV STDOUT:\n${stdoutRef.value}\nDEV STDERR:\n${stderrRef.value}`,
-    );
-  }
-
+  requestProcessTreeShutdown(child);
   const exit = await waitForExit(child, shutdownTimeoutMs);
   if (!exit.timedOut) {
     return;
@@ -279,7 +302,7 @@ async function stopManagedDevRunner(
     await forceKillProcessTree(child.pid);
   }
   throw new Error(
-    `pnpm dev:once did not exit within ${shutdownTimeoutMs}ms after pnpm dev:stop.\nSTDOUT:\n${stdoutRef.value}\nSTDERR:\n${stderrRef.value}`,
+    `pnpm dev:once did not exit within ${shutdownTimeoutMs}ms after shutdown was requested.\nSTDOUT:\n${stdoutRef.value}\nSTDERR:\n${stderrRef.value}`,
   );
 }
 
@@ -300,7 +323,9 @@ async function main() {
   const stdoutRef = { value: "" };
   const stderrRef = { value: "" };
   const spawnErrorRef = { value: null as Error | null };
-  const child = spawnPnpm(["dev:once"], env);
+  const child = spawnPnpm(["dev:once"], env, {
+    detached: process.platform !== "win32",
+  });
 
   child.stdout?.on("data", (chunk) => {
     stdoutRef.value += String(chunk);
@@ -319,7 +344,7 @@ async function main() {
     }
     await waitForHealthyServer(serverPort, child, stdoutRef, stderrRef);
     console.log(`[paperclip] pnpm dev:once health check passed on http://127.0.0.1:${serverPort}/api/health`);
-    await stopManagedDevRunner(env, child, stdoutRef, stderrRef);
+    await stopManagedDevRunner(child, stdoutRef, stderrRef);
   } catch (error) {
     if (typeof child.pid === "number" && child.exitCode === null) {
       await forceKillProcessTree(child.pid).catch(() => undefined);
