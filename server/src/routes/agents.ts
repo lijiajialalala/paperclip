@@ -301,9 +301,16 @@ export function agentRoutes(db: Db) {
 
   async function buildSkippedWakeupResponse(
     agent: NonNullable<Awaited<ReturnType<typeof svc.getById>>>,
-    payload: Record<string, unknown> | null | undefined,
+    input:
+      | {
+        payload?: Record<string, unknown> | null;
+        contextSnapshot?: Record<string, unknown> | null;
+      }
+      | null
+      | undefined,
   ) {
-    const issueId = typeof payload?.issueId === "string" && payload.issueId.trim() ? payload.issueId : null;
+    const read = (value: unknown) => (typeof value === "string" && value.trim().length > 0 ? value.trim() : null);
+    const issueId = read(input?.payload?.issueId) ?? read(input?.contextSnapshot?.issueId);
     if (!issueId) {
       return {
         status: "skipped" as const,
@@ -2183,7 +2190,7 @@ export function agentRoutes(db: Db) {
     });
 
     if (!run) {
-      res.status(202).json(await buildSkippedWakeupResponse(agent, req.body.payload ?? null));
+      res.status(202).json(await buildSkippedWakeupResponse(agent, wakeTarget));
       return;
     }
 

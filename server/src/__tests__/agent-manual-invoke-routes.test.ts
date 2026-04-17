@@ -84,7 +84,7 @@ vi.mock("../adapters/index.js", () => ({
   requireServerAdapter: vi.fn(),
 }));
 
-function createApp() {
+function createApp(dbOverride?: { select?: ReturnType<typeof vi.fn> }) {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
@@ -97,7 +97,7 @@ function createApp() {
     };
     next();
   });
-  app.use("/api", agentRoutes({ select: vi.fn() } as any));
+  app.use("/api", agentRoutes(({ select: vi.fn(), ...dbOverride } as unknown) as any));
   app.use(errorHandler);
   return app;
 }
@@ -222,5 +222,46 @@ describe("agent manual invoke routes", () => {
     );
     expect(invokeContext.issueId).toBeUndefined();
     expect(invokeContext.taskId).toBeUndefined();
+  });
+
+  it("preserves inferred issue context when a manual wake is skipped", async () => {
+    mockIssueService.list.mockResolvedValue([
+      {
+        id: "issue-1",
+        status: "in_progress",
+        checkoutRunId: "run-old",
+        executionRunId: null,
+      },
+    ]);
+    mockHeartbeatService.wakeup.mockResolvedValue(null);
+
+    const select = vi.fn(() => ({
+      from: vi.fn(() => ({
+        where: vi.fn(async () => [
+          {
+            id: "issue-1",
+            executionRunId: null,
+          },
+        ]),
+      })),
+    }));
+
+    const res = await request(createApp({ select })).post(`/api/agents/${agentId}/wakeup`).send({
+      source: "on_demand",
+      triggerDetail: "manual",
+      reason: "retry_failed_run",
+    });
+
+    expect(res.status).toBe(202);
+    expect(res.body).toEqual(
+      expect.objectContaining({
+        status: "skipped",
+        reason: "wakeup_skipped",
+        issueId: "issue-1",
+        executionRunId: null,
+        executionAgentId: null,
+        executionAgentName: null,
+      }),
+    );
   });
 });
