@@ -3,6 +3,7 @@ import type { agents } from "@paperclipai/db";
 import { sessionCodec as codexSessionCodec } from "@paperclipai/adapter-codex-local/server";
 import { resolveDefaultAgentWorkspaceDir } from "../home-paths.js";
 import {
+  applySyntheticTimerAdapterDefaults,
   applyPersistedExecutionWorkspaceConfig,
   buildRealizedExecutionWorkspaceFromPersisted,
   buildExplicitResumeSessionOverride,
@@ -328,6 +329,59 @@ describe("shouldResetTaskSessionForWake", () => {
         wakeTriggerDetail: "callback",
       }),
     ).toBe(false);
+  });
+});
+
+describe("applySyntheticTimerAdapterDefaults", () => {
+  it("injects a timeout for synthetic timer runs on local sessioned adapters", () => {
+    const result = applySyntheticTimerAdapterDefaults({
+      contextSnapshot: { wakeSource: "timer" },
+      taskKey: "__heartbeat__",
+      issueId: null,
+      adapterType: "codex_local",
+      config: { model: "gpt-5.4" },
+    });
+
+    expect(result).toMatchObject({
+      model: "gpt-5.4",
+      timeoutSec: 900,
+    });
+  });
+
+  it("preserves an explicit timeout when one is already configured", () => {
+    const result = applySyntheticTimerAdapterDefaults({
+      contextSnapshot: { wakeSource: "timer" },
+      taskKey: "__heartbeat__",
+      issueId: null,
+      adapterType: "codex_local",
+      config: { timeoutSec: 1200 },
+    });
+
+    expect(result.timeoutSec).toBe(1200);
+  });
+
+  it("preserves an explicit zero timeout when synthetic timers disable timeout", () => {
+    const result = applySyntheticTimerAdapterDefaults({
+      contextSnapshot: { wakeSource: "timer" },
+      taskKey: "__heartbeat__",
+      issueId: null,
+      adapterType: "codex_local",
+      config: { timeoutSec: 0 },
+    });
+
+    expect(result.timeoutSec).toBe(0);
+  });
+
+  it("does not modify assignment or issue-scoped runs", () => {
+    const result = applySyntheticTimerAdapterDefaults({
+      contextSnapshot: { wakeSource: "assignment" },
+      taskKey: "issue-123",
+      issueId: "issue-123",
+      adapterType: "codex_local",
+      config: {},
+    });
+
+    expect(result.timeoutSec).toBeUndefined();
   });
 });
 
