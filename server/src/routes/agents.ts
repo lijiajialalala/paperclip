@@ -112,11 +112,74 @@ export function agentRoutes(db: Db) {
   const statusTruth = issueStatusTruthService(db);
   const canQueryDb = typeof (db as { select?: unknown }).select === "function";
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
+  const MANUAL_WAKE_OPEN_STATUSES = ["todo", "in_progress", "in_review", "blocked"] as const;
 
   async function getCurrentUserRedactionOptions() {
     return {
       enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
     };
+  }
+
+  function hasExplicitWakeTaskContext(input: {
+    payload?: Record<string, unknown> | null;
+    contextSnapshot?: Record<string, unknown> | null;
+  }) {
+    const payload = input.payload ?? {};
+    const contextSnapshot = input.contextSnapshot ?? {};
+    const read = (value: unknown) => (typeof value === "string" && value.trim().length > 0 ? value.trim() : null);
+    return Boolean(
+      read(payload.issueId)
+      || read(payload.taskId)
+      || read(payload.taskKey)
+      || read(contextSnapshot.issueId)
+      || read(contextSnapshot.taskId)
+      || read(contextSnapshot.taskKey),
+    );
+  }
+
+  async function resolveDefaultIssueContextForManualWake(agentId: string, companyId: string) {
+    const issueSvc = issueService(db);
+    const assignedIssues = await issueSvc.list(companyId, {
+      assigneeAgentId: agentId,
+      status: [...MANUAL_WAKE_OPEN_STATUSES],
+    });
+    const selectUnique = <T,>(items: T[]) => (items.length === 1 ? items[0] : null);
+    const selectedIssue =
+      selectUnique(assignedIssues.filter((issue) => typeof issue.checkoutRunId === "string" && issue.checkoutRunId.length > 0))
+      ?? selectUnique(assignedIssues.filter((issue) => typeof issue.executionRunId === "string" && issue.executionRunId.length > 0))
+      ?? selectUnique(assignedIssues.filter((issue) => issue.status === "in_progress"))
+      ?? selectUnique(assignedIssues);
+    if (!selectedIssue) return null;
+    return {
+      issueId: selectedIssue.id,
+      taskId: selectedIssue.id,
+    };
+  }
+
+  async function enrichManualWakeTarget(input: {
+    agentId: string;
+    companyId: string;
+    source: "timer" | "assignment" | "on_demand" | "automation";
+    payload?: Record<string, unknown> | null;
+    contextSnapshot?: Record<string, unknown> | null;
+  }) {
+    const payload = input.payload ? { ...input.payload } : null;
+    const contextSnapshot = input.contextSnapshot ? { ...input.contextSnapshot } : {};
+    if (input.source !== "on_demand" || hasExplicitWakeTaskContext({ payload, contextSnapshot })) {
+      return { payload, contextSnapshot };
+    }
+    const inferredContext = await resolveDefaultIssueContextForManualWake(input.agentId, input.companyId);
+    if (!inferredContext) return { payload, contextSnapshot };
+    if (!payload?.issueId) {
+      if (payload) payload.issueId = inferredContext.issueId;
+    }
+    if (!contextSnapshot.issueId) {
+      contextSnapshot.issueId = inferredContext.issueId;
+    }
+    if (!contextSnapshot.taskId) {
+      contextSnapshot.taskId = inferredContext.taskId;
+    }
+    return { payload, contextSnapshot };
   }
 
   function canCreateAgents(agent: { role: string; permissions: Record<string, unknown> | null | undefined }) {
@@ -2097,19 +2160,27 @@ export function agentRoutes(db: Db) {
       return;
     }
 
-    const run = await heartbeat.wakeup(id, {
+    const wakeTarget = await enrichManualWakeTarget({
+      agentId: id,
+      companyId: agent.companyId,
       source: req.body.source,
-      triggerDetail: req.body.triggerDetail ?? "manual",
-      reason: req.body.reason ?? null,
       payload: req.body.payload ?? null,
-      idempotencyKey: req.body.idempotencyKey ?? null,
-      requestedByActorType: req.actor.type === "agent" ? "agent" : "user",
-      requestedByActorId: req.actor.type === "agent" ? req.actor.agentId ?? null : req.actor.userId ?? null,
       contextSnapshot: {
         triggeredBy: req.actor.type,
         actorId: req.actor.type === "agent" ? req.actor.agentId : req.actor.userId,
         forceFreshSession: req.body.forceFreshSession === true,
       },
+    });
+
+    const run = await heartbeat.wakeup(id, {
+      source: req.body.source,
+      triggerDetail: req.body.triggerDetail ?? "manual",
+      reason: req.body.reason ?? null,
+      payload: wakeTarget.payload,
+      idempotencyKey: req.body.idempotencyKey ?? null,
+      requestedByActorType: req.actor.type === "agent" ? "agent" : "user",
+      requestedByActorId: req.actor.type === "agent" ? req.actor.agentId ?? null : req.actor.userId ?? null,
+      contextSnapshot: wakeTarget.contextSnapshot,
     });
 
     if (!run) {
@@ -2147,13 +2218,21 @@ export function agentRoutes(db: Db) {
       return;
     }
 
-    const run = await heartbeat.invoke(
-      id,
-      "on_demand",
-      {
+    const invokeTarget = await enrichManualWakeTarget({
+      agentId: id,
+      companyId: agent.companyId,
+      source: "on_demand",
+      payload: null,
+      contextSnapshot: {
         triggeredBy: req.actor.type,
         actorId: req.actor.type === "agent" ? req.actor.agentId : req.actor.userId,
       },
+    });
+
+    const run = await heartbeat.invoke(
+      id,
+      "on_demand",
+      invokeTarget.contextSnapshot,
       "manual",
       {
         actorType: req.actor.type === "agent" ? "agent" : "user",
