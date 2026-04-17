@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   approvalComments,
@@ -30,6 +30,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { instanceSettingsService } from "../services/instance-settings.ts";
+import { issueApprovalService } from "../services/issue-approvals.ts";
 import { issueStatusTruthService } from "../services/issue-status-truth.ts";
 import { issueService } from "../services/issues.ts";
 
@@ -647,6 +648,1089 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     expect(result.find((issue) => issue.id === olderIssueId)?.lastActivityAt?.toISOString()).toBe(
       "2026-03-26T10:00:00.000Z",
     );
+  });
+});
+
+describeEmbeddedPostgres("issueService.proposePlan", () => {
+  let db!: ReturnType<typeof createDb>;
+  let competingDb!: ReturnType<typeof createDb>;
+  let svc!: ReturnType<typeof issueService>;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-issues-propose-plan-");
+    db = createDb(tempDb.connectionString);
+    competingDb = createDb(tempDb.connectionString);
+    svc = issueService(db);
+  }, embeddedPostgresSuiteTimeoutMs);
+
+  afterEach(async () => {
+    await db.delete(approvalComments);
+    await db.delete(issueApprovals);
+    await db.delete(approvals);
+    await db.delete(issueComments);
+    await db.delete(issueInboxArchives);
+    await db.delete(issueReadStates);
+    await db.delete(activityLog);
+    await db.delete(heartbeatRuns);
+    await db.delete(issues);
+    await db.delete(agents);
+    await db.delete(instanceSettings);
+    await db.delete(companies);
+  });
+
+  afterAll(async () => {
+    await (competingDb as { $client?: { end?: () => Promise<void> } }).$client?.end?.();
+    await (db as { $client?: { end?: () => Promise<void> } }).$client?.end?.();
+    await tempDb?.cleanup();
+  });
+
+  it("creates a single live work_plan approval inside the same transaction and routes it to the parent assignee", async () => {
+    const companyId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const parentAgentId = randomUUID();
+    const parentIssueId = randomUUID();
+    const childIssueId = randomUUID();
+    const runId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values([
+      {
+        id: assigneeAgentId,
+        companyId,
+        name: "ChildEngineer",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: parentAgentId,
+        companyId,
+        name: "LeadReviewer",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId: assigneeAgentId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "running",
+      contextSnapshot: { issueId: childIssueId },
+      resultJson: {},
+      errorCode: null,
+      error: null,
+      processLossRetryCount: 0,
+      startedAt: new Date("2026-04-16T00:59:00.000Z"),
+      finishedAt: null,
+      createdAt: new Date("2026-04-16T01:00:00.000Z"),
+      updatedAt: new Date("2026-04-16T01:00:00.000Z"),
+    });
+
+    await db.insert(issues).values([
+      {
+        id: parentIssueId,
+        companyId,
+        title: "Parent issue",
+        status: "todo",
+        priority: "medium",
+        assigneeAgentId: parentAgentId,
+      },
+      {
+        id: childIssueId,
+        companyId,
+        parentId: parentIssueId,
+        title: "Child issue",
+        status: "todo",
+        priority: "medium",
+        assigneeAgentId: assigneeAgentId,
+        checkoutRunId: runId,
+        executionRunId: runId,
+        executionLockedAt: new Date("2026-04-16T01:00:00.000Z"),
+      },
+    ]);
+
+    const result = await svc.proposePlan(childIssueId, {
+      planText: "Deliver this in two checkpoints.",
+      actor: {
+        actorType: "agent",
+        actorId: assigneeAgentId,
+        agentId: assigneeAgentId,
+        runId,
+      },
+    });
+
+    expect(result.issue.id).toBe(childIssueId);
+    expect(result.issue.status).toBe("todo");
+    expect(result.issue.planProposedAt).toBeTruthy();
+    expect(result.issue.planApprovedAt).toBeNull();
+    expect(result.issue.checkoutRunId).toBeNull();
+    expect(result.issue.executionRunId).toBeNull();
+    expect(result.approval.type).toBe("work_plan");
+    expect(result.approval.status).toBe("pending");
+    expect(result.approval.targetAgentId).toBe(parentAgentId);
+    expect(result.approval.routingMode).toBe("parent_assignee_agent");
+
+    const approvalLinks = await db
+      .select({
+        issueId: issueApprovals.issueId,
+        approvalId: issueApprovals.approvalId,
+      })
+      .from(issueApprovals)
+      .where(eq(issueApprovals.issueId, childIssueId));
+    expect(approvalLinks).toHaveLength(1);
+    expect(approvalLinks[0]?.approvalId).toBe(result.approval.id);
+
+    const comments = await db
+      .select({
+        body: issueComments.body,
+        createdByRunId: issueComments.createdByRunId,
+        authorAgentId: issueComments.authorAgentId,
+      })
+      .from(issueComments)
+      .where(eq(issueComments.issueId, childIssueId));
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.body).toContain("**Work Plan**");
+    expect(comments[0]?.body).toContain("Deliver this in two checkpoints.");
+    expect(comments[0]?.createdByRunId).toBe(runId);
+    expect(comments[0]?.authorAgentId).toBe(assigneeAgentId);
+  });
+
+  it("rolls back the proposal edge when duplicate live work_plan approvals already exist", async () => {
+    const companyId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const issueId = randomUUID();
+    const runId = randomUUID();
+    const approvalA = randomUUID();
+    const approvalB = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: assigneeAgentId,
+      companyId,
+      name: "ChildEngineer",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId: assigneeAgentId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "running",
+      contextSnapshot: { issueId },
+      resultJson: {},
+      errorCode: null,
+      error: null,
+      processLossRetryCount: 0,
+      startedAt: new Date("2026-04-16T00:59:00.000Z"),
+      finishedAt: null,
+      createdAt: new Date("2026-04-16T01:00:00.000Z"),
+      updatedAt: new Date("2026-04-16T01:00:00.000Z"),
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Child issue",
+      status: "todo",
+      priority: "medium",
+      assigneeAgentId: assigneeAgentId,
+      checkoutRunId: runId,
+      executionRunId: runId,
+      executionLockedAt: new Date("2026-04-16T01:00:00.000Z"),
+      planProposedAt: null,
+      planApprovedAt: null,
+    });
+
+    await db.insert(approvals).values([
+      {
+        id: approvalA,
+        companyId,
+        type: "work_plan",
+        requestedByAgentId: assigneeAgentId,
+        status: "pending",
+        payload: { source: "a" },
+      },
+      {
+        id: approvalB,
+        companyId,
+        type: "work_plan",
+        requestedByAgentId: assigneeAgentId,
+        status: "revision_requested",
+        payload: { source: "b" },
+      },
+    ]);
+    await db.insert(issueApprovals).values([
+      {
+        companyId,
+        issueId,
+        approvalId: approvalA,
+        linkedByAgentId: assigneeAgentId,
+      },
+      {
+        companyId,
+        issueId,
+        approvalId: approvalB,
+        linkedByAgentId: assigneeAgentId,
+      },
+    ]);
+
+    await expect(
+      svc.proposePlan(issueId, {
+        planText: "This should fail closed.",
+        actor: {
+          actorType: "agent",
+          actorId: assigneeAgentId,
+          agentId: assigneeAgentId,
+          runId,
+        },
+      }),
+    ).rejects.toThrow(/multiple live work plan approvals/i);
+
+    const [issueRow] = await db
+      .select({
+        planProposedAt: issues.planProposedAt,
+        planApprovedAt: issues.planApprovedAt,
+        checkoutRunId: issues.checkoutRunId,
+        executionRunId: issues.executionRunId,
+      })
+      .from(issues)
+      .where(eq(issues.id, issueId));
+    expect(issueRow?.planProposedAt).toBeNull();
+    expect(issueRow?.planApprovedAt).toBeNull();
+    expect(issueRow?.checkoutRunId).toBe(runId);
+    expect(issueRow?.executionRunId).toBe(runId);
+
+    const comments = await db
+      .select({ id: issueComments.id })
+      .from(issueComments)
+      .where(eq(issueComments.issueId, issueId));
+    expect(comments).toEqual([]);
+  });
+
+  it("fails closed when a pending plan mirror exists but the live work_plan approval is missing", async () => {
+    const companyId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const issueId = randomUUID();
+    const runId = randomUUID();
+    const proposedAt = new Date("2026-04-16T03:00:00.000Z");
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: assigneeAgentId,
+      companyId,
+      name: "ChildEngineer",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId: assigneeAgentId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "running",
+      contextSnapshot: { issueId },
+      resultJson: {},
+      errorCode: null,
+      error: null,
+      processLossRetryCount: 0,
+      startedAt: new Date("2026-04-16T02:59:00.000Z"),
+      finishedAt: null,
+      createdAt: new Date("2026-04-16T03:00:00.000Z"),
+      updatedAt: new Date("2026-04-16T03:00:00.000Z"),
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Child issue",
+      status: "todo",
+      priority: "medium",
+      assigneeAgentId,
+      planProposedAt: proposedAt,
+      planApprovedAt: null,
+      checkoutRunId: runId,
+      executionRunId: runId,
+      executionLockedAt: new Date("2026-04-16T03:00:00.000Z"),
+    });
+
+    await expect(
+      svc.proposePlan(issueId, {
+        planText: "This should fail before any write.",
+        actor: {
+          actorType: "agent",
+          actorId: assigneeAgentId,
+          agentId: assigneeAgentId,
+          runId,
+        },
+      }),
+    ).rejects.toThrow(/pending plan mirror.*no live work plan approval/i);
+
+    const [issueRow] = await db
+      .select({
+        planProposedAt: issues.planProposedAt,
+        planApprovedAt: issues.planApprovedAt,
+        checkoutRunId: issues.checkoutRunId,
+        executionRunId: issues.executionRunId,
+      })
+      .from(issues)
+      .where(eq(issues.id, issueId));
+    expect(issueRow).toEqual({
+      planProposedAt: proposedAt,
+      planApprovedAt: null,
+      checkoutRunId: runId,
+      executionRunId: runId,
+    });
+
+    const approvalRows = await db
+      .select({ id: approvals.id })
+      .from(approvals)
+      .where(eq(approvals.companyId, companyId));
+    expect(approvalRows).toEqual([]);
+
+    const comments = await db
+      .select({ id: issueComments.id })
+      .from(issueComments)
+      .where(eq(issueComments.issueId, issueId));
+    expect(comments).toEqual([]);
+  });
+
+  it("serializes concurrent live work_plan links so only one approval can win the issue", async () => {
+    const companyId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const issueId = randomUUID();
+    const approvalA = randomUUID();
+    const approvalB = randomUUID();
+    const competingApprovalSvc = issueApprovalService(competingDb);
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: assigneeAgentId,
+      companyId,
+      name: "ChildEngineer",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Child issue",
+      status: "todo",
+      priority: "medium",
+      assigneeAgentId,
+    });
+    await db.insert(approvals).values([
+      {
+        id: approvalA,
+        companyId,
+        type: "work_plan",
+        requestedByAgentId: assigneeAgentId,
+        status: "pending",
+        payload: { source: "a" },
+      },
+      {
+        id: approvalB,
+        companyId,
+        type: "work_plan",
+        requestedByAgentId: assigneeAgentId,
+        status: "pending",
+        payload: { source: "b" },
+      },
+    ]);
+
+    let releaseFirstLink: (() => void) | null = null;
+    const firstLinkTxn = db.transaction(async (tx) => {
+      await tx.execute(
+        sql`select ${issues.id} from ${issues} where ${issues.id} = ${issueId} for update`,
+      );
+      await tx.insert(issueApprovals).values({
+        companyId,
+        issueId,
+        approvalId: approvalA,
+        linkedByAgentId: assigneeAgentId,
+      });
+      await new Promise<void>((resolve) => {
+        releaseFirstLink = resolve;
+      });
+    });
+
+    const waitForFirstLinkToHoldLock = async () => {
+      const deadline = Date.now() + 2_000;
+      while (!releaseFirstLink) {
+        if (Date.now() > deadline) {
+          throw new Error("timed out waiting for first approval link to acquire its lock");
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    };
+    await waitForFirstLinkToHoldLock();
+
+    const competingLink = competingApprovalSvc.linkManyForApproval(approvalB, [issueId], {
+      agentId: assigneeAgentId,
+    });
+    const pendingState = await Promise.race([
+      competingLink.then(
+        () => "resolved" as const,
+        () => "rejected" as const,
+      ),
+      new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 150)),
+    ]);
+    expect(pendingState).toBe("pending");
+
+    releaseFirstLink?.();
+    await firstLinkTxn;
+
+    await expect(competingLink).rejects.toThrow(/already has a live work plan approval/i);
+
+    const links = await db
+      .select({
+        approvalId: issueApprovals.approvalId,
+      })
+      .from(issueApprovals)
+      .where(eq(issueApprovals.issueId, issueId));
+    expect(links).toEqual([{ approvalId: approvalA }]);
+  });
+});
+
+describeEmbeddedPostgres("issueService.plan review settlement", () => {
+  let db!: ReturnType<typeof createDb>;
+  let svc!: ReturnType<typeof issueService>;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-issues-plan-review-");
+    db = createDb(tempDb.connectionString);
+    svc = issueService(db);
+  }, embeddedPostgresSuiteTimeoutMs);
+
+  afterEach(async () => {
+    await db.delete(approvalComments);
+    await db.delete(issueApprovals);
+    await db.delete(approvals);
+    await db.delete(issueComments);
+    await db.delete(issueInboxArchives);
+    await db.delete(issueReadStates);
+    await db.delete(activityLog);
+    await db.delete(heartbeatRuns);
+    await db.delete(issues);
+    await db.delete(agents);
+    await db.delete(instanceSettings);
+    await db.delete(companies);
+  });
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  it("approves the live work_plan approval and mirrors planApprovedAt in the same transaction", async () => {
+    const companyId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const reviewerAgentId = randomUUID();
+    const issueId = randomUUID();
+    const approvalId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: assigneeAgentId,
+        companyId,
+        name: "ChildEngineer",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: reviewerAgentId,
+        companyId,
+        name: "LeadReviewer",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Child issue",
+      status: "todo",
+      priority: "medium",
+      assigneeAgentId,
+      planProposedAt: new Date("2026-04-16T02:00:00.000Z"),
+      planApprovedAt: null,
+    });
+    await db.insert(approvals).values({
+      id: approvalId,
+      companyId,
+      type: "work_plan",
+      requestedByAgentId: assigneeAgentId,
+      targetAgentId: reviewerAgentId,
+      routingMode: "parent_assignee_agent",
+      status: "pending",
+      payload: { issueId },
+    });
+    await db.insert(issueApprovals).values({
+      companyId,
+      issueId,
+      approvalId,
+      linkedByAgentId: assigneeAgentId,
+    });
+
+    const result = await svc.approvePlan(issueId, {
+      decidedByUserId: null,
+      decidedByAgentId: reviewerAgentId,
+      decisionNote: "Plan approved via issue review",
+    });
+
+    expect(result.issue.planApprovedAt).toBeTruthy();
+    expect(result.approval?.id).toBe(approvalId);
+    expect(result.approval?.status).toBe("approved");
+    expect(result.approval?.decidedByAgentId).toBe(reviewerAgentId);
+    expect(result.approval?.decisionNote).toBe("Plan approved via issue review");
+
+    const [approvalRow] = await db
+      .select({
+        status: approvals.status,
+        decidedByAgentId: approvals.decidedByAgentId,
+        decisionNote: approvals.decisionNote,
+      })
+      .from(approvals)
+      .where(eq(approvals.id, approvalId));
+    expect(approvalRow).toEqual({
+      status: "approved",
+      decidedByAgentId: reviewerAgentId,
+      decisionNote: "Plan approved via issue review",
+    });
+  });
+
+  it("approvePlan syncs plan approval mirrors across every issue linked to the same work plan", async () => {
+    const companyId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const reviewerAgentId = randomUUID();
+    const primaryIssueId = randomUUID();
+    const siblingIssueId = randomUUID();
+    const approvalId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: assigneeAgentId,
+        companyId,
+        name: "ChildEngineer",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: reviewerAgentId,
+        companyId,
+        name: "LeadReviewer",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(issues).values([
+      {
+        id: primaryIssueId,
+        companyId,
+        title: "Primary issue",
+        status: "todo",
+        priority: "medium",
+        assigneeAgentId,
+        planProposedAt: new Date("2026-04-16T02:00:00.000Z"),
+        planApprovedAt: null,
+      },
+      {
+        id: siblingIssueId,
+        companyId,
+        title: "Sibling issue",
+        status: "todo",
+        priority: "medium",
+        assigneeAgentId,
+        planProposedAt: new Date("2026-04-16T02:00:00.000Z"),
+        planApprovedAt: null,
+      },
+    ]);
+    await db.insert(approvals).values({
+      id: approvalId,
+      companyId,
+      type: "work_plan",
+      requestedByAgentId: assigneeAgentId,
+      targetAgentId: reviewerAgentId,
+      routingMode: "parent_assignee_agent",
+      status: "pending",
+      payload: { issueId: primaryIssueId },
+    });
+    await db.insert(issueApprovals).values([
+      {
+        companyId,
+        issueId: primaryIssueId,
+        approvalId,
+        linkedByAgentId: assigneeAgentId,
+      },
+      {
+        companyId,
+        issueId: siblingIssueId,
+        approvalId,
+        linkedByAgentId: assigneeAgentId,
+      },
+    ]);
+
+    await svc.approvePlan(primaryIssueId, {
+      decidedByUserId: null,
+      decidedByAgentId: reviewerAgentId,
+      decisionNote: "Plan approved across linked issues",
+    });
+
+    const rows = await db
+      .select({
+        id: issues.id,
+        planApprovedAt: issues.planApprovedAt,
+      })
+      .from(issues)
+      .where(inArray(issues.id, [primaryIssueId, siblingIssueId]));
+
+    expect(rows).toHaveLength(2);
+    expect(rows.every((row) => row.planApprovedAt instanceof Date)).toBe(true);
+  });
+
+  it("rejects the live work_plan approval and clears plan gate mirror fields together", async () => {
+    const companyId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const issueId = randomUUID();
+    const approvalId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: assigneeAgentId,
+      companyId,
+      name: "ChildEngineer",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Child issue",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId,
+      planProposedAt: new Date("2026-04-16T02:00:00.000Z"),
+      planApprovedAt: null,
+    });
+    await db.insert(approvals).values({
+      id: approvalId,
+      companyId,
+      type: "work_plan",
+      requestedByAgentId: assigneeAgentId,
+      targetUserId: "board-user",
+      routingMode: "board_pool",
+      status: "pending",
+      payload: { issueId },
+    });
+    await db.insert(issueApprovals).values({
+      companyId,
+      issueId,
+      approvalId,
+      linkedByAgentId: assigneeAgentId,
+    });
+
+    const result = await svc.rejectPlan(issueId, {
+      decidedByUserId: "board-user",
+      decidedByAgentId: null,
+      decisionNote: "Please tighten the execution plan.",
+    });
+
+    expect(result.issue.planProposedAt).toBeNull();
+    expect(result.issue.planApprovedAt).toBeNull();
+    expect(result.approval?.id).toBe(approvalId);
+    expect(result.approval?.status).toBe("rejected");
+    expect(result.approval?.decidedByUserId).toBe("board-user");
+    expect(result.approval?.decisionNote).toBe("Please tighten the execution plan.");
+
+    const [issueRow] = await db
+      .select({
+        planProposedAt: issues.planProposedAt,
+        planApprovedAt: issues.planApprovedAt,
+      })
+      .from(issues)
+      .where(eq(issues.id, issueId));
+    expect(issueRow).toEqual({
+      planProposedAt: null,
+      planApprovedAt: null,
+    });
+  });
+
+  it("rejectPlan clears plan mirrors across every issue linked to the same work plan", async () => {
+    const companyId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const primaryIssueId = randomUUID();
+    const siblingIssueId = randomUUID();
+    const approvalId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: assigneeAgentId,
+      companyId,
+      name: "ChildEngineer",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issues).values([
+      {
+        id: primaryIssueId,
+        companyId,
+        title: "Primary issue",
+        status: "todo",
+        priority: "medium",
+        assigneeAgentId,
+        planProposedAt: new Date("2026-04-16T02:00:00.000Z"),
+        planApprovedAt: null,
+      },
+      {
+        id: siblingIssueId,
+        companyId,
+        title: "Sibling issue",
+        status: "todo",
+        priority: "medium",
+        assigneeAgentId,
+        planProposedAt: new Date("2026-04-16T02:00:00.000Z"),
+        planApprovedAt: null,
+      },
+    ]);
+    await db.insert(approvals).values({
+      id: approvalId,
+      companyId,
+      type: "work_plan",
+      requestedByAgentId: assigneeAgentId,
+      targetUserId: "board-user",
+      routingMode: "board_pool",
+      status: "pending",
+      payload: { issueId: primaryIssueId },
+    });
+    await db.insert(issueApprovals).values([
+      {
+        companyId,
+        issueId: primaryIssueId,
+        approvalId,
+        linkedByAgentId: assigneeAgentId,
+      },
+      {
+        companyId,
+        issueId: siblingIssueId,
+        approvalId,
+        linkedByAgentId: assigneeAgentId,
+      },
+    ]);
+
+    await svc.rejectPlan(primaryIssueId, {
+      decidedByUserId: "board-user",
+      decidedByAgentId: null,
+      decisionNote: "Tighten the plan before execution.",
+    });
+
+    const rows = await db
+      .select({
+        id: issues.id,
+        planProposedAt: issues.planProposedAt,
+        planApprovedAt: issues.planApprovedAt,
+      })
+      .from(issues)
+      .where(inArray(issues.id, [primaryIssueId, siblingIssueId]));
+
+    expect(rows).toHaveLength(2);
+    expect(rows.every((row) => row.planProposedAt === null && row.planApprovedAt === null)).toBe(true);
+  });
+
+  it("approvePlan fails closed when a sibling linked issue has already started execution", async () => {
+    const companyId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const reviewerAgentId = randomUUID();
+    const primaryIssueId = randomUUID();
+    const siblingIssueId = randomUUID();
+    const approvalId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: assigneeAgentId,
+        companyId,
+        name: "ChildEngineer",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: reviewerAgentId,
+        companyId,
+        name: "LeadReviewer",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(issues).values([
+      {
+        id: primaryIssueId,
+        companyId,
+        title: "Primary issue",
+        status: "todo",
+        priority: "medium",
+        assigneeAgentId,
+        planProposedAt: new Date("2026-04-16T02:00:00.000Z"),
+        planApprovedAt: null,
+      },
+      {
+        id: siblingIssueId,
+        companyId,
+        title: "Sibling issue",
+        status: "in_progress",
+        priority: "medium",
+        assigneeAgentId,
+        planProposedAt: new Date("2026-04-16T02:00:00.000Z"),
+        planApprovedAt: null,
+      },
+    ]);
+    await db.insert(approvals).values({
+      id: approvalId,
+      companyId,
+      type: "work_plan",
+      requestedByAgentId: assigneeAgentId,
+      targetAgentId: reviewerAgentId,
+      routingMode: "parent_assignee_agent",
+      status: "pending",
+      payload: { issueId: primaryIssueId },
+    });
+    await db.insert(issueApprovals).values([
+      {
+        companyId,
+        issueId: primaryIssueId,
+        approvalId,
+        linkedByAgentId: assigneeAgentId,
+      },
+      {
+        companyId,
+        issueId: siblingIssueId,
+        approvalId,
+        linkedByAgentId: assigneeAgentId,
+      },
+    ]);
+
+    await expect(
+      svc.approvePlan(primaryIssueId, {
+        decidedByUserId: null,
+        decidedByAgentId: reviewerAgentId,
+        decisionNote: "approve",
+      }),
+    ).rejects.toThrow(/execution has already started/i);
+
+    const [approvalRow] = await db
+      .select({ status: approvals.status })
+      .from(approvals)
+      .where(eq(approvals.id, approvalId));
+    expect(approvalRow?.status).toBe("pending");
+  });
+
+  it("fails closed when approvePlan is called without a live work_plan approval row", async () => {
+    const companyId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: assigneeAgentId,
+      companyId,
+      name: "ChildEngineer",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Child issue",
+      status: "todo",
+      priority: "medium",
+      assigneeAgentId,
+      planProposedAt: new Date("2026-04-16T02:00:00.000Z"),
+      planApprovedAt: null,
+    });
+
+    await expect(
+      svc.approvePlan(issueId, {
+        decidedByUserId: "board-user",
+        decidedByAgentId: null,
+        decisionNote: "approve",
+      }),
+    ).rejects.toThrow(/no live work plan approval/i);
+
+    const [issueRow] = await db
+      .select({
+        planProposedAt: issues.planProposedAt,
+        planApprovedAt: issues.planApprovedAt,
+      })
+      .from(issues)
+      .where(eq(issues.id, issueId));
+    expect(issueRow?.planProposedAt).toBeTruthy();
+    expect(issueRow?.planApprovedAt).toBeNull();
+  });
+
+  it("fails closed when rejectPlan is called without a live work_plan approval row", async () => {
+    const companyId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: assigneeAgentId,
+      companyId,
+      name: "ChildEngineer",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Child issue",
+      status: "todo",
+      priority: "medium",
+      assigneeAgentId,
+      planProposedAt: new Date("2026-04-16T02:00:00.000Z"),
+      planApprovedAt: null,
+    });
+
+    await expect(
+      svc.rejectPlan(issueId, {
+        decidedByUserId: "board-user",
+        decidedByAgentId: null,
+        decisionNote: "reject",
+      }),
+    ).rejects.toThrow(/no live work plan approval/i);
+
+    const [issueRow] = await db
+      .select({
+        planProposedAt: issues.planProposedAt,
+        planApprovedAt: issues.planApprovedAt,
+      })
+      .from(issues)
+      .where(eq(issues.id, issueId));
+    expect(issueRow?.planProposedAt).toBeTruthy();
+    expect(issueRow?.planApprovedAt).toBeNull();
   });
 });
 

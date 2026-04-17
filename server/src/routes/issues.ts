@@ -4,7 +4,7 @@ import { Router, type Request, type Response } from "express";
 import multer from "multer";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
-import { activityLog, approvals, type Db } from "@paperclipai/db";
+import { activityLog, type Db } from "@paperclipai/db";
 import {
   addIssueCommentSchema,
   createIssueAttachmentMetadataSchema,
@@ -37,7 +37,6 @@ import {
   approvalDecisionActor,
   approvalService,
   canActorResolveApproval,
-  defaultWorkPlanApprovalRouting,
   executionWorkspaceService,
   feedbackService,
   goalService,
@@ -62,6 +61,10 @@ import { applyEffectiveStatus, issueStatusTruthService } from "../services/issue
 import { attachIssueRuntimeState } from "../services/issue-runtime-state.js";
 import { platformUnblockService } from "../services/platform-unblock.js";
 import { qaIssueStateService } from "../services/qa-issue-state.js";
+import {
+  runPlanProposalSideEffects,
+  runPlanReviewSideEffects,
+} from "../services/issue-plan-side-effects.js";
 import {
   describeIssueExecutionPlanGateError,
   getIssueExecutionPlanGateReason,
@@ -532,19 +535,20 @@ export function issueRoutes(
       return false;
     }
 
-    const linkedApprovals = await issueApprovalsSvc.listApprovalsForIssue(issue.id);
-    const pendingPlanApproval = linkedApprovals.find(
-      (approval: any) =>
-        approval.type === "work_plan"
-        && (approval.status === "pending" || approval.status === "revision_requested"),
-    );
-
-    const parent = issue.parentId ? await svc.getById(issue.parentId) : null;
-    const approvalRecord = pendingPlanApproval
-      ?? {
-        ...defaultWorkPlanApprovalRouting(issue, parent),
-        type: "work_plan",
-      };
+    let approvalRecord;
+    try {
+      approvalRecord = await issueApprovalsSvc.getLiveWorkPlanApprovalForIssue(issue.id);
+    } catch (err) {
+      if (err instanceof HttpError && err.status === 422) {
+        res.status(409).json({ error: err.message });
+        return false;
+      }
+      throw err;
+    }
+    if (!approvalRecord) {
+      res.status(409).json({ error: "Issue has plan mirrors but no live work plan approval; manual repair required" });
+      return false;
+    }
 
     let reviewActor: ApprovalActor | null = null;
     if (req.actor.type === "agent" && req.actor.agentId) {
@@ -590,62 +594,6 @@ export function issueRoutes(
       planApprovedAt: issue.planApprovedAt ?? null,
     });
     return false;
-  }
-
-  async function notifyPlanReview(req: Request, issue: any, action: "approved" | "rejected", feedback?: string) {
-    const actor = getActorInfo(req);
-    const actorName = actor.agentId ? (await agentsSvc.getById(actor.agentId))?.name ?? "Agent" : "Board";
-    const svc = issueService(db);
-    
-    const icon = action === "approved" ? "✅" : "❌";
-    const bodyAction = action === "approved" ? "approved" : "rejected";
-    const bodySuffix = action === "approved" ? "You may proceed." : `\n\n**Feedback:**\n${feedback}`;
-    
-    const reviewComment = await svc.addComment(issue.id, `${icon} Plan ${bodyAction} by ${actorName}. ${bodySuffix}`, {
-      agentId: actor.agentId ?? undefined,
-      userId: actor.actorType === "user" ? actor.actorId : undefined,
-      runId: actor.runId,
-    });
-
-    const ancestors = await svc.getAncestors(issue.id);
-    const rootAncestor = ancestors.length > 0 ? ancestors[ancestors.length - 1] : null;
-    if (rootAncestor) {
-      await svc.addComment(rootAncestor.id, `${icon} [${actorName}] ${action === "approved" ? "Approved" : "Rejected"} plan for ${issue.identifier ?? issue.id}`, {
-        agentId: actor.agentId ?? undefined,
-        userId: actor.actorType === "user" ? actor.actorId : undefined,
-        runId: actor.runId,
-      });
-    }
-
-    await logActivity(db, {
-      companyId: issue.companyId,
-      actorType: actor.actorType,
-      actorId: actor.actorId,
-      agentId: actor.agentId,
-      runId: actor.runId,
-      action: `issue.plan_${action}`,
-      entityType: "issue",
-      entityId: issue.id,
-    });
-
-    if (issue.assigneeAgentId) {
-      void heartbeat.wakeup(issue.assigneeAgentId, {
-        source: "automation",
-        triggerDetail: "system",
-        reason: `plan_${action}`,
-        payload: { issueId: issue.id, commentId: reviewComment.id },
-        requestedByActorType: actor.actorType,
-        requestedByActorId: actor.actorId,
-        contextSnapshot: {
-          issueId: issue.id,
-          taskId: issue.id,
-          commentId: reviewComment.id,
-          wakeCommentId: reviewComment.id,
-          source: `issue.plan_${action}`,
-          wakeReason: `plan_${action}`,
-        },
-      }).catch((err) => logger.warn({ err, issueId: issue.id }, `failed to wake assignee on plan ${action}`));
-    }
   }
 
     function requireAgentRunId(req: Request, res: Response) {
@@ -2429,159 +2377,33 @@ export function issueRoutes(
     }
 
     const actor = getActorInfo(req);
-
-    // 1. Post plan as a comment on this issue
-    const comment = await svc.addComment(id, `📋 **Work Plan**\n\n${planText}`, {
-      agentId: actor.agentId ?? undefined,
-      userId: actor.actorType === "user" ? actor.actorId : undefined,
-      runId: actor.runId,
-    });
-
-    // 2. Freeze execution and register the review request without mutating lifecycle status
-    const now = new Date();
-    const updated = await svc.update(id, {
-      planProposedAt: now,
-      planApprovedAt: null,
-      checkoutRunId: null,
-      executionRunId: null,
-      executionLockedAt: null,
-    });
-    if (!updated) {
-      res.status(404).json({ error: "Issue not found" });
-      return;
-    }
-
-    // 3. Create a formal Approval record so the plan appears in the Inbox
-    // 3. Create or Resubmit a formal Approval record so the plan appears in the Inbox
-    const approvalsSvc = approvalService(db);
-    const parentIssue = issue.parentId ? await svc.getById(issue.parentId) : null;
-    const routing = defaultWorkPlanApprovalRouting(issue, parentIssue);
-
-    const payload = {
-      issueId: issue.id,
-      issueIdentifier: issue.identifier ?? issue.id,
-      issueTitle: issue.title,
-      planSnippet: planText.length > 2000 ? planText.slice(0, 2000) + "..." : planText,
-      commentId: comment.id,
-    };
-
-    const existingLinkedApprovals = await issueApprovalsSvc.listApprovalsForIssue(issue.id);
-    const existingPlanApproval = existingLinkedApprovals.find(
-      (a: any) => a.type === "work_plan" && a.status !== "approved" && a.status !== "cancelled"
-    );
-
-    let planApproval: any = null;
-
-    if (existingPlanApproval) {
-      if (existingPlanApproval.status === "revision_requested") {
-        await approvalsSvc.resubmit(existingPlanApproval.id, payload);
-      }
-      await db.update(approvals).set({
-        payload,
-        targetAgentId: routing.targetAgentId,
-        targetUserId: routing.targetUserId,
-        routingMode: routing.routingMode,
-        escalatedAt: routing.escalatedAt,
-        escalationReason: routing.escalationReason,
-        updatedAt: now,
-      }).where(eq(approvals.id, existingPlanApproval.id));
-      planApproval = (await approvalsSvc.getById(existingPlanApproval.id)) ?? existingPlanApproval;
-    } else {
-      planApproval = await approvalsSvc.create(issue.companyId, {
-        type: "work_plan",
-        requestedByAgentId: actor.agentId ?? null,
-        requestedByUserId: actor.actorType === "user" ? actor.actorId : null,
-        targetAgentId: routing.targetAgentId,
-        targetUserId: routing.targetUserId,
-        routingMode: routing.routingMode,
-        escalatedAt: routing.escalatedAt,
-        escalationReason: routing.escalationReason,
-        status: "pending",
-        payload,
-        decisionNote: null,
-        decidedByUserId: null,
-        decidedByAgentId: null,
-        decidedAt: null,
-        updatedAt: now,
-      });
-      await issueApprovalsSvc.linkManyForApproval(planApproval.id, [issue.id], {
-        agentId: actor.agentId,
-        userId: actor.actorType === "user" ? actor.actorId : null,
-      });
-    }
-
-    if (!planApproval?.id) {
-      throw new HttpError(500, "Plan approval could not be resolved");
-    }
-
-    // 4. Bubble summary to root ancestor issue
-    const ancestors = await svc.getAncestors(id);
-    const rootAncestor = ancestors.length > 0 ? ancestors[ancestors.length - 1] : null;
-    if (rootAncestor) {
-      try {
-        const agentName = actor.agentId
-          ? (await agentsSvc.getById(actor.agentId))?.name ?? "Agent"
-          : "User";
-        const summarySnippet = planText.length > 1500 ? planText.slice(0, 1500) + "..." : planText;
-        await svc.addComment(rootAncestor.id, `📋 [${agentName} on ${issue.identifier ?? id}] **Plan:**\n${summarySnippet}`, {
-          agentId: actor.agentId ?? undefined,
-          userId: actor.actorType === "user" ? actor.actorId : undefined,
-          runId: actor.runId,
-        });
-      } catch (err) {
-        logger.warn(
-          { err, issueId: issue.id, rootAncestorId: rootAncestor.id },
-          "failed to mirror proposed plan summary to root ancestor",
-        );
-      }
-    }
-
-    try {
-      await logActivity(db, {
-        companyId: issue.companyId,
-        actorType: actor.actorType,
+    const proposal = await svc.proposePlan(id, {
+      planText,
+      actor: {
+        actorType: req.actor.type === "board" ? "board" : "agent",
         actorId: actor.actorId,
-        agentId: actor.agentId,
+        agentId: actor.agentId ?? null,
         runId: actor.runId,
-        action: "issue.plan_proposed",
-        entityType: "issue",
-        entityId: issue.id,
-        details: { planSnippet: planText.slice(0, 120), commentId: comment.id, approvalId: planApproval.id },
-      });
-    } catch (err) {
-      logger.warn({ err, issueId: issue.id, approvalId: planApproval.id }, "failed to log proposed plan activity");
-    }
-
-    // 5. Wake parent issue assignee (for approval) + root issue assignee (for visibility)
-    void (async () => {
-      const directParent = issue.parentId ? await svc.getById(issue.parentId) : null;
-      const agentsToWake = new Set<string>();
-      if (directParent?.assigneeAgentId && directParent.assigneeAgentId !== issue.assigneeAgentId) {
-        agentsToWake.add(directParent.assigneeAgentId);
-      }
-      if (rootAncestor?.assigneeAgentId && rootAncestor.assigneeAgentId !== issue.assigneeAgentId) {
-        agentsToWake.add(rootAncestor.assigneeAgentId);
-      }
-
-      for (const agentId of agentsToWake) {
-        heartbeat
-          .wakeup(agentId, {
-            source: "automation",
-            triggerDetail: "system",
-            reason: "child_plan_proposed",
-            payload: { issueId: issue.parentId ?? issue.id, childIssueId: issue.id, commentId: comment.id, approvalId: planApproval.id },
-            requestedByActorType: actor.actorType,
-            requestedByActorId: actor.actorId,
-            contextSnapshot: {
-              issueId: issue.parentId ?? issue.id,
-              childIssueId: issue.id,
-              source: "issue.plan_proposed",
-              wakeReason: "child_plan_proposed",
-            },
-          })
-          .catch((err) => logger.warn({ err, issueId: issue.id, agentId }, "failed to wake agent on plan proposal"));
-      }
-    })();
+        userId: req.actor.type === "board" ? (req.actor.userId ?? actor.actorId) : null,
+      },
+    });
+    const updated = proposal.issue;
+    const comment = proposal.comment;
+    const planApproval = proposal.approval;
+    await runPlanProposalSideEffects({
+      db,
+      issueSvc: svc,
+      agentsSvc,
+      heartbeat,
+      logActivity,
+      issue,
+      proposal: {
+        commentId: comment.id,
+        approvalId: planApproval.id,
+      },
+      planText,
+      actor,
+    });
 
     res.status(201).json({ issue: attachIssueRuntimeState(updated), comment, approvalId: planApproval.id });
   });
@@ -2618,43 +2440,28 @@ export function issueRoutes(
       });
       return;
     }
-    if (issue.status !== "in_review") {
-      res.status(409).json({ error: "Plan can only be approved while the issue is in_review." });
-      return;
-    }
-
     if (!(await assertCanReviewPlan(req, res, issue, "approve"))) return;
 
-    const updated = await svc.update(id, {
-      planApprovedAt: new Date(),
+    const approvalActor: ApprovalActor =
+      req.actor.type === "agent" && req.actor.agentId
+        ? { actorType: "agent", agentId: req.actor.agentId }
+        : { actorType: "board", userId: req.actor.userId ?? "board" };
+    const outcome = await svc.approvePlan(id, {
+      ...approvalDecisionActor(approvalActor),
+      decisionNote: "Plan approved via issue review",
     });
-    if (!updated) {
-      res.status(404).json({ error: "Issue not found" });
-      return;
-    }
+    const updated = outcome.issue;
 
-    // Sync linked work_plan approval to approved
-    const issueApprovalsSvc = issueApprovalService(db);
-    const linkedApprovals = await issueApprovalsSvc.listApprovalsForIssue(id);
-    const pendingPlanApproval = linkedApprovals.find(
-      (a: any) => a.type === "work_plan" && (a.status === "pending" || a.status === "revision_requested"),
-    );
-    if (pendingPlanApproval) {
-      const approvalsSvc = approvalService(db);
-      const approvalActor: ApprovalActor =
-        req.actor.type === "agent" && req.actor.agentId
-          ? { actorType: "agent", agentId: req.actor.agentId }
-          : { actorType: "board", userId: req.actor.userId ?? "board" };
-      await approvalsSvc.approve(
-        pendingPlanApproval.id,
-        {
-          ...approvalDecisionActor(approvalActor),
-          decisionNote: "Plan approved via issue review",
-        },
-      ).catch((err) => logger.warn({ err, approvalId: pendingPlanApproval.id }, "failed to sync approval on plan approve"));
-    }
-
-    await notifyPlanReview(req, issue, "approved");
+    await runPlanReviewSideEffects({
+      db,
+      issueSvc: svc,
+      agentsSvc,
+      heartbeat,
+      logActivity,
+      issue,
+      action: "approved",
+      actor: getActorInfo(req),
+    });
 
     res.json({ issue: attachIssueRuntimeState(updated) });
   });
@@ -2687,37 +2494,27 @@ export function issueRoutes(
 
     if (!(await assertCanReviewPlan(req, res, issue, "reject"))) return;
 
-    const updated = await svc.update(id, {
-      planProposedAt: null,
-      planApprovedAt: null,
+    const approvalActor: ApprovalActor =
+      req.actor.type === "agent" && req.actor.agentId
+        ? { actorType: "agent", agentId: req.actor.agentId }
+        : { actorType: "board", userId: req.actor.userId ?? "board" };
+    const outcome = await svc.rejectPlan(id, {
+      ...approvalDecisionActor(approvalActor),
+      decisionNote: feedback,
     });
-    if (!updated) {
-      res.status(404).json({ error: "Issue not found" });
-      return;
-    }
+    const updated = outcome.issue;
 
-    // Sync linked work_plan approval to rejected
-    const issueApprovalsSvc = issueApprovalService(db);
-    const linkedApprovals = await issueApprovalsSvc.listApprovalsForIssue(id);
-    const pendingPlanApproval = linkedApprovals.find(
-      (a: any) => a.type === "work_plan" && (a.status === "pending" || a.status === "revision_requested"),
-    );
-    if (pendingPlanApproval) {
-      const approvalsSvc = approvalService(db);
-      const approvalActor: ApprovalActor =
-        req.actor.type === "agent" && req.actor.agentId
-          ? { actorType: "agent", agentId: req.actor.agentId }
-          : { actorType: "board", userId: req.actor.userId ?? "board" };
-      await approvalsSvc.reject(
-        pendingPlanApproval.id,
-        {
-          ...approvalDecisionActor(approvalActor),
-          decisionNote: feedback,
-        },
-      ).catch((err) => logger.warn({ err, approvalId: pendingPlanApproval.id }, "failed to sync approval on plan reject"));
-    }
-
-    await notifyPlanReview(req, issue, "rejected", feedback);
+    await runPlanReviewSideEffects({
+      db,
+      issueSvc: svc,
+      agentsSvc,
+      heartbeat,
+      logActivity,
+      issue,
+      action: "rejected",
+      actor: getActorInfo(req),
+      feedback,
+    });
 
     res.json({ issue: attachIssueRuntimeState(updated) });
   });

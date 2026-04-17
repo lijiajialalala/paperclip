@@ -1,6 +1,7 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { HttpError } from "../errors.js";
 import { approvalRoutes } from "../routes/approvals.js";
 import { errorHandler } from "../middleware/index.js";
 
@@ -9,7 +10,9 @@ const mockApprovalService = vi.hoisted(() => ({
   getById: vi.fn(),
   create: vi.fn(),
   approve: vi.fn(),
+  approveWithLinkedIssueSync: vi.fn(),
   reject: vi.fn(),
+  rejectWithLinkedIssueSync: vi.fn(),
   requestRevision: vi.fn(),
   resubmit: vi.fn(),
   listComments: vi.fn(),
@@ -23,10 +26,6 @@ const mockHeartbeatService = vi.hoisted(() => ({
 const mockIssueApprovalService = vi.hoisted(() => ({
   listIssuesForApproval: vi.fn(),
   linkManyForApproval: vi.fn(),
-}));
-
-const mockIssueService = vi.hoisted(() => ({
-  update: vi.fn(),
 }));
 
 const mockSecretService = vi.hoisted(() => ({
@@ -61,7 +60,6 @@ vi.mock("../services/index.js", () => ({
   approvalService: () => mockApprovalService,
   heartbeatService: () => mockHeartbeatService,
   issueApprovalService: () => mockIssueApprovalService,
-  issueService: () => mockIssueService,
   logActivity: mockLogActivity,
   secretService: () => mockSecretService,
   canActorResolveApproval: mockApprovalRouting.canActorResolveApproval,
@@ -109,10 +107,6 @@ describe("approval routes idempotent retries", () => {
     vi.clearAllMocks();
     mockHeartbeatService.wakeup.mockResolvedValue({ id: "wake-1" });
     mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([{ id: "issue-1" }]);
-    mockIssueService.update.mockImplementation(async (id: string, patch: Record<string, unknown>) => ({
-      id,
-      ...patch,
-    }));
     mockLogActivity.mockResolvedValue(undefined);
     mockApprovalService.getById.mockResolvedValue({
       id: "approval-1",
@@ -131,10 +125,35 @@ describe("approval routes idempotent retries", () => {
       createdAt: new Date("2026-04-10T04:00:00.000Z"),
       updatedAt: new Date("2026-04-10T04:00:00.000Z"),
     });
+    mockApprovalService.approveWithLinkedIssueSync.mockResolvedValue({
+      approval: {
+        id: "approval-1",
+        companyId: "company-1",
+        type: "work_plan",
+        status: "approved",
+        payload: {},
+        requestedByAgentId: "agent-1",
+        decidedAt: new Date("2026-04-10T05:00:00.000Z"),
+      },
+      applied: true,
+      linkedIssues: [{ id: "issue-1" }],
+    });
+    mockApprovalService.rejectWithLinkedIssueSync.mockResolvedValue({
+      approval: {
+        id: "approval-1",
+        companyId: "company-1",
+        type: "work_plan",
+        status: "rejected",
+        payload: {},
+        requestedByAgentId: "agent-1",
+      },
+      applied: true,
+      linkedIssues: [{ id: "issue-1" }],
+    });
   });
 
   it("does not emit duplicate approval side effects when approve is already resolved", async () => {
-    mockApprovalService.approve.mockResolvedValue({
+    mockApprovalService.approveWithLinkedIssueSync.mockResolvedValue({
       approval: {
         id: "approval-1",
         companyId: "company-1",
@@ -151,13 +170,12 @@ describe("approval routes idempotent retries", () => {
       .send({});
 
     expect(res.status).toBe(200);
-    expect(mockIssueApprovalService.listIssuesForApproval).not.toHaveBeenCalled();
     expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
     expect(mockLogActivity).not.toHaveBeenCalled();
   });
 
   it("does not emit duplicate rejection logs when reject is already resolved", async () => {
-    mockApprovalService.reject.mockResolvedValue({
+    mockApprovalService.rejectWithLinkedIssueSync.mockResolvedValue({
       approval: {
         id: "approval-1",
         companyId: "company-1",
@@ -176,9 +194,9 @@ describe("approval routes idempotent retries", () => {
     expect(mockLogActivity).not.toHaveBeenCalled();
   });
 
-  it("syncs linked work-plan issues when an approval is approved from the inbox", async () => {
+  it("routes work-plan approval through the atomic linked-issue settlement path", async () => {
     const decidedAt = new Date("2026-04-10T05:00:00.000Z");
-    mockApprovalService.approve.mockResolvedValue({
+    mockApprovalService.approveWithLinkedIssueSync.mockResolvedValue({
       approval: {
         id: "approval-1",
         companyId: "company-1",
@@ -189,28 +207,20 @@ describe("approval routes idempotent retries", () => {
         decidedAt,
       },
       applied: true,
+      linkedIssues: [{ id: "issue-1" }],
     });
-    mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([
-      {
-        id: "issue-1",
-        status: "in_progress",
-        planProposedAt: new Date("2026-04-10T04:55:00.000Z"),
-        planApprovedAt: null,
-      },
-    ]);
 
     const res = await request(createApp())
       .post("/api/approvals/approval-1/approve")
       .send({});
 
     expect(res.status).toBe(200);
-    expect(mockIssueService.update).toHaveBeenCalledWith(
-      "issue-1",
+    expect(mockApprovalService.approveWithLinkedIssueSync).toHaveBeenCalledWith(
+      "approval-1",
       expect.objectContaining({
-        planApprovedAt: decidedAt,
+        decidedByUserId: "user-1",
       }),
     );
-    expect(mockIssueService.update.mock.calls[0]?.[1]).not.toHaveProperty("status");
     expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
       "agent-1",
       expect.objectContaining({
@@ -219,8 +229,26 @@ describe("approval routes idempotent retries", () => {
     );
   });
 
-  it("clears linked work-plan review state when an approval is rejected from the inbox", async () => {
-    mockApprovalService.reject.mockResolvedValue({
+  it("propagates work-plan settlement conflicts from the approval service", async () => {
+    mockApprovalService.approveWithLinkedIssueSync.mockRejectedValue(
+      new HttpError(
+        409,
+        "Cannot approve a plan after execution has already started. Return the issue to review and rerun after approval.",
+      ),
+    );
+
+    const res = await request(createApp())
+      .post("/api/approvals/approval-1/approve")
+      .send({});
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/cannot approve a plan after execution has already started/i);
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
+  it("routes work-plan rejection through the atomic linked-issue settlement path", async () => {
+    mockApprovalService.rejectWithLinkedIssueSync.mockResolvedValue({
       approval: {
         id: "approval-1",
         companyId: "company-1",
@@ -230,29 +258,20 @@ describe("approval routes idempotent retries", () => {
         requestedByAgentId: "agent-1",
       },
       applied: true,
+      linkedIssues: [{ id: "issue-1" }],
     });
-    mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([
-      {
-        id: "issue-1",
-        status: "in_progress",
-        planProposedAt: new Date("2026-04-10T04:55:00.000Z"),
-        planApprovedAt: null,
-      },
-    ]);
 
     const res = await request(createApp())
       .post("/api/approvals/approval-1/reject")
       .send({});
 
     expect(res.status).toBe(200);
-    expect(mockIssueService.update).toHaveBeenCalledWith(
-      "issue-1",
+    expect(mockApprovalService.rejectWithLinkedIssueSync).toHaveBeenCalledWith(
+      "approval-1",
       expect.objectContaining({
-        planProposedAt: null,
-        planApprovedAt: null,
+        decidedByUserId: "user-1",
       }),
     );
-    expect(mockIssueService.update.mock.calls[0]?.[1]).not.toHaveProperty("status");
   });
 
   it("allows the targeted lead agent to approve a routed work-plan approval", async () => {
@@ -273,7 +292,7 @@ describe("approval routes idempotent retries", () => {
       createdAt: new Date("2026-04-10T04:00:00.000Z"),
       updatedAt: new Date("2026-04-10T04:00:00.000Z"),
     });
-    mockApprovalService.approve.mockResolvedValue({
+    mockApprovalService.approveWithLinkedIssueSync.mockResolvedValue({
       approval: {
         id: "approval-1",
         companyId: "company-1",
@@ -296,7 +315,7 @@ describe("approval routes idempotent retries", () => {
       .send({});
 
     expect(res.status).toBe(200);
-    expect(mockApprovalService.approve).toHaveBeenCalledWith(
+    expect(mockApprovalService.approveWithLinkedIssueSync).toHaveBeenCalledWith(
       "approval-1",
       expect.objectContaining({
         decidedByAgentId: "agent-reviewer",
@@ -328,6 +347,6 @@ describe("approval routes idempotent retries", () => {
       .send({});
 
     expect(res.status).toBe(403);
-    expect(mockApprovalService.approve).not.toHaveBeenCalled();
+    expect(mockApprovalService.approveWithLinkedIssueSync).not.toHaveBeenCalled();
   });
 });

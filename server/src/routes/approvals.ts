@@ -16,7 +16,6 @@ import {
   approvalService,
   heartbeatService,
   issueApprovalService,
-  issueService,
   logActivity,
   secretService,
 } from "../services/index.js";
@@ -35,7 +34,6 @@ export function approvalRoutes(db: Db) {
   const svc = approvalService(db);
   const heartbeat = heartbeatService(db);
   const issueApprovalsSvc = issueApprovalService(db);
-  const issuesSvc = issueService(db);
   const secretsSvc = secretService(db);
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
 
@@ -62,50 +60,6 @@ export function approvalRoutes(db: Db) {
       return null;
     }
     return actor;
-  }
-
-  async function syncResolvedWorkPlanIssues(
-    approval: {
-      id: string;
-      type: string;
-      status: string;
-      decidedAt: Date | null;
-    },
-    linkedIssues: Array<{
-      id: string;
-      status: string;
-      planProposedAt?: Date | null;
-      planApprovedAt?: Date | null;
-    }>,
-  ) {
-    if (approval.type !== "work_plan") return;
-
-    const resolvedAt = approval.decidedAt ?? new Date();
-    for (const linkedIssue of linkedIssues) {
-      if (approval.status === "approved") {
-        const planStillPending =
-          !linkedIssue.planApprovedAt
-          && Boolean(linkedIssue.planProposedAt);
-        if (!planStillPending) continue;
-
-        await issuesSvc.update(linkedIssue.id, {
-          planApprovedAt: resolvedAt,
-        });
-        continue;
-      }
-
-      if (approval.status === "rejected") {
-        const planNeedsReset =
-          Boolean(linkedIssue.planProposedAt)
-          || Boolean(linkedIssue.planApprovedAt);
-        if (!planNeedsReset) continue;
-
-        await issuesSvc.update(linkedIssue.id, {
-          planProposedAt: null,
-          planApprovedAt: null,
-        });
-      }
-    }
   }
 
   router.get("/companies/:companyId/approvals", async (req, res) => {
@@ -216,7 +170,7 @@ export function approvalRoutes(db: Db) {
     assertCompanyAccess(req, existing.companyId);
     const approvalActor = assertCanResolveApproval(req, res, existing, "approve");
     if (!approvalActor) return;
-    const { approval, applied } = await svc.approve(
+    const { approval, applied, linkedIssues = [] } = await svc.approveWithLinkedIssueSync(
       id,
       {
         ...approvalDecisionActor(approvalActor),
@@ -225,8 +179,6 @@ export function approvalRoutes(db: Db) {
     );
 
     if (applied) {
-      const linkedIssues = await issueApprovalsSvc.listIssuesForApproval(approval.id);
-      await syncResolvedWorkPlanIssues(approval, linkedIssues);
       const linkedIssueIds = linkedIssues.map((issue) => issue.id);
       const primaryIssueId = linkedIssueIds[0] ?? null;
 
@@ -323,7 +275,7 @@ export function approvalRoutes(db: Db) {
     assertCompanyAccess(req, existing.companyId);
     const approvalActor = assertCanResolveApproval(req, res, existing, "reject");
     if (!approvalActor) return;
-    const { approval, applied } = await svc.reject(
+    const { approval, applied } = await svc.rejectWithLinkedIssueSync(
       id,
       {
         ...approvalDecisionActor(approvalActor),
@@ -332,9 +284,6 @@ export function approvalRoutes(db: Db) {
     );
 
     if (applied) {
-      const linkedIssues = await issueApprovalsSvc.listIssuesForApproval(approval.id);
-      await syncResolvedWorkPlanIssues(approval, linkedIssues);
-
       await logActivity(db, {
         companyId: approval.companyId,
         actorType: req.actor.type === "agent" ? "agent" : "user",

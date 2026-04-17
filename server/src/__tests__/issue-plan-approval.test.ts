@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { issueRoutes } from "../routes/issues.js";
 import { errorHandler } from "../middleware/index.js";
+import { HttpError } from "../errors.js";
 
 // ── Hoisted stubs (registered before any module loads) ─────────────────────
 const mockIssueSvc = vi.hoisted(() => ({
@@ -12,6 +13,9 @@ const mockIssueSvc = vi.hoisted(() => ({
   checkout: vi.fn(),
   release: vi.fn(),
   addComment: vi.fn(),
+  proposePlan: vi.fn(),
+  approvePlan: vi.fn(),
+  rejectPlan: vi.fn(),
   getAncestors: vi.fn(),
   assertCheckoutOwner: vi.fn(),
   createAttachment: vi.fn(),
@@ -44,6 +48,7 @@ const mockApprovalSvc = vi.hoisted(() => ({
 const mockIssueApprovalSvc = vi.hoisted(() => ({
   listApprovalsForIssue: vi.fn(),
   linkManyForApproval: vi.fn(),
+  getLiveWorkPlanApprovalForIssue: vi.fn(),
 }));
 
 const mockLogActivity = vi.hoisted(() => vi.fn());
@@ -222,7 +227,7 @@ function makeApp(actor: Record<string, unknown>) {
 // ── Tests ───────────────────────────────────────────────────────────────────
 describe("Propose-Plan & Checkout Gate Workflow", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     // Restore defaults after clearAllMocks
     mockHeartbeat.wakeup.mockResolvedValue(undefined);
     mockHeartbeat.reportRunActivity.mockResolvedValue(undefined);
@@ -245,11 +250,57 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
     mockApprovalSvc.resubmit.mockResolvedValue(undefined);
     mockIssueApprovalSvc.listApprovalsForIssue.mockResolvedValue([]);
     mockIssueApprovalSvc.linkManyForApproval.mockResolvedValue(undefined);
+    mockIssueApprovalSvc.getLiveWorkPlanApprovalForIssue.mockResolvedValue({
+      id: randomUUID(),
+      type: "work_plan",
+      status: "pending",
+      targetAgentId: null,
+      targetUserId: null,
+      routingMode: "board_pool",
+    });
     mockLogActivity.mockResolvedValue(undefined);
     mockInstanceSettings.getExperimental.mockResolvedValue({ enableIsolatedWorkspaces: false });
     mockProjectSvc.getById.mockResolvedValue(null);
     mockIssueSvc.getAncestors.mockResolvedValue([]);
     mockIssueSvc.addComment.mockResolvedValue({ id: randomUUID() });
+    mockIssueSvc.proposePlan.mockResolvedValue({
+      issue: makeIssue({
+        planProposedAt: new Date("2026-04-12T12:00:00.000Z"),
+      }),
+      comment: { id: randomUUID() },
+      approval: {
+        id: randomUUID(),
+        companyId: COMPANY_ID,
+        type: "work_plan",
+        status: "pending",
+        payload: {},
+      },
+    });
+    mockIssueSvc.approvePlan.mockResolvedValue({
+      issue: makeIssue({
+        planApprovedAt: new Date("2026-04-12T12:00:00.000Z"),
+      }),
+      approval: {
+        id: randomUUID(),
+        companyId: COMPANY_ID,
+        type: "work_plan",
+        status: "approved",
+        payload: {},
+      },
+    });
+    mockIssueSvc.rejectPlan.mockResolvedValue({
+      issue: makeIssue({
+        planProposedAt: null,
+        planApprovedAt: null,
+      }),
+      approval: {
+        id: randomUUID(),
+        companyId: COMPANY_ID,
+        type: "work_plan",
+        status: "rejected",
+        payload: {},
+      },
+    });
     mockAccessSvc.hasPermission.mockResolvedValue(false);
     mockAccessSvc.canUser.mockResolvedValue(false);
     mockApprovalSvc.create.mockResolvedValue({
@@ -619,14 +670,16 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
     });
 
     mockIssueSvc.getById.mockResolvedValue(issue);
-    mockIssueSvc.addComment.mockResolvedValue({ id: commentId });
-    mockIssueSvc.update.mockResolvedValue(updated);
-    mockApprovalSvc.create.mockResolvedValue({
-      id: approvalId,
-      companyId: COMPANY_ID,
-      type: "work_plan",
-      status: "pending",
-      payload: {},
+    mockIssueSvc.proposePlan.mockResolvedValue({
+      issue: updated,
+      comment: { id: commentId },
+      approval: {
+        id: approvalId,
+        companyId: COMPANY_ID,
+        type: "work_plan",
+        status: "pending",
+        payload: {},
+      },
     });
 
     const res = await request(makeApp(agentActor(AGENT_ASSIGNEE)))
@@ -650,21 +703,15 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
     }));
     expect(res.body.comment.id).toBe(commentId);
     expect(res.body.approvalId).toBe(approvalId);
-    expect(mockIssueSvc.update).toHaveBeenCalledWith(
+    expect(mockIssueSvc.proposePlan).toHaveBeenCalledWith(
       ISSUE_ID,
       expect.objectContaining({
-        planApprovedAt: null,
-        checkoutRunId: null,
-        executionRunId: null,
-        executionLockedAt: null,
-      }),
-    );
-    expect(mockIssueSvc.update.mock.calls[0]?.[1]).not.toHaveProperty("status");
-    expect(mockIssueApprovalSvc.linkManyForApproval).toHaveBeenCalledWith(
-      approvalId,
-      [ISSUE_ID],
-      expect.objectContaining({
-        agentId: AGENT_ASSIGNEE,
+        planText: "Ship the implementation in three checkpoints.",
+        actor: expect.objectContaining({
+          actorType: "agent",
+          actorId: AGENT_ASSIGNEE,
+          agentId: AGENT_ASSIGNEE,
+        }),
       }),
     );
     expect(mockLogActivity).toHaveBeenCalledWith(
@@ -676,7 +723,7 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
     );
   });
 
-  it("routes a child work plan to the parent assignee agent instead of the Board pool", async () => {
+  it("wakes parent and root assignees after a successful child plan proposal", async () => {
     const issue = makeIssue({
       assigneeAgentId: AGENT_ASSIGNEE,
       parentId: PARENT_ID,
@@ -687,26 +734,41 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
       assigneeAgentId: AGENT_PARENT,
       assigneeUserId: null,
     });
+    const root = makeIssue({
+      id: randomUUID(),
+      assigneeAgentId: AGENT_MANAGER,
+    });
+
     mockIssueSvc.getById
       .mockResolvedValueOnce(issue)
       .mockResolvedValueOnce(parent);
-    mockIssueSvc.update.mockResolvedValue({
-      ...issue,
-      planProposedAt: new Date(),
-    });
+    mockIssueSvc.getAncestors.mockResolvedValue([parent, root]);
 
     const res = await request(makeApp(agentActor(AGENT_ASSIGNEE)))
       .post(`/api/issues/${ISSUE_ID}/propose-plan`)
       .send({ plan: "Plan body" });
 
     expect(res.status).toBe(201);
-    expect(mockApprovalSvc.create).toHaveBeenCalledWith(
-      COMPANY_ID,
+    await vi.waitFor(() => {
+      expect(mockHeartbeat.wakeup).toHaveBeenCalledTimes(2);
+    });
+    expect(mockHeartbeat.wakeup).toHaveBeenCalledWith(
+      AGENT_PARENT,
       expect.objectContaining({
-        type: "work_plan",
-        targetAgentId: AGENT_PARENT,
-        targetUserId: null,
-        routingMode: "parent_assignee_agent",
+        reason: "child_plan_proposed",
+        payload: expect.objectContaining({
+          issueId: PARENT_ID,
+          childIssueId: ISSUE_ID,
+        }),
+      }),
+    );
+    expect(mockHeartbeat.wakeup).toHaveBeenCalledWith(
+      AGENT_MANAGER,
+      expect.objectContaining({
+        reason: "child_plan_proposed",
+        payload: expect.objectContaining({
+          childIssueId: ISSUE_ID,
+        }),
       }),
     );
   });
@@ -723,17 +785,19 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
 
     mockIssueSvc.getById.mockResolvedValue(issue);
     mockIssueSvc.getAncestors.mockResolvedValue([rootAncestor]);
-    mockIssueSvc.addComment
-      .mockResolvedValueOnce({ id: commentId })
-      .mockRejectedValueOnce(new Error("root summary comment failed"));
-    mockIssueSvc.update.mockResolvedValue(updated);
-    mockApprovalSvc.create.mockResolvedValue({
-      id: approvalId,
-      companyId: COMPANY_ID,
-      type: "work_plan",
-      status: "pending",
-      payload: {},
+    mockIssueSvc.proposePlan.mockResolvedValue({
+      issue: updated,
+      comment: { id: commentId },
+      approval: {
+        id: approvalId,
+        companyId: COMPANY_ID,
+        type: "work_plan",
+        status: "pending",
+        payload: {},
+      },
     });
+    mockIssueSvc.addComment
+      .mockRejectedValueOnce(new Error("root summary comment failed"));
     mockAgentSvc.getById.mockResolvedValue({ id: AGENT_ASSIGNEE, name: "Frontend Engineer" });
 
     const res = await request(makeApp(agentActor(AGENT_ASSIGNEE)))
@@ -761,14 +825,16 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
     });
 
     mockIssueSvc.getById.mockResolvedValue(issue);
-    mockIssueSvc.addComment.mockResolvedValue({ id: commentId });
-    mockIssueSvc.update.mockResolvedValue(updated);
-    mockApprovalSvc.create.mockResolvedValue({
-      id: approvalId,
-      companyId: COMPANY_ID,
-      type: "work_plan",
-      status: "pending",
-      payload: {},
+    mockIssueSvc.proposePlan.mockResolvedValue({
+      issue: updated,
+      comment: { id: commentId },
+      approval: {
+        id: approvalId,
+        companyId: COMPANY_ID,
+        type: "work_plan",
+        status: "pending",
+        payload: {},
+      },
     });
     mockLogActivity.mockRejectedValue(new Error("activity log unavailable"));
 
@@ -838,16 +904,14 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
       name: "ManagerAgent",
       permissions: { canCreateAgents: true },
     });
-    mockIssueApprovalSvc.listApprovalsForIssue.mockResolvedValue([
-      {
-        id: randomUUID(),
-        type: "work_plan",
-        status: "pending",
-        targetAgentId: AGENT_PARENT,
-        targetUserId: null,
-        routingMode: "parent_assignee_agent",
-      },
-    ]);
+    mockIssueApprovalSvc.getLiveWorkPlanApprovalForIssue.mockResolvedValue({
+      id: randomUUID(),
+      type: "work_plan",
+      status: "pending",
+      targetAgentId: AGENT_PARENT,
+      targetUserId: null,
+      routingMode: "parent_assignee_agent",
+    });
 
     const res = await request(makeApp(agentActor(AGENT_MANAGER)))
       .post(`/api/issues/${ISSUE_ID}/approve-plan`)
@@ -867,7 +931,10 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
     const approvalCommentId = randomUUID();
 
     mockIssueSvc.getById.mockResolvedValue(issue);
-    mockIssueSvc.update.mockResolvedValue(updated);
+    mockIssueSvc.approvePlan.mockResolvedValue({
+      issue: updated,
+      approval: { id: randomUUID(), status: "approved" },
+    });
     mockIssueSvc.addComment.mockResolvedValueOnce({ id: approvalCommentId });
 
     const res = await request(makeApp(boardActor()))
@@ -909,23 +976,24 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
     mockIssueSvc.getById
       .mockResolvedValueOnce(issue)   // first call: the issue
       .mockResolvedValueOnce(parent); // second call: the parent issue
-    mockIssueSvc.update.mockResolvedValue(updated);
+    mockIssueSvc.approvePlan.mockResolvedValue({
+      issue: updated,
+      approval: { id: randomUUID(), status: "approved" },
+    });
     mockAgentSvc.getById.mockResolvedValue({
       id: AGENT_PARENT,
       companyId: COMPANY_ID,
       name: "ParentAgent",
       permissions: {},
     });
-    mockIssueApprovalSvc.listApprovalsForIssue.mockResolvedValue([
-      {
-        id: randomUUID(),
-        type: "work_plan",
-        status: "pending",
-        targetAgentId: AGENT_PARENT,
-        targetUserId: null,
-        routingMode: "parent_assignee_agent",
-      },
-    ]);
+    mockIssueApprovalSvc.getLiveWorkPlanApprovalForIssue.mockResolvedValue({
+      id: randomUUID(),
+      type: "work_plan",
+      status: "pending",
+      targetAgentId: AGENT_PARENT,
+      targetUserId: null,
+      routingMode: "parent_assignee_agent",
+    });
 
     const res = await request(makeApp(agentActor(AGENT_PARENT)))
       .post(`/api/issues/${ISSUE_ID}/approve-plan`)
@@ -956,16 +1024,14 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
     mockIssueSvc.getById
       .mockResolvedValueOnce(issue)
       .mockResolvedValueOnce(parent);
-    mockIssueApprovalSvc.listApprovalsForIssue.mockResolvedValue([
-      {
-        id: randomUUID(),
-        type: "work_plan",
-        status: "pending",
-        targetAgentId: AGENT_PARENT,
-        targetUserId: null,
-        routingMode: "parent_assignee_agent",
-      },
-    ]);
+    mockIssueApprovalSvc.getLiveWorkPlanApprovalForIssue.mockResolvedValue({
+      id: randomUUID(),
+      type: "work_plan",
+      status: "pending",
+      targetAgentId: AGENT_PARENT,
+      targetUserId: null,
+      routingMode: "parent_assignee_agent",
+    });
 
     const res = await request(makeApp(boardActor()))
       .post(`/api/issues/${ISSUE_ID}/approve-plan`)
@@ -984,17 +1050,18 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
     const updated = { ...issue, status: "in_review", planApprovedAt: new Date() };
 
     mockIssueSvc.getById.mockResolvedValue(issue);
-    mockIssueSvc.update.mockResolvedValue(updated);
-    mockIssueApprovalSvc.listApprovalsForIssue.mockResolvedValue([
-      {
-        id: randomUUID(),
-        type: "work_plan",
-        status: "pending",
-        targetAgentId: null,
-        targetUserId: null,
-        routingMode: "board_pool",
-      },
-    ]);
+    mockIssueSvc.approvePlan.mockResolvedValue({
+      issue: updated,
+      approval: { id: randomUUID(), status: "approved" },
+    });
+    mockIssueApprovalSvc.getLiveWorkPlanApprovalForIssue.mockResolvedValue({
+      id: randomUUID(),
+      type: "work_plan",
+      status: "pending",
+      targetAgentId: null,
+      targetUserId: null,
+      routingMode: "board_pool",
+    });
 
     const res = await request(makeApp(boardActor()))
       .post(`/api/issues/${ISSUE_ID}/approve-plan`)
@@ -1009,6 +1076,83 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
         entityId: ISSUE_ID,
       }),
     );
+  });
+
+  it("allows approving a pending root issue plan without requiring in_review lifecycle", async () => {
+    const issue = makeIssue({
+      assigneeAgentId: AGENT_ASSIGNEE,
+      status: "todo",
+      planProposedAt: new Date(),
+    });
+    const updated = { ...issue, status: "todo", planApprovedAt: new Date() };
+    const liveApprovalId = randomUUID();
+
+    mockIssueSvc.getById.mockResolvedValue(issue);
+    mockIssueSvc.approvePlan.mockResolvedValue({
+      issue: updated,
+      approval: { id: liveApprovalId, status: "approved" },
+    });
+    mockIssueApprovalSvc.getLiveWorkPlanApprovalForIssue.mockResolvedValue({
+      id: liveApprovalId,
+      type: "work_plan",
+      status: "pending",
+      targetAgentId: null,
+      targetUserId: null,
+      routingMode: "board_pool",
+    });
+
+    const res = await request(makeApp(boardActor()))
+      .post(`/api/issues/${ISSUE_ID}/approve-plan`)
+      .send();
+
+    expect(res.status).toBe(200);
+    expect(res.body.issue.status).toBe("todo");
+    expect(mockIssueSvc.approvePlan).toHaveBeenCalledWith(
+      ISSUE_ID,
+      expect.objectContaining({
+        decisionNote: "Plan approved via issue review",
+      }),
+    );
+  });
+
+  it("fails closed when multiple live work plan approvals are linked", async () => {
+    const issue = makeIssue({
+      assigneeAgentId: AGENT_ASSIGNEE,
+      status: "todo",
+      planProposedAt: new Date(),
+    });
+
+    mockIssueSvc.getById.mockResolvedValue(issue);
+    mockIssueApprovalSvc.getLiveWorkPlanApprovalForIssue.mockRejectedValue(
+      new HttpError(422, "Issue has multiple live work plan approvals; manual repair required"),
+    );
+
+    const res = await request(makeApp(boardActor()))
+      .post(`/api/issues/${ISSUE_ID}/approve-plan`)
+      .send();
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/multiple live work plan approvals/i);
+    expect(mockIssueSvc.approvePlan).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when no live work plan approval exists for an approve request", async () => {
+    const issue = makeIssue({
+      assigneeAgentId: AGENT_ASSIGNEE,
+      status: "todo",
+      planProposedAt: new Date(),
+    });
+
+    mockIssueSvc.getById.mockResolvedValue(issue);
+    mockIssueApprovalSvc.getLiveWorkPlanApprovalForIssue.mockResolvedValue(null);
+
+    const res = await request(makeApp(boardActor()))
+      .post(`/api/issues/${ISSUE_ID}/approve-plan`)
+      .send();
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/no live work plan approval/i);
+    expect(mockIssueSvc.approvePlan).not.toHaveBeenCalled();
   });
 
   it("rejects approving a plan after execution has already started", async () => {
@@ -1027,7 +1171,7 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
 
     expect(res.status).toBe(409);
     expect(res.body.error).toMatch(/cannot approve a plan after execution has already started/i);
-    expect(mockIssueSvc.update).not.toHaveBeenCalled();
+    expect(mockIssueSvc.approvePlan).not.toHaveBeenCalled();
   });
 
 
@@ -1050,7 +1194,10 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
     const updated = { ...issue, status: "in_progress", planProposedAt: null, planApprovedAt: null };
 
     mockIssueSvc.getById.mockResolvedValue(issue);
-    mockIssueSvc.update.mockResolvedValue(updated);
+    mockIssueSvc.rejectPlan.mockResolvedValue({
+      issue: updated,
+      approval: { id: randomUUID(), status: "rejected" },
+    });
 
     const res = await request(makeApp(boardActor()))
       .post(`/api/issues/${ISSUE_ID}/reject-plan`)
@@ -1109,7 +1256,10 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
     const rejectionCommentId = randomUUID();
 
     mockIssueSvc.getById.mockResolvedValue(issue);
-    mockIssueSvc.update.mockResolvedValue(updated);
+    mockIssueSvc.rejectPlan.mockResolvedValue({
+      issue: updated,
+      approval: { id: randomUUID(), status: "rejected" },
+    });
     mockIssueSvc.addComment.mockResolvedValueOnce({ id: rejectionCommentId });
 
     const res = await request(makeApp(boardActor()))
@@ -1132,6 +1282,89 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
           wakeCommentId: rejectionCommentId,
           wakeReason: "plan_rejected",
           source: "issue.plan_rejected",
+        }),
+      }),
+    );
+  });
+
+  it("fails closed when no live work plan approval exists for a reject request", async () => {
+    const issue = makeIssue({
+      assigneeAgentId: AGENT_ASSIGNEE,
+      status: "todo",
+      planProposedAt: new Date(),
+    });
+
+    mockIssueSvc.getById.mockResolvedValue(issue);
+    mockIssueApprovalSvc.getLiveWorkPlanApprovalForIssue.mockResolvedValue(null);
+
+    const res = await request(makeApp(boardActor()))
+      .post(`/api/issues/${ISSUE_ID}/reject-plan`)
+      .send({ feedback: "repair this first" });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/no live work plan approval/i);
+    expect(mockIssueSvc.rejectPlan).not.toHaveBeenCalled();
+  });
+
+  it("approve-plan still returns success when the review comment side effect fails after settlement", async () => {
+    const issue = makeIssue({
+      assigneeAgentId: AGENT_ASSIGNEE,
+      status: "todo",
+      planProposedAt: new Date(),
+    });
+    const updated = { ...issue, planApprovedAt: new Date() };
+
+    mockIssueSvc.getById.mockResolvedValue(issue);
+    mockIssueSvc.approvePlan.mockResolvedValue({
+      issue: updated,
+      approval: { id: randomUUID(), status: "approved" },
+    });
+    mockIssueSvc.addComment.mockRejectedValueOnce(new Error("comment insert failed"));
+
+    const res = await request(makeApp(boardActor()))
+      .post(`/api/issues/${ISSUE_ID}/approve-plan`)
+      .send();
+
+    expect(res.status).toBe(200);
+    expect(res.body.issue.planApprovedAt).toBeTruthy();
+    expect(mockHeartbeat.wakeup).toHaveBeenCalledWith(
+      AGENT_ASSIGNEE,
+      expect.objectContaining({
+        reason: "plan_approved",
+        payload: expect.not.objectContaining({
+          commentId: expect.anything(),
+        }),
+      }),
+    );
+  });
+
+  it("reject-plan still returns success when the review comment side effect fails after settlement", async () => {
+    const issue = makeIssue({
+      assigneeAgentId: AGENT_ASSIGNEE,
+      status: "todo",
+      planProposedAt: new Date(),
+    });
+    const updated = { ...issue, planProposedAt: null, planApprovedAt: null };
+
+    mockIssueSvc.getById.mockResolvedValue(issue);
+    mockIssueSvc.rejectPlan.mockResolvedValue({
+      issue: updated,
+      approval: { id: randomUUID(), status: "rejected" },
+    });
+    mockIssueSvc.addComment.mockRejectedValueOnce(new Error("comment insert failed"));
+
+    const res = await request(makeApp(boardActor()))
+      .post(`/api/issues/${ISSUE_ID}/reject-plan`)
+      .send({ feedback: "Needs revision" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.issue.planProposedAt).toBeNull();
+    expect(mockHeartbeat.wakeup).toHaveBeenCalledWith(
+      AGENT_ASSIGNEE,
+      expect.objectContaining({
+        reason: "plan_rejected",
+        payload: expect.not.objectContaining({
+          commentId: expect.anything(),
         }),
       }),
     );
