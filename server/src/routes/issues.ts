@@ -535,7 +535,16 @@ export function issueRoutes(
       return false;
     }
 
-    const approvalRecord = await issueApprovalsSvc.getLiveWorkPlanApprovalForIssue(issue.id);
+    let approvalRecord;
+    try {
+      approvalRecord = await issueApprovalsSvc.getLiveWorkPlanApprovalForIssue(issue.id);
+    } catch (err) {
+      if (err instanceof HttpError && err.status === 422) {
+        res.status(409).json({ error: err.message });
+        return false;
+      }
+      throw err;
+    }
     if (!approvalRecord) {
       res.status(409).json({ error: "Issue has plan mirrors but no live work plan approval; manual repair required" });
       return false;

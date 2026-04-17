@@ -32,7 +32,7 @@ import {
   workspaceRuntimeServices,
 } from "@paperclipai/db";
 import { extractAgentMentionIds, extractProjectMentionIds, isUuidLike } from "@paperclipai/shared";
-import { conflict, notFound, unprocessable } from "../errors.js";
+import { conflict, HttpError, notFound, unprocessable } from "../errors.js";
 import { logActivity } from "./activity-log.js";
 import { deriveHeartbeatRunBusinessVerdict } from "./heartbeat-run-verdict.js";
 import {
@@ -807,6 +807,21 @@ export function issueService(db: Db) {
   const platformUnblock = platformUnblockService(db);
   const approvalsSvc = approvalService(db);
 
+  async function getLiveWorkPlanApprovalForReview(
+    issueId: string,
+    database: Db | any = db,
+  ) {
+    const approvals = issueApprovalService(database as unknown as Db);
+    try {
+      return await approvals.getLiveWorkPlanApprovalForIssue(issueId);
+    } catch (err) {
+      if (err instanceof HttpError && err.status === 422) {
+        throw conflict(err.message, err.details);
+      }
+      throw err;
+    }
+  }
+
   async function getIssueByUuid(id: string) {
     const row = await db
       .select()
@@ -837,43 +852,26 @@ export function issueService(db: Db) {
     },
   ) {
     return db.transaction(async (tx) => {
-      const txIssues = issueApprovalService(tx as unknown as Db);
       const txApprovals = approvalService(tx as unknown as Db);
-      const livePlanApproval = await txIssues.getLiveWorkPlanApprovalForIssue(issueId);
+      const livePlanApproval = await getLiveWorkPlanApprovalForReview(issueId, tx as unknown as Db);
       if (!livePlanApproval) {
         throw unprocessable("Issue has plan mirrors but no live work plan approval; manual repair required");
       }
-      const now = new Date();
-      const issuePatch =
-        input.action === "approved"
-          ? {
-              planApprovedAt: now,
-              updatedAt: now,
-            }
-          : {
-              planProposedAt: null,
-              planApprovedAt: null,
-              updatedAt: now,
-            };
+      const result = input.action === "approved"
+        ? await txApprovals.approveWithLinkedIssueSync(livePlanApproval.id, input.resolution)
+        : await txApprovals.rejectWithLinkedIssueSync(livePlanApproval.id, input.resolution);
 
       const updated = await tx
-        .update(issues)
-        .set(issuePatch)
+        .select()
+        .from(issues)
         .where(eq(issues.id, issueId))
-        .returning()
         .then((rows) => rows[0] ?? null);
       if (!updated) throw notFound("Issue not found");
-
-      let resolvedApproval: typeof approvals.$inferSelect | null = null;
-      const result = input.action === "approved"
-        ? await txApprovals.approve(livePlanApproval.id, input.resolution)
-        : await txApprovals.reject(livePlanApproval.id, input.resolution);
-      resolvedApproval = result.approval;
 
       const [enrichedIssue] = await withIssueLabels(tx, [updated]);
       return {
         issue: enrichedIssue,
-        approval: resolvedApproval,
+        approval: result.approval,
       };
     });
   }

@@ -1124,7 +1124,7 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
 
     mockIssueSvc.getById.mockResolvedValue(issue);
     mockIssueApprovalSvc.getLiveWorkPlanApprovalForIssue.mockRejectedValue(
-      new HttpError(409, "Issue has multiple live work plan approvals; manual repair required"),
+      new HttpError(422, "Issue has multiple live work plan approvals; manual repair required"),
     );
 
     const res = await request(makeApp(boardActor()))
