@@ -139,10 +139,9 @@ export function agentRoutes(db: Db) {
 
   async function resolveDefaultIssueContextForManualWake(agentId: string, companyId: string) {
     const issueSvc = issueService(db);
-    const assignedIssues = await issueSvc.list(companyId, {
+    const assignedIssues = (await issueSvc.list(companyId, {
       assigneeAgentId: agentId,
-      status: [...MANUAL_WAKE_OPEN_STATUSES],
-    });
+    })).filter((issue) => MANUAL_WAKE_OPEN_STATUSES.includes(issue.status as (typeof MANUAL_WAKE_OPEN_STATUSES)[number]));
     const selectUnique = <T,>(items: T[]) => (items.length === 1 ? items[0] : null);
     const selectedIssue =
       selectUnique(assignedIssues.filter((issue) => typeof issue.checkoutRunId === "string" && issue.checkoutRunId.length > 0))
