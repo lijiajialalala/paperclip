@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
-import { and, asc, desc, eq, gt, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import type { BillingType, ExecutionWorkspace, ExecutionWorkspaceConfig } from "@paperclipai/shared";
 import {
@@ -88,6 +88,8 @@ const SESSIONED_LOCAL_ADAPTERS = new Set([
   "pi_local",
 ]);
 const ACTIVE_HEARTBEAT_RUN_STATUS_SET = new Set(["queued", "running"]);
+const HEARTBEAT_ACTIONABLE_ISSUE_STATUSES = ["todo", "in_progress", "blocked"] as const;
+const SYNTHETIC_TIMER_LOCAL_TIMEOUT_SEC = 15 * 60;
 
 export type AutomaticRetryReason = "process_lost" | "rate_limited" | "auth_file_transient" | "browser_busy";
 
@@ -890,6 +892,40 @@ export function deriveTaskKeyWithHeartbeatFallback(
   if (wakeSource === "timer") return HEARTBEAT_TASK_KEY;
 
   return null;
+}
+
+export function isSyntheticHeartbeatTimerRun(input: {
+  contextSnapshot: Record<string, unknown> | null | undefined;
+  taskKey: string | null;
+  issueId?: string | null;
+}) {
+  const wakeSource = readNonEmptyString(input.contextSnapshot?.wakeSource);
+  return wakeSource === "timer" && input.taskKey === HEARTBEAT_TASK_KEY && !input.issueId;
+}
+
+export function applySyntheticTimerAdapterDefaults(input: {
+  contextSnapshot: Record<string, unknown> | null | undefined;
+  taskKey: string | null;
+  issueId?: string | null;
+  adapterType: string;
+  config: Record<string, unknown> | null | undefined;
+}) {
+  const config = parseObject(input.config);
+  if (
+    !isSyntheticHeartbeatTimerRun({
+      contextSnapshot: input.contextSnapshot,
+      taskKey: input.taskKey,
+      issueId: input.issueId ?? null,
+    })
+  ) {
+    return config;
+  }
+  if (!SESSIONED_LOCAL_ADAPTERS.has(input.adapterType)) return config;
+  if (asNumber(config.timeoutSec, 0) > 0) return config;
+  return {
+    ...config,
+    timeoutSec: SYNTHETIC_TIMER_LOCAL_TIMEOUT_SEC,
+  };
 }
 
 export function shouldResetTaskSessionForWake(
@@ -2034,6 +2070,106 @@ export function heartbeatService(db: Db) {
     return Number(row?.maxSeq ?? 0) + 1;
   }
 
+  async function countActionableAssignedIssues(companyId: string, agentId: string) {
+    const [{ count }] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(issues)
+      .where(
+        and(
+          eq(issues.companyId, companyId),
+          eq(issues.assigneeAgentId, agentId),
+          inArray(issues.status, [...HEARTBEAT_ACTIONABLE_ISSUE_STATUSES]),
+          isNull(issues.hiddenAt),
+        ),
+      );
+    return Number(count ?? 0);
+  }
+
+  async function skipSyntheticTimerRunIfIdle(input: {
+    run: typeof heartbeatRuns.$inferSelect;
+    agent: typeof agents.$inferSelect;
+    contextSnapshot: Record<string, unknown>;
+    taskKey: string | null;
+    issueId: string | null;
+  }) {
+    const { run, agent, contextSnapshot, taskKey, issueId } = input;
+    if (
+      !isSyntheticHeartbeatTimerRun({
+        contextSnapshot,
+        taskKey,
+        issueId,
+      })
+    ) {
+      return false;
+    }
+
+    const actionableAssignedIssueCount = await countActionableAssignedIssues(agent.companyId, agent.id);
+    if (actionableAssignedIssueCount > 0) return false;
+    const savedTaskSession = taskKey
+      ? await getTaskSession(agent.companyId, agent.id, agent.adapterType, taskKey)
+      : null;
+    const hasSavedTimerSession =
+      Boolean(savedTaskSession) ||
+      Boolean(readNonEmptyString(contextSnapshot.resumeSessionDisplayId)) ||
+      Boolean(readNonEmptyString(contextSnapshot.resumeFromRunId)) ||
+      Boolean(readNonEmptyString(parseObject(contextSnapshot.resumeSessionParams).sessionId));
+    if (hasSavedTimerSession) return false;
+
+    const finishedAt = new Date();
+    const resultJson = {
+      summary: "No actionable assigned issues; skipped idle timer heartbeat.",
+      state: "idle_timer_skipped",
+      reason: "no_actionable_assigned_issues",
+      actionableAssignedIssueCount,
+      hasSavedTimerSession: false,
+    } satisfies Record<string, unknown>;
+    const finalizedRun = await setRunStatus(run.id, "succeeded", {
+      finishedAt,
+      error: null,
+      errorCode: null,
+      exitCode: 0,
+      signal: null,
+      usageJson: null,
+      resultJson,
+      stdoutExcerpt: "",
+      stderrExcerpt: "",
+    });
+    await setWakeupStatus(run.wakeupRequestId, "completed", {
+      finishedAt,
+      error: null,
+    });
+
+    if (finalizedRun) {
+      await appendRunEvent(finalizedRun, await nextRunEventSeq(finalizedRun.id), {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "info",
+        message: "run skipped: no actionable assigned issues",
+        payload: {
+          reason: "no_actionable_assigned_issues",
+          actionableAssignedIssueCount,
+        },
+      });
+      await updateRuntimeState(
+        agent,
+        finalizedRun,
+        {
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          errorMessage: null,
+          resultJson,
+        },
+        {
+          legacySessionId: null,
+        },
+      );
+    }
+
+    await finalizeAgentStatus(agent.id, "succeeded");
+    return true;
+  }
+
   async function persistRunProcessMetadata(
     runId: string,
     meta: { pid: number; startedAt: string },
@@ -2716,6 +2852,17 @@ export function heartbeatService(db: Db) {
     const taskKey = deriveTaskKeyWithHeartbeatFallback(context, null);
     const sessionCodec = getAdapterSessionCodec(agent.adapterType);
     const issueId = readNonEmptyString(context.issueId);
+    if (
+      await skipSyntheticTimerRunIfIdle({
+        run,
+        agent,
+        contextSnapshot: context,
+        taskKey,
+        issueId,
+      })
+    ) {
+      return;
+    }
     const issueContext = issueId
       ? await db
           .select({
@@ -2855,10 +3002,17 @@ export function heartbeatService(db: Db) {
       : persistedWorkspaceManagedConfig;
     const configSnapshot = buildExecutionWorkspaceConfigSnapshot(mergedConfig);
     const executionRunConfig = stripWorkspaceRuntimeFromExecutionRunConfig(mergedConfig);
-    const { config: resolvedConfig, secretKeys } = await secretsSvc.resolveAdapterConfigForRuntime(
+    const { config: secretResolvedConfig, secretKeys } = await secretsSvc.resolveAdapterConfigForRuntime(
       agent.companyId,
       executionRunConfig,
     );
+    const resolvedConfig = applySyntheticTimerAdapterDefaults({
+      contextSnapshot: context,
+      taskKey,
+      issueId,
+      adapterType: agent.adapterType,
+      config: secretResolvedConfig,
+    });
     const runtimeSkillEntries = await companySkills.listRuntimeSkillEntries(agent.companyId);
     const runtimeConfig = {
       ...resolvedConfig,
