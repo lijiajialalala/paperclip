@@ -3,6 +3,7 @@ import type { Db } from "@paperclipai/db";
 import {
   activityLog,
   agents,
+  approvals,
   assets,
   companies,
   companyMemberships,
@@ -46,8 +47,10 @@ import { platformUnblockService } from "./platform-unblock.js";
 import { qaIssueStateService } from "./qa-issue-state.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { approvalService } from "./approvals.js";
+import { defaultWorkPlanApprovalRouting } from "./approval-routing.js";
 import { resolveIssueGoalId, resolveNextIssueGoalId } from "./issue-goal-fallback.js";
 import { getDefaultCompanyGoal } from "./goals.js";
+import { issueApprovalService } from "./issue-approvals.js";
 
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
@@ -146,6 +149,17 @@ type IssueCreateInput = Omit<typeof issues.$inferInsert, "companyId"> & {
   inheritExecutionWorkspaceFromIssueId?: string | null;
 };
 type IssueDoneGuardActorType = "agent" | "board";
+type IssueCommentActor = {
+  agentId?: string;
+  userId?: string;
+  runId?: string | null;
+  replyNeeded?: boolean;
+};
+type PlanReviewResolutionInput = {
+  decidedByUserId: string | null;
+  decidedByAgentId: string | null;
+  decisionNote?: string | null;
+};
 type IssueDoneGuardRunRow = {
   id: string;
   agentId: string;
@@ -813,6 +827,127 @@ export function issueService(db: Db) {
     if (!row) return null;
     const [enriched] = await withIssueLabels(db, [row]);
     return enriched;
+  }
+
+  async function finalizePlanReview(
+    issueId: string,
+    input: {
+      action: "approved" | "rejected";
+      resolution: PlanReviewResolutionInput;
+    },
+  ) {
+    return db.transaction(async (tx) => {
+      const txIssues = issueApprovalService(tx as unknown as Db);
+      const txApprovals = approvalService(tx as unknown as Db);
+      const livePlanApproval = await txIssues.getLiveWorkPlanApprovalForIssue(issueId);
+      if (!livePlanApproval) {
+        throw unprocessable("Issue has plan mirrors but no live work plan approval; manual repair required");
+      }
+      const now = new Date();
+      const issuePatch =
+        input.action === "approved"
+          ? {
+              planApprovedAt: now,
+              updatedAt: now,
+            }
+          : {
+              planProposedAt: null,
+              planApprovedAt: null,
+              updatedAt: now,
+            };
+
+      const updated = await tx
+        .update(issues)
+        .set(issuePatch)
+        .where(eq(issues.id, issueId))
+        .returning()
+        .then((rows) => rows[0] ?? null);
+      if (!updated) throw notFound("Issue not found");
+
+      let resolvedApproval: typeof approvals.$inferSelect | null = null;
+      const result = input.action === "approved"
+        ? await txApprovals.approve(livePlanApproval.id, input.resolution)
+        : await txApprovals.reject(livePlanApproval.id, input.resolution);
+      resolvedApproval = result.approval;
+
+      const [enrichedIssue] = await withIssueLabels(tx, [updated]);
+      return {
+        issue: enrichedIssue,
+        approval: resolvedApproval,
+      };
+    });
+  }
+
+  async function addCommentWithDb(
+    dbOrTx: any,
+    issue: {
+      id: string;
+      companyId: string;
+      createdByUserId: string | null;
+      assigneeUserId: string | null;
+    },
+    body: string,
+    actor: IssueCommentActor,
+    censorUsernameInLogs: boolean,
+  ) {
+    const redactedBody = redactCurrentUserText(body, { enabled: censorUsernameInLogs });
+    const [comment] = await dbOrTx
+      .insert(issueComments)
+      .values({
+        companyId: issue.companyId,
+        issueId: issue.id,
+        authorAgentId: actor.agentId ?? null,
+        authorUserId: actor.userId ?? null,
+        createdByRunId: actor.runId ?? null,
+        body: redactedBody,
+      })
+      .returning();
+
+    await dbOrTx
+      .update(issues)
+      .set({ updatedAt: new Date() })
+      .where(eq(issues.id, issue.id));
+
+    if (actor.userId) {
+      await dbOrTx
+        .delete(issueReplyNeeded)
+        .where(
+          and(
+            eq(issueReplyNeeded.companyId, issue.companyId),
+            eq(issueReplyNeeded.issueId, issue.id),
+            eq(issueReplyNeeded.userId, actor.userId),
+          ),
+        );
+    } else if (actor.replyNeeded === true && !actor.userId) {
+      const recipientUserIds = await resolveReplyNeededRecipientUserIds(dbOrTx, {
+        companyId: issue.companyId,
+        issueId: issue.id,
+        assigneeUserId: issue.assigneeUserId,
+        createdByUserId: issue.createdByUserId,
+      });
+      if (recipientUserIds.length > 0) {
+        await dbOrTx
+          .insert(issueReplyNeeded)
+          .values(
+            recipientUserIds.map((userId) => ({
+              companyId: issue.companyId,
+              issueId: issue.id,
+              commentId: comment.id,
+              userId,
+              updatedAt: new Date(),
+            })),
+          )
+          .onConflictDoUpdate({
+            target: [issueReplyNeeded.companyId, issueReplyNeeded.issueId, issueReplyNeeded.userId],
+            set: {
+              commentId: comment.id,
+              updatedAt: new Date(),
+            },
+          });
+      }
+    }
+
+    return redactIssueComment(comment, censorUsernameInLogs);
   }
 
   async function getLatestAuthoritativeRunForIssue(
@@ -1911,6 +2046,171 @@ export function issueService(db: Db) {
       });
     },
 
+    proposePlan: async (
+      issueId: string,
+      input: {
+        planText: string;
+        actor: {
+          actorType: "agent" | "board";
+          actorId: string;
+          agentId?: string | null;
+          runId?: string | null;
+          userId?: string | null;
+        };
+      },
+    ) => {
+      const { censorUsernameInLogs } = await instanceSettings.getGeneral();
+      return db.transaction(async (tx) => {
+        const txIssues = issueApprovalService(tx as unknown as Db);
+        const txApprovals = approvalService(tx as unknown as Db);
+        await tx.execute(
+          sql`select ${issues.id} from ${issues} where ${issues.id} = ${issueId} for update`,
+        );
+        const issue = await tx
+          .select({
+            id: issues.id,
+            companyId: issues.companyId,
+            title: issues.title,
+            parentId: issues.parentId,
+            identifier: issues.identifier,
+            status: issues.status,
+            priority: issues.priority,
+            projectId: issues.projectId,
+            goalId: issues.goalId,
+            createdByUserId: issues.createdByUserId,
+            assigneeUserId: issues.assigneeUserId,
+            assigneeAgentId: issues.assigneeAgentId,
+            planProposedAt: issues.planProposedAt,
+            planApprovedAt: issues.planApprovedAt,
+            checkoutRunId: issues.checkoutRunId,
+            executionRunId: issues.executionRunId,
+            executionLockedAt: issues.executionLockedAt,
+          })
+          .from(issues)
+          .where(eq(issues.id, issueId))
+          .then((rows) => rows[0] ?? null);
+        if (!issue) throw notFound("Issue not found");
+
+        const existingPlanApproval = await txIssues.getLiveWorkPlanApprovalForIssue(issue.id);
+        if (issue.planProposedAt && !issue.planApprovedAt && !existingPlanApproval) {
+          throw unprocessable("Issue has a pending plan mirror but no live work plan approval; manual repair required");
+        }
+
+        const comment = await addCommentWithDb(
+          tx,
+          issue,
+          `📋 **Work Plan**\n\n${input.planText}`,
+          {
+            agentId: input.actor.agentId ?? undefined,
+            userId: input.actor.actorType === "board" ? (input.actor.userId ?? undefined) : undefined,
+            runId: input.actor.runId,
+          },
+          censorUsernameInLogs,
+        );
+
+        const now = new Date();
+        const updated = await tx
+          .update(issues)
+          .set({
+            planProposedAt: now,
+            planApprovedAt: null,
+            checkoutRunId: null,
+            executionRunId: null,
+            executionLockedAt: null,
+            updatedAt: now,
+          })
+          .where(eq(issues.id, issueId))
+          .returning()
+          .then((rows) => rows[0] ?? null);
+        if (!updated) throw notFound("Issue not found");
+
+        const parentIssue = issue.parentId
+          ? await tx
+            .select({
+              id: issues.id,
+              assigneeAgentId: issues.assigneeAgentId,
+              assigneeUserId: issues.assigneeUserId,
+            })
+            .from(issues)
+            .where(eq(issues.id, issue.parentId))
+            .then((rows) => rows[0] ?? null)
+          : null;
+        const routing = defaultWorkPlanApprovalRouting(issue, parentIssue);
+        const payload = {
+          issueId: issue.id,
+          issueIdentifier: issue.identifier ?? issue.id,
+          issueTitle: issue.title,
+          planSnippet: input.planText.length > 2000 ? `${input.planText.slice(0, 2000)}...` : input.planText,
+          commentId: comment.id,
+        };
+        let planApproval: typeof approvals.$inferSelect | null = null;
+
+        if (existingPlanApproval) {
+          if (existingPlanApproval.status === "revision_requested") {
+            await txApprovals.resubmit(existingPlanApproval.id, payload);
+          }
+          await tx
+            .update(approvals)
+            .set({
+              payload,
+              targetAgentId: routing.targetAgentId,
+              targetUserId: routing.targetUserId,
+              routingMode: routing.routingMode,
+              escalatedAt: routing.escalatedAt,
+              escalationReason: routing.escalationReason,
+              updatedAt: now,
+            })
+            .where(eq(approvals.id, existingPlanApproval.id));
+          planApproval = (await txApprovals.getById(existingPlanApproval.id)) ?? existingPlanApproval;
+        } else {
+          planApproval = await txApprovals.create(issue.companyId, {
+            type: "work_plan",
+            requestedByAgentId: input.actor.agentId ?? null,
+            requestedByUserId: input.actor.actorType === "board" ? (input.actor.userId ?? null) : null,
+            targetAgentId: routing.targetAgentId,
+            targetUserId: routing.targetUserId,
+            routingMode: routing.routingMode,
+            escalatedAt: routing.escalatedAt,
+            escalationReason: routing.escalationReason,
+            status: "pending",
+            payload,
+            decisionNote: null,
+            decidedByUserId: null,
+            decidedByAgentId: null,
+            decidedAt: null,
+            updatedAt: now,
+          });
+          await txIssues.linkManyForApproval(planApproval.id, [issue.id], {
+            agentId: input.actor.agentId,
+            userId: input.actor.actorType === "board" ? (input.actor.userId ?? null) : null,
+          });
+        }
+
+        if (!planApproval?.id) {
+          throw new Error("Plan approval could not be resolved");
+        }
+
+        const [enrichedIssue] = await withIssueLabels(tx, [updated]);
+        return {
+          issue: enrichedIssue,
+          comment,
+          approval: planApproval,
+        };
+      });
+    },
+
+    approvePlan: async (issueId: string, resolution: PlanReviewResolutionInput) =>
+      finalizePlanReview(issueId, {
+        action: "approved",
+        resolution,
+      }),
+
+    rejectPlan: async (issueId: string, resolution: PlanReviewResolutionInput) =>
+      finalizePlanReview(issueId, {
+        action: "rejected",
+        resolution,
+      }),
+
     remove: (id: string) =>
       db.transaction(async (tx) => {
         const linkedApprovalIds = await tx
@@ -2365,11 +2665,12 @@ export function issueService(db: Db) {
     addComment: async (
       issueId: string,
       body: string,
-      actor: { agentId?: string; userId?: string; runId?: string | null; replyNeeded?: boolean },
+      actor: IssueCommentActor,
     ) => {
       const issue = await db
         .select({
           companyId: issues.companyId,
+          id: issues.id,
           createdByUserId: issues.createdByUserId,
           assigneeUserId: issues.assigneeUserId,
         })
@@ -2379,69 +2680,9 @@ export function issueService(db: Db) {
 
       if (!issue) throw notFound("Issue not found");
 
-      const currentUserRedactionOptions = {
-        enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
-      };
-      const redactedBody = redactCurrentUserText(body, currentUserRedactionOptions);
-      return db.transaction(async (tx) => {
-        const [comment] = await tx
-          .insert(issueComments)
-          .values({
-            companyId: issue.companyId,
-            issueId,
-            authorAgentId: actor.agentId ?? null,
-            authorUserId: actor.userId ?? null,
-            createdByRunId: actor.runId ?? null,
-            body: redactedBody,
-          })
-          .returning();
-
-        await tx
-          .update(issues)
-          .set({ updatedAt: new Date() })
-          .where(eq(issues.id, issueId));
-
-        if (actor.userId) {
-          await tx
-            .delete(issueReplyNeeded)
-            .where(
-              and(
-                eq(issueReplyNeeded.companyId, issue.companyId),
-                eq(issueReplyNeeded.issueId, issueId),
-                eq(issueReplyNeeded.userId, actor.userId),
-              ),
-            );
-        } else if (actor.replyNeeded === true && !actor.userId) {
-          const recipientUserIds = await resolveReplyNeededRecipientUserIds(tx, {
-            companyId: issue.companyId,
-            issueId,
-            assigneeUserId: issue.assigneeUserId,
-            createdByUserId: issue.createdByUserId,
-          });
-          if (recipientUserIds.length > 0) {
-            await tx
-              .insert(issueReplyNeeded)
-              .values(
-                recipientUserIds.map((userId) => ({
-                  companyId: issue.companyId,
-                  issueId,
-                  commentId: comment.id,
-                  userId,
-                  updatedAt: new Date(),
-                })),
-              )
-              .onConflictDoUpdate({
-                target: [issueReplyNeeded.companyId, issueReplyNeeded.issueId, issueReplyNeeded.userId],
-                set: {
-                  commentId: comment.id,
-                  updatedAt: new Date(),
-                },
-              });
-          }
-        }
-
-        return redactIssueComment(comment, currentUserRedactionOptions.enabled);
-      });
+      const { censorUsernameInLogs } = await instanceSettings.getGeneral();
+      return db.transaction(async (tx) =>
+        addCommentWithDb(tx, issue, body, actor, censorUsernameInLogs));
     },
 
     createAttachment: async (input: {

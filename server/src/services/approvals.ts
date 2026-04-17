@@ -1,7 +1,7 @@
-import { and, asc, eq, inArray, notExists, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, notExists, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { approvalComments, approvals, budgetIncidents, issueApprovals } from "@paperclipai/db";
-import { notFound, unprocessable } from "../errors.js";
+import { approvalComments, approvals, budgetIncidents, issueApprovals, issues } from "@paperclipai/db";
+import { conflict, notFound, unprocessable } from "../errors.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { agentService } from "./agents.js";
 import { budgetService } from "./budgets.js";
@@ -23,6 +23,15 @@ interface ApprovalResolutionInput {
   decidedByAgentId: string | null;
   decisionNote?: string | null;
 }
+type LinkedIssuePlanMirrorRecord = {
+  id: string;
+  status: string;
+  planProposedAt: Date | null;
+  planApprovedAt: Date | null;
+  startedAt: Date | null;
+  executionRunId: string | null;
+  checkoutRunId: string | null;
+};
 
 export function approvalService(db: Db) {
   const agentsSvc = agentService(db);
@@ -40,12 +49,12 @@ export function approvalService(db: Db) {
     };
   }
 
-  async function getExistingApproval(id: string) {
-    const existing = await db
+  async function getExistingApproval(id: string, database: Db | any = db) {
+    const existing = await database
       .select()
       .from(approvals)
       .where(eq(approvals.id, id))
-      .then((rows) => rows[0] ?? null);
+      .then((rows: any[]) => rows[0] ?? null);
     if (!existing) throw notFound("Approval not found");
     return existing;
   }
@@ -54,8 +63,9 @@ export function approvalService(db: Db) {
     id: string,
     targetStatus: "approved" | "rejected",
     input: ApprovalResolutionInput,
+    database: Db | any = db,
   ): Promise<ResolutionResult> {
-    const existing = await getExistingApproval(id);
+    const existing = await getExistingApproval(id, database);
     if (!canResolveStatuses.has(existing.status)) {
       if (existing.status === targetStatus) {
         return { approval: existing, applied: false };
@@ -66,7 +76,7 @@ export function approvalService(db: Db) {
     }
 
     const now = new Date();
-    const updated = await db
+    const updated = await database
       .update(approvals)
       .set({
         status: targetStatus,
@@ -78,13 +88,13 @@ export function approvalService(db: Db) {
       })
       .where(and(eq(approvals.id, id), inArray(approvals.status, resolvableStatuses)))
       .returning()
-      .then((rows) => rows[0] ?? null);
+      .then((rows: any[]) => rows[0] ?? null);
 
     if (updated) {
       return { approval: updated, applied: true };
     }
 
-    const latest = await getExistingApproval(id);
+    const latest = await getExistingApproval(id, database);
     if (latest.status === targetStatus) {
       return { approval: latest, applied: false };
     }
@@ -92,6 +102,253 @@ export function approvalService(db: Db) {
     throw unprocessable(
       `Only pending or revision requested approvals can be ${targetStatus === "approved" ? "approved" : "rejected"}`,
     );
+  }
+
+  async function listLinkedIssuesForApprovalInternal(
+    approvalId: string,
+    database: Db | any = db,
+  ): Promise<LinkedIssuePlanMirrorRecord[]> {
+    const existing = await getExistingApproval(approvalId, database);
+    return database
+      .select({
+        id: issues.id,
+        status: issues.status,
+        planProposedAt: issues.planProposedAt,
+        planApprovedAt: issues.planApprovedAt,
+        startedAt: issues.startedAt,
+        executionRunId: issues.executionRunId,
+        checkoutRunId: issues.checkoutRunId,
+      })
+      .from(issueApprovals)
+      .innerJoin(issues, eq(issueApprovals.issueId, issues.id))
+      .where(
+        and(
+          eq(issueApprovals.approvalId, approvalId),
+          eq(issueApprovals.companyId, existing.companyId),
+        ),
+      )
+      .orderBy(desc(issueApprovals.createdAt));
+  }
+
+  async function assertWorkPlanSettlementAllowed(
+    approval: typeof approvals.$inferSelect,
+    targetStatus: "approved" | "rejected",
+    database: Db | any = db,
+  ): Promise<LinkedIssuePlanMirrorRecord[]> {
+    if (approval.type !== "work_plan") return [];
+
+    const linkedIssues = await listLinkedIssuesForApprovalInternal(approval.id, database);
+    if (linkedIssues.length === 0) {
+      throw conflict("Work plan approval has no linked issues; manual repair required");
+    }
+
+    const uniqueIssueIds = Array.from(new Set(linkedIssues.map((issue) => issue.id)));
+    const liveWorkPlanLinks = await database
+      .select({
+        issueId: issueApprovals.issueId,
+        approvalId: approvals.id,
+      })
+      .from(issueApprovals)
+      .innerJoin(approvals, eq(issueApprovals.approvalId, approvals.id))
+      .where(
+        and(
+          inArray(issueApprovals.issueId, uniqueIssueIds),
+          eq(issueApprovals.companyId, approval.companyId),
+          eq(approvals.companyId, approval.companyId),
+          eq(approvals.type, "work_plan"),
+          inArray(approvals.status, resolvableStatuses),
+        ),
+      )
+      .orderBy(desc(issueApprovals.createdAt));
+
+    const liveApprovalIdsByIssue = new Map<string, Set<string>>();
+    for (const liveLink of liveWorkPlanLinks) {
+      const issueApprovalIds = liveApprovalIdsByIssue.get(liveLink.issueId) ?? new Set<string>();
+      issueApprovalIds.add(liveLink.approvalId);
+      liveApprovalIdsByIssue.set(liveLink.issueId, issueApprovalIds);
+    }
+
+    for (const issueId of uniqueIssueIds) {
+      const liveApprovalIds = Array.from(liveApprovalIdsByIssue.get(issueId) ?? []);
+      if (liveApprovalIds.length !== 1 || liveApprovalIds[0] !== approval.id) {
+        throw conflict("Issue has multiple live work plan approvals; manual repair required");
+      }
+    }
+
+    if (targetStatus === "approved") {
+      const executionAlreadyStarted = linkedIssues.some((linkedIssue) =>
+        linkedIssue.status === "in_progress"
+        || linkedIssue.status === "done"
+        || linkedIssue.status === "blocked"
+        || Boolean(linkedIssue.executionRunId)
+        || Boolean(linkedIssue.checkoutRunId)
+      );
+      if (executionAlreadyStarted) {
+        throw conflict(
+          "Cannot approve a plan after execution has already started. Return the issue to review and rerun after approval.",
+        );
+      }
+    }
+
+    return linkedIssues;
+  }
+
+  async function resolveWithLinkedIssueSync(
+    id: string,
+    targetStatus: "approved" | "rejected",
+    input: ApprovalResolutionInput,
+  ) {
+    const outcome = await db.transaction(async (tx) => {
+      const existing = await getExistingApproval(id, tx as unknown as Db);
+      if (!canResolveStatuses.has(existing.status)) {
+        if (existing.status === targetStatus) {
+          return { approval: existing, applied: false, linkedIssues: [] as LinkedIssuePlanMirrorRecord[] };
+        }
+        throw unprocessable(
+          `Only pending or revision requested approvals can be ${targetStatus === "approved" ? "approved" : "rejected"}`,
+        );
+      }
+
+      const linkedIssues = await assertWorkPlanSettlementAllowed(
+        existing,
+        targetStatus,
+        tx as unknown as Db,
+      );
+      const resolution = await resolveApproval(id, targetStatus, input, tx as unknown as Db);
+      if (resolution.applied) {
+        await syncResolvedWorkPlanIssuesInternal(
+          resolution.approval,
+          linkedIssues,
+          tx as unknown as Db,
+        );
+      }
+      return {
+        ...resolution,
+        linkedIssues: resolution.applied ? linkedIssues : [],
+      };
+    });
+
+    await applyPostResolutionSideEffects(outcome.approval, outcome.applied, targetStatus, input);
+    return outcome;
+  }
+
+  async function syncResolvedWorkPlanIssuesInternal(
+    approval: typeof approvals.$inferSelect,
+    linkedIssues: LinkedIssuePlanMirrorRecord[],
+    database: Db | any = db,
+  ) {
+    if (approval.type !== "work_plan") return;
+
+    const resolvedAt = approval.decidedAt ?? new Date();
+    for (const linkedIssue of linkedIssues) {
+      if (approval.status === "approved") {
+        const planStillPending =
+          !linkedIssue.planApprovedAt
+          && Boolean(linkedIssue.planProposedAt);
+        if (!planStillPending) continue;
+
+        await database
+          .update(issues)
+          .set({
+            planApprovedAt: resolvedAt,
+            updatedAt: new Date(),
+          })
+          .where(eq(issues.id, linkedIssue.id));
+        continue;
+      }
+
+      if (approval.status === "rejected") {
+        const planNeedsReset =
+          Boolean(linkedIssue.planProposedAt)
+          || Boolean(linkedIssue.planApprovedAt);
+        if (!planNeedsReset) continue;
+
+        await database
+          .update(issues)
+          .set({
+            planProposedAt: null,
+            planApprovedAt: null,
+            updatedAt: new Date(),
+          })
+          .where(eq(issues.id, linkedIssue.id));
+      }
+    }
+  }
+
+  async function applyPostResolutionSideEffects(
+    updated: typeof approvals.$inferSelect,
+    applied: boolean,
+    targetStatus: "approved" | "rejected",
+    input: ApprovalResolutionInput,
+  ) {
+    if (!applied) return;
+
+    if (targetStatus === "approved" && updated.type === "hire_agent") {
+      let hireApprovedAgentId: string | null = null;
+      const now = new Date();
+      const payload = updated.payload as Record<string, unknown>;
+      const payloadAgentId = typeof payload.agentId === "string" ? payload.agentId : null;
+      if (payloadAgentId) {
+        await agentsSvc.activatePendingApproval(payloadAgentId);
+        hireApprovedAgentId = payloadAgentId;
+      } else {
+        const created = await agentsSvc.create(updated.companyId, {
+          name: String(payload.name ?? "New Agent"),
+          role: String(payload.role ?? "general"),
+          title: typeof payload.title === "string" ? payload.title : null,
+          reportsTo: typeof payload.reportsTo === "string" ? payload.reportsTo : null,
+          capabilities: typeof payload.capabilities === "string" ? payload.capabilities : null,
+          adapterType: String(payload.adapterType ?? "process"),
+          adapterConfig:
+            typeof payload.adapterConfig === "object" && payload.adapterConfig !== null
+              ? (payload.adapterConfig as Record<string, unknown>)
+              : {},
+          budgetMonthlyCents:
+            typeof payload.budgetMonthlyCents === "number" ? payload.budgetMonthlyCents : 0,
+          metadata:
+            typeof payload.metadata === "object" && payload.metadata !== null
+              ? (payload.metadata as Record<string, unknown>)
+              : null,
+          status: "idle",
+          spentMonthlyCents: 0,
+          permissions: undefined,
+          lastHeartbeatAt: null,
+        });
+        hireApprovedAgentId = created?.id ?? null;
+      }
+      if (hireApprovedAgentId) {
+        const budgetMonthlyCents =
+          typeof payload.budgetMonthlyCents === "number" ? payload.budgetMonthlyCents : 0;
+        if (budgetMonthlyCents > 0) {
+          await budgets.upsertPolicy(
+            updated.companyId,
+            {
+              scopeType: "agent",
+              scopeId: hireApprovedAgentId,
+              amount: budgetMonthlyCents,
+              windowKind: "calendar_month_utc",
+            },
+            input.decidedByUserId ?? input.decidedByAgentId ?? "board",
+          );
+        }
+        void notifyHireApproved(db, {
+          companyId: updated.companyId,
+          agentId: hireApprovedAgentId,
+          source: "approval",
+          sourceId: updated.id,
+          approvedAt: now,
+        }).catch(() => {});
+      }
+      return;
+    }
+
+    if (targetStatus === "rejected" && updated.type === "hire_agent") {
+      const payload = updated.payload as Record<string, unknown>;
+      const payloadAgentId = typeof payload.agentId === "string" ? payload.agentId : null;
+      if (payloadAgentId) {
+        await agentsSvc.terminate(payloadAgentId);
+      }
+    }
   }
 
   return {
@@ -133,64 +390,7 @@ export function approvalService(db: Db) {
         "approved",
         input,
       );
-
-      let hireApprovedAgentId: string | null = null;
-      const now = new Date();
-      if (applied && updated.type === "hire_agent") {
-        const payload = updated.payload as Record<string, unknown>;
-        const payloadAgentId = typeof payload.agentId === "string" ? payload.agentId : null;
-        if (payloadAgentId) {
-          await agentsSvc.activatePendingApproval(payloadAgentId);
-          hireApprovedAgentId = payloadAgentId;
-        } else {
-          const created = await agentsSvc.create(updated.companyId, {
-            name: String(payload.name ?? "New Agent"),
-            role: String(payload.role ?? "general"),
-            title: typeof payload.title === "string" ? payload.title : null,
-            reportsTo: typeof payload.reportsTo === "string" ? payload.reportsTo : null,
-            capabilities: typeof payload.capabilities === "string" ? payload.capabilities : null,
-            adapterType: String(payload.adapterType ?? "process"),
-            adapterConfig:
-              typeof payload.adapterConfig === "object" && payload.adapterConfig !== null
-                ? (payload.adapterConfig as Record<string, unknown>)
-                : {},
-            budgetMonthlyCents:
-              typeof payload.budgetMonthlyCents === "number" ? payload.budgetMonthlyCents : 0,
-            metadata:
-              typeof payload.metadata === "object" && payload.metadata !== null
-                ? (payload.metadata as Record<string, unknown>)
-                : null,
-            status: "idle",
-            spentMonthlyCents: 0,
-            permissions: undefined,
-            lastHeartbeatAt: null,
-          });
-          hireApprovedAgentId = created?.id ?? null;
-        }
-        if (hireApprovedAgentId) {
-          const budgetMonthlyCents =
-            typeof payload.budgetMonthlyCents === "number" ? payload.budgetMonthlyCents : 0;
-          if (budgetMonthlyCents > 0) {
-            await budgets.upsertPolicy(
-              updated.companyId,
-              {
-                scopeType: "agent",
-                scopeId: hireApprovedAgentId,
-                amount: budgetMonthlyCents,
-                windowKind: "calendar_month_utc",
-              },
-              input.decidedByUserId ?? input.decidedByAgentId ?? "board",
-            );
-          }
-          void notifyHireApproved(db, {
-            companyId: updated.companyId,
-            agentId: hireApprovedAgentId,
-            source: "approval",
-            sourceId: id,
-            approvedAt: now,
-          }).catch(() => {});
-        }
-      }
+      await applyPostResolutionSideEffects(updated, applied, "approved", input);
 
       return { approval: updated, applied };
     },
@@ -201,16 +401,17 @@ export function approvalService(db: Db) {
         "rejected",
         input,
       );
-
-      if (applied && updated.type === "hire_agent") {
-        const payload = updated.payload as Record<string, unknown>;
-        const payloadAgentId = typeof payload.agentId === "string" ? payload.agentId : null;
-        if (payloadAgentId) {
-          await agentsSvc.terminate(payloadAgentId);
-        }
-      }
+      await applyPostResolutionSideEffects(updated, applied, "rejected", input);
 
       return { approval: updated, applied };
+    },
+
+    approveWithLinkedIssueSync: async (id: string, input: ApprovalResolutionInput) => {
+      return resolveWithLinkedIssueSync(id, "approved", input);
+    },
+
+    rejectWithLinkedIssueSync: async (id: string, input: ApprovalResolutionInput) => {
+      return resolveWithLinkedIssueSync(id, "rejected", input);
     },
 
     requestRevision: async (id: string, input: ApprovalResolutionInput) => {
