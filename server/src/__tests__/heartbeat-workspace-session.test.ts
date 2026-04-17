@@ -360,6 +360,18 @@ describe("applySyntheticTimerAdapterDefaults", () => {
     expect(result.timeoutSec).toBe(1200);
   });
 
+  it("preserves an explicit zero timeout when synthetic timers disable timeout", () => {
+    const result = applySyntheticTimerAdapterDefaults({
+      contextSnapshot: { wakeSource: "timer" },
+      taskKey: "__heartbeat__",
+      issueId: null,
+      adapterType: "codex_local",
+      config: { timeoutSec: 0 },
+    });
+
+    expect(result.timeoutSec).toBe(0);
+  });
+
   it("does not modify assignment or issue-scoped runs", () => {
     const result = applySyntheticTimerAdapterDefaults({
       contextSnapshot: { wakeSource: "assignment" },

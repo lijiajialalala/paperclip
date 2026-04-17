@@ -921,7 +921,8 @@ export function applySyntheticTimerAdapterDefaults(input: {
     return config;
   }
   if (!SESSIONED_LOCAL_ADAPTERS.has(input.adapterType)) return config;
-  if (asNumber(config.timeoutSec, 0) > 0) return config;
+  const configuredTimeoutSec = asNumber(config.timeoutSec, Number.NaN);
+  if (Number.isFinite(configuredTimeoutSec) && configuredTimeoutSec >= 0) return config;
   return {
     ...config,
     timeoutSec: SYNTHETIC_TIMER_LOCAL_TIMEOUT_SEC,
@@ -2140,6 +2141,7 @@ export function heartbeatService(db: Db) {
     });
 
     if (finalizedRun) {
+      const runtimeBeforeSkip = await getRuntimeState(agent.id);
       await appendRunEvent(finalizedRun, await nextRunEventSeq(finalizedRun.id), {
         eventType: "lifecycle",
         stream: "system",
@@ -2161,7 +2163,7 @@ export function heartbeatService(db: Db) {
           resultJson,
         },
         {
-          legacySessionId: null,
+          legacySessionId: runtimeBeforeSkip?.sessionId ?? null,
         },
       );
     }

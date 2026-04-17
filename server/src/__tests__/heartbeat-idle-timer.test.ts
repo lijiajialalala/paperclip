@@ -274,6 +274,8 @@ describeEmbeddedPostgres("heartbeat idle timer preflight", () => {
       state: "idle_timer_skipped",
       reason: "no_actionable_assigned_issues",
     });
+    const runtime = await waitForRuntimeState(db, agentId, queuedRun!.id);
+    expect(runtime?.sessionId).toBe("issue-session-1");
   });
 
   it("continues into the adapter for issue-less synthetic timer runs when a heartbeat task session exists", async () => {
