@@ -1055,6 +1055,25 @@ export function IssueDetail() {
     onError: (err) => pushToast({ title: "Rejection failed", body: err instanceof Error ? err.message : "Unknown error", tone: "error" }),
   });
 
+  const resumeChain = useMutation({
+    mutationFn: () => issuesApi.resumeChain(issueId!),
+    onSuccess: (result) => {
+      invalidateIssue();
+      pushToast({
+        title: result.decision === "no_actionable_target" ? "No chain action taken" : "Task chain resumed",
+        body: result.summary,
+        tone: result.decision === "no_actionable_target" ? "warn" : "success",
+      });
+    },
+    onError: (err) => {
+      pushToast({
+        title: "Resume chain failed",
+        body: err instanceof Error ? err.message : "Unable to resume the task chain",
+        tone: "error",
+      });
+    },
+  });
+
   const uploadAttachment = useMutation({
     mutationFn: async (file: File) => {
       if (!selectedCompanyId) throw new Error("No company selected");
@@ -1414,6 +1433,15 @@ export function IssueDetail() {
             <Button
               variant="ghost"
               size="icon-xs"
+              onClick={() => resumeChain.mutate()}
+              disabled={resumeChain.isPending}
+              title="Resume task chain"
+            >
+              <Repeat className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon-xs"
               onClick={copyIssueToClipboard}
               title="Copy issue as markdown"
             >
@@ -1430,6 +1458,16 @@ export function IssueDetail() {
           </div>
 
           <div className="hidden md:flex items-center md:ml-auto shrink-0">
+            <Button
+              variant="outline"
+              size="sm"
+              className="mr-1 gap-1.5"
+              onClick={() => resumeChain.mutate()}
+              disabled={resumeChain.isPending}
+            >
+              <Repeat className="h-3.5 w-3.5" />
+              {resumeChain.isPending ? "Resuming..." : "Resume Chain"}
+            </Button>
             <Button
               variant="ghost"
               size="icon-xs"

@@ -161,6 +161,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
         projectId,
         goalId: null,
         parentIssueId: null,
+        dispatchMode: "event_driven",
         title: "ascii frog",
         description: "Run the frog routine",
         assigneeAgentId: agentId,
@@ -222,6 +223,91 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     expect(routineIssues.map((issue) => issue.id)).toContain(run.linkedIssueId);
   });
 
+  it("defaults routines without a fixed parent to top-level run issues", async () => {
+    const { routine } = await seedFixture();
+
+    expect(routine.dispatchMode).toBe("event_driven");
+    expect(routine.runIssueMode).toBe("top_level_run_issue");
+    expect(routine.parentIssueId).toBeNull();
+  });
+
+  it("creates child run issues beneath a fixed parent when configured", async () => {
+    const { companyId, agentId, issueSvc, projectId, svc } = await seedFixture();
+    const fixedParent = await issueSvc.create(companyId, {
+      projectId,
+      title: "Platform quality daily check",
+      status: "todo",
+      priority: "medium",
+      assigneeAgentId: agentId,
+    });
+
+    const routine = await svc.create(
+      companyId,
+      {
+        projectId,
+        goalId: null,
+        parentIssueId: fixedParent.id,
+        dispatchMode: "fixed_parallel_lanes",
+        runIssueMode: "child_of_fixed_parent",
+        title: "platform quality routine",
+        description: "Check platform health",
+        assigneeAgentId: agentId,
+        priority: "medium",
+        status: "active",
+        concurrencyPolicy: "coalesce_if_active",
+        catchUpPolicy: "skip_missed",
+      },
+      {},
+    );
+
+    const run = await svc.runRoutine(routine.id, { source: "manual" });
+    const createdIssue = await db
+      .select({ id: issues.id, parentId: issues.parentId })
+      .from(issues)
+      .where(eq(issues.id, run.linkedIssueId!))
+      .then((rows) => rows[0] ?? null);
+
+    expect(routine.dispatchMode).toBe("fixed_parallel_lanes");
+    expect(routine.runIssueMode).toBe("child_of_fixed_parent");
+    expect(routine.parentIssueId).toBe(fixedParent.id);
+    expect(createdIssue).toEqual({
+      id: run.linkedIssueId,
+      parentId: fixedParent.id,
+    });
+  });
+
+  it("rejects explicit top-level mode when a fixed parent is also supplied", async () => {
+    const { companyId, agentId, issueSvc, projectId, svc } = await seedFixture();
+    const fixedParent = await issueSvc.create(companyId, {
+      projectId,
+      title: "Legacy parent issue",
+      status: "todo",
+      priority: "medium",
+      assigneeAgentId: agentId,
+    });
+
+    await expect(
+      svc.create(
+        companyId,
+        {
+          projectId,
+          goalId: null,
+          parentIssueId: fixedParent.id,
+          dispatchMode: "event_driven",
+          runIssueMode: "top_level_run_issue",
+          title: "platform quality routine",
+          description: "Check platform health",
+          assigneeAgentId: agentId,
+          priority: "medium",
+          status: "active",
+          concurrencyPolicy: "coalesce_if_active",
+          catchUpPolicy: "skip_missed",
+        },
+        {},
+      ),
+    ).rejects.toThrow(/cannot also target a fixed parent issue/i);
+  });
+
   it("wakes the assignee when a routine creates a fresh execution issue", async () => {
     const { agentId, routine, svc, wakeups } = await seedFixture();
 
@@ -236,10 +322,20 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
           source: "assignment",
           triggerDetail: "system",
           reason: "issue_assigned",
-          payload: { issueId: run.linkedIssueId, mutation: "create" },
+          payload: {
+            issueId: run.linkedIssueId,
+            mutation: "create",
+            routineId: routine.id,
+            dispatchMode: "event_driven",
+          },
           requestedByActorType: undefined,
           requestedByActorId: null,
-          contextSnapshot: { issueId: run.linkedIssueId, source: "routine.dispatch" },
+          contextSnapshot: {
+            issueId: run.linkedIssueId,
+            source: "routine.dispatch",
+            routineId: routine.id,
+            dispatchMode: "event_driven",
+          },
         },
       },
     ]);

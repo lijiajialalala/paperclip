@@ -4221,6 +4221,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
             title: manifestIssue.title,
             description,
             assigneeAgentId,
+            dispatchMode: "event_driven",
             priority: manifestIssue.priority && ISSUE_PRIORITIES.includes(manifestIssue.priority as any)
               ? manifestIssue.priority as typeof ISSUE_PRIORITIES[number]
               : "medium",

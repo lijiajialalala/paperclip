@@ -54,6 +54,30 @@ export type PublishIssueArtifactResponse = {
   }>;
 };
 
+export type IssueResumeChainResponse = {
+  issueId: string;
+  dispatchMode: "event_driven" | "fixed_parallel_lanes";
+  dispatchSource: "issue_origin_routine" | "ancestor_origin_routine" | "default";
+  routineId: string | null;
+  decision: "woke_issue_owner" | "woke_parent_owner" | "woke_child_lanes" | "no_actionable_target";
+  summary: string;
+  targets: Array<{
+    issueId: string;
+    identifier: string | null;
+    title: string;
+    assigneeAgentId: string | null;
+    action: "woken" | "skipped";
+    runId: string | null;
+    reason: string;
+  }>;
+  diagnostics: {
+    issueActionable: boolean;
+    issueBlocker: string;
+    openChildCount: number;
+    actionableChildCount: number;
+  };
+};
+
 export const issuesApi = {
   list: (
     companyId: string,
@@ -110,6 +134,7 @@ export const issuesApi = {
   update: (id: string, data: Record<string, unknown>) =>
     api.patch<IssueUpdateResponse>(`/issues/${id}`, data),
   remove: (id: string) => api.delete<Issue>(`/issues/${id}`),
+  resumeChain: (id: string) => api.post<IssueResumeChainResponse>(`/issues/${id}/resume-chain`, {}),
   checkout: (id: string, agentId: string) =>
     api.post<Issue>(`/issues/${id}/checkout`, {
       agentId,

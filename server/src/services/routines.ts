@@ -57,6 +57,8 @@ const WEEKDAY_INDEX: Record<string, number> = {
 };
 
 type Actor = { agentId?: string | null; userId?: string | null };
+type RoutineDispatchMode = Routine["dispatchMode"];
+type RoutineRunIssueMode = Routine["runIssueMode"];
 
 function assertTimeZone(timeZone: string) {
   try {
@@ -288,6 +290,51 @@ function mergeRoutineRunPayload(
       ...existingVariables,
       ...variables,
     },
+  };
+}
+
+function deriveRoutineRunIssueMode(parentIssueId: string | null | undefined): RoutineRunIssueMode {
+  return parentIssueId ? "child_of_fixed_parent" : "top_level_run_issue";
+}
+
+function hydrateRoutineRow(row: typeof routines.$inferSelect): Routine {
+  return {
+    ...row,
+    dispatchMode: (row.dispatchMode ?? "event_driven") as RoutineDispatchMode,
+    runIssueMode: deriveRoutineRunIssueMode(row.parentIssueId),
+  };
+}
+
+function normalizeRoutineRunIssuePlacement(
+  input: { parentIssueId?: string | null; runIssueMode?: RoutineRunIssueMode | null },
+  fallbackParentIssueId: string | null = null,
+): { parentIssueId: string | null; runIssueMode: RoutineRunIssueMode } {
+  const explicitMode = input.runIssueMode ?? null;
+  if (explicitMode === "top_level_run_issue") {
+    if (input.parentIssueId) {
+      throw unprocessable("Top-level run issue routines cannot also target a fixed parent issue");
+    }
+    return { parentIssueId: null, runIssueMode: explicitMode };
+  }
+
+  const resolvedParentIssueId = input.parentIssueId === undefined ? fallbackParentIssueId : input.parentIssueId;
+  if (explicitMode === "child_of_fixed_parent") {
+    if (!resolvedParentIssueId) {
+      throw unprocessable("Fixed-parent routine issues require parentIssueId");
+    }
+    return { parentIssueId: resolvedParentIssueId, runIssueMode: explicitMode };
+  }
+
+  if (resolvedParentIssueId) {
+    return {
+      parentIssueId: resolvedParentIssueId,
+      runIssueMode: "child_of_fixed_parent",
+    };
+  }
+
+  return {
+    parentIssueId: null,
+    runIssueMode: "top_level_run_issue",
   };
 }
 
@@ -800,6 +847,14 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
           mutation: "create",
           contextSource: "routine.dispatch",
           requestedByActorType: input.source === "schedule" ? "system" : undefined,
+          payloadExtras: {
+            routineId: input.routine.id,
+            dispatchMode: input.routine.dispatchMode,
+          },
+          contextSnapshotExtras: {
+            routineId: input.routine.id,
+            dispatchMode: input.routine.dispatchMode,
+          },
           rethrowOnError: true,
         });
         const updated = await finalizeRun(createdRun.id, {
@@ -870,7 +925,10 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
   }
 
   return {
-    get: getRoutineById,
+    get: async (id: string) => {
+      const row = await getRoutineById(id);
+      return row ? hydrateRoutineRow(row) : null;
+    },
     getTrigger: getTriggerById,
 
     list: async (companyId: string): Promise<RoutineListItem[]> => {
@@ -886,7 +944,7 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
         listLiveIssueByRoutineIds(companyId, routineIds),
       ]);
       return rows.map((row) => ({
-        ...row,
+        ...hydrateRoutineRow(row),
         triggers: (triggersByRoutine.get(row.id) ?? []).map((trigger) => ({
           id: trigger.id,
           kind: trigger.kind as RoutineListItem["triggers"][number]["kind"],
@@ -980,7 +1038,7 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
       ]);
 
       return {
-        ...row,
+        ...hydrateRoutineRow(row),
         project,
         assignee,
         parentIssue,
@@ -994,7 +1052,8 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
       await assertProject(companyId, input.projectId);
       await assertAssignableAgent(companyId, input.assigneeAgentId);
       if (input.goalId) await assertGoal(companyId, input.goalId);
-      if (input.parentIssueId) await assertParentIssue(companyId, input.parentIssueId);
+      const { parentIssueId } = normalizeRoutineRunIssuePlacement(input);
+      if (parentIssueId) await assertParentIssue(companyId, parentIssueId);
       const variables = syncRoutineVariablesWithTemplate(
         input.description,
         sanitizeRoutineVariableInputs(input.variables),
@@ -1006,7 +1065,8 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
           companyId,
           projectId: input.projectId,
           goalId: input.goalId ?? null,
-          parentIssueId: input.parentIssueId ?? null,
+          parentIssueId,
+          dispatchMode: input.dispatchMode ?? "event_driven",
           title: input.title,
           description: input.description ?? null,
           assigneeAgentId: input.assigneeAgentId,
@@ -1021,7 +1081,7 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
           updatedByUserId: actor.userId ?? null,
         })
         .returning();
-      return created;
+      return hydrateRoutineRow(created);
     },
 
     update: async (id: string, patch: UpdateRoutine, actor: Actor): Promise<Routine | null> => {
@@ -1034,10 +1094,11 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
         nextDescription,
         patch.variables === undefined ? existing.variables : sanitizeRoutineVariableInputs(patch.variables),
       );
+      const { parentIssueId } = normalizeRoutineRunIssuePlacement(patch, existing.parentIssueId);
       if (patch.projectId) await assertProject(existing.companyId, nextProjectId);
       if (patch.assigneeAgentId) await assertAssignableAgent(existing.companyId, nextAssigneeAgentId);
       if (patch.goalId) await assertGoal(existing.companyId, patch.goalId);
-      if (patch.parentIssueId) await assertParentIssue(existing.companyId, patch.parentIssueId);
+      if (parentIssueId) await assertParentIssue(existing.companyId, parentIssueId);
       assertRoutineVariableDefinitions(nextVariables);
       const enabledScheduleTriggers = await db
         .select({ id: routineTriggers.id })
@@ -1059,7 +1120,8 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
         .set({
           projectId: nextProjectId,
           goalId: patch.goalId === undefined ? existing.goalId : patch.goalId,
-          parentIssueId: patch.parentIssueId === undefined ? existing.parentIssueId : patch.parentIssueId,
+          parentIssueId,
+          dispatchMode: patch.dispatchMode ?? existing.dispatchMode,
           title: patch.title ?? existing.title,
           description: nextDescription,
           assigneeAgentId: nextAssigneeAgentId,
@@ -1074,7 +1136,7 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
         })
         .where(eq(routines.id, id))
         .returning();
-      return updated ?? null;
+      return updated ? hydrateRoutineRow(updated) : null;
     },
 
     createTrigger: async (

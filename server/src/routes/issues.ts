@@ -25,6 +25,7 @@ import {
   getClosedIsolatedExecutionWorkspaceMessage,
   isClosedIsolatedExecutionWorkspace,
   type ExecutionWorkspace,
+  type RoutineDispatchMode,
 } from "@paperclipai/shared";
 import { issueMatchesDisplayStatusFilter } from "@paperclipai/shared/issue-display-status";
 import { trackAgentTaskCompleted } from "@paperclipai/shared/telemetry";
@@ -650,6 +651,142 @@ export function issueRoutes(
         ));
     }
     return true;
+  }
+
+  type ResumeChainRuntimeIssue = IssueRecord & {
+    runtimeState: {
+      lifecycle: { isTerminal: boolean };
+      execution: { canStart: boolean };
+    };
+  };
+
+  type ResumeChainDecision =
+    | "woke_issue_owner"
+    | "woke_parent_owner"
+    | "woke_child_lanes"
+    | "no_actionable_target";
+
+  function isResumeChainActionable(issue: ResumeChainRuntimeIssue) {
+    return Boolean(issue.assigneeAgentId) && issue.runtimeState.execution.canStart;
+  }
+
+  function summarizeResumeChainBlocker(issue: ResumeChainRuntimeIssue) {
+    if (issue.runtimeState.execution.canStart) return "ready";
+    if (issue.planProposedAt && !issue.planApprovedAt) return "plan_pending_review";
+    if (issue.status === "blocked") return "issue_blocked";
+    if (issue.runtimeState.lifecycle.isTerminal) return "issue_closed";
+    return "not_runnable";
+  }
+
+  async function hydrateIssuesForResumeChain(items: IssueRecord[]) {
+    const statusSummaries = await statusTruth.getIssueStatusTruthSummaries(items.map((issue) => issue.id));
+    return items.map((issue) => attachIssueRuntimeState(applyEffectiveStatus(issue, statusSummaries.get(issue.id) ?? null))) as ResumeChainRuntimeIssue[];
+  }
+
+  async function resolveIssueDispatchMode(issue: IssueRecord): Promise<{
+    mode: RoutineDispatchMode;
+    source: "issue_origin_routine" | "ancestor_origin_routine" | "default";
+    routineId: string | null;
+  }> {
+    if (issue.originKind === "routine_execution" && issue.originId) {
+      const routine = await routinesSvc.get(issue.originId);
+      if (routine) {
+        return {
+          mode: routine.dispatchMode,
+          source: "issue_origin_routine",
+          routineId: routine.id,
+        };
+      }
+    }
+
+    const ancestors = await svc.getAncestors(issue.id);
+    for (const ancestor of ancestors) {
+      const ancestorIssue = await svc.getById(ancestor.id);
+      if (!ancestorIssue || ancestorIssue.originKind !== "routine_execution" || !ancestorIssue.originId) continue;
+      const routine = await routinesSvc.get(ancestorIssue.originId);
+      if (!routine) continue;
+      return {
+        mode: routine.dispatchMode,
+        source: "ancestor_origin_routine",
+        routineId: routine.id,
+      };
+    }
+
+    return {
+      mode: "event_driven",
+      source: "default",
+      routineId: null,
+    };
+  }
+
+  function selectResumeChainTargets(input: {
+    issue: ResumeChainRuntimeIssue;
+    children: ResumeChainRuntimeIssue[];
+    dispatchMode: RoutineDispatchMode;
+  }): {
+    decision: ResumeChainDecision;
+    targets: ResumeChainRuntimeIssue[];
+    summary: string;
+  } {
+    const openChildren = input.children.filter((child) => !child.runtimeState.lifecycle.isTerminal);
+    const actionableChildren = openChildren.filter((child) => isResumeChainActionable(child));
+    const parentActionable = isResumeChainActionable(input.issue);
+
+    if (input.dispatchMode === "fixed_parallel_lanes") {
+      if (actionableChildren.length > 0) {
+        return {
+          decision: "woke_child_lanes",
+          targets: actionableChildren,
+          summary: `Resuming ${actionableChildren.length} lane${actionableChildren.length === 1 ? "" : "s"} in parallel.`,
+        };
+      }
+      if (openChildren.length > 0 && parentActionable) {
+        return {
+          decision: "woke_parent_owner",
+          targets: [input.issue],
+          summary: "No lane was directly runnable, so the parent owner will reconcile the batch.",
+        };
+      }
+      if (parentActionable) {
+        return {
+          decision: "woke_issue_owner",
+          targets: [input.issue],
+          summary: "Resuming the issue owner.",
+        };
+      }
+      return {
+        decision: "no_actionable_target",
+        targets: [],
+        summary: "No actionable lane or owner was eligible for recovery.",
+      };
+    }
+
+    if (actionableChildren.length === 1) {
+      return {
+        decision: "woke_issue_owner",
+        targets: actionableChildren,
+        summary: "Resuming the current next hop.",
+      };
+    }
+    if (openChildren.length > 0 && parentActionable) {
+      return {
+        decision: "woke_parent_owner",
+        targets: [input.issue],
+        summary: "Resuming the parent owner to decide the next event-driven hop.",
+      };
+    }
+    if (parentActionable) {
+      return {
+        decision: "woke_issue_owner",
+        targets: [input.issue],
+        summary: "Resuming the issue owner.",
+      };
+    }
+    return {
+      decision: "no_actionable_target",
+      targets: [],
+      summary: "No actionable next hop was eligible for recovery.",
+    };
   }
 
   async function resolveActiveIssueRun(issue: {
@@ -2270,6 +2407,129 @@ export function issueRoutes(
     });
 
     res.json(issue);
+  });
+
+  router.post("/issues/:id/resume-chain", async (req, res) => {
+    const id = req.params.id as string;
+    const existing = await svc.getById(id);
+    if (!existing) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+
+    assertCompanyAccess(req, existing.companyId);
+
+    const [issue] = await hydrateIssuesForResumeChain([existing]);
+    const children = await svc
+      .list(existing.companyId, { parentId: existing.id, includeHidden: false })
+      .then((items) => hydrateIssuesForResumeChain(items as IssueRecord[]));
+    const dispatch = await resolveIssueDispatchMode(existing);
+    const selection = selectResumeChainTargets({
+      issue,
+      children,
+      dispatchMode: dispatch.mode,
+    });
+
+    if (selection.targets.length === 0) {
+      res.json({
+        issueId: existing.id,
+        dispatchMode: dispatch.mode,
+        dispatchSource: dispatch.source,
+        routineId: dispatch.routineId,
+        decision: selection.decision,
+        summary: selection.summary,
+        targets: [],
+        diagnostics: {
+          issueActionable: isResumeChainActionable(issue),
+          issueBlocker: summarizeResumeChainBlocker(issue),
+          openChildCount: children.filter((child) => !child.runtimeState.lifecycle.isTerminal).length,
+          actionableChildCount: children.filter((child) => isResumeChainActionable(child)).length,
+        },
+      });
+      return;
+    }
+
+    const actor = getActorInfo(req);
+    const wakeResults = await Promise.all(
+      selection.targets.map(async (target) => {
+        const run = await heartbeat.wakeup(target.assigneeAgentId!, {
+          source: "on_demand",
+          triggerDetail: "manual",
+          reason: "issue_chain_resumed",
+          payload: {
+            issueId: target.id,
+            sourceIssueId: existing.id,
+            dispatchMode: dispatch.mode,
+          },
+          requestedByActorType: actor.actorType,
+          requestedByActorId: actor.actorId,
+          contextSnapshot: {
+            issueId: target.id,
+            taskId: target.id,
+            sourceIssueId: existing.id,
+            dispatchMode: dispatch.mode,
+            source: "issue.resume_chain",
+            wakeReason: "issue_chain_resumed",
+          },
+        });
+
+        const runId = run && typeof run === "object" && "id" in run && typeof run.id === "string"
+          ? run.id
+          : null;
+
+        return {
+          issueId: target.id,
+          identifier: target.identifier ?? null,
+          title: target.title,
+          assigneeAgentId: target.assigneeAgentId,
+          action: runId ? "woken" : "skipped",
+          runId,
+          reason: runId
+            ? "Wakeup enqueued."
+            : "Wakeup was skipped because a live or queued execution already exists.",
+        };
+      }),
+    );
+
+    await logActivity(db, {
+      companyId: existing.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "issue.chain_resumed",
+      entityType: "issue",
+      entityId: existing.id,
+      details: {
+        dispatchMode: dispatch.mode,
+        dispatchSource: dispatch.source,
+        decision: selection.decision,
+        targetIssueIds: wakeResults.map((result) => result.issueId),
+        wokenCount: wakeResults.filter((result) => result.action === "woken").length,
+        skippedCount: wakeResults.filter((result) => result.action === "skipped").length,
+      },
+    });
+
+    const wokenCount = wakeResults.filter((result) => result.action === "woken").length;
+    const summary = wokenCount > 0
+      ? selection.summary
+      : `${selection.summary} No new run was enqueued because the selected target already had live execution.`;
+
+    res.json({
+      issueId: existing.id,
+      dispatchMode: dispatch.mode,
+      dispatchSource: dispatch.source,
+      routineId: dispatch.routineId,
+      decision: selection.decision,
+      summary,
+      targets: wakeResults,
+      diagnostics: {
+        issueActionable: isResumeChainActionable(issue),
+        issueBlocker: summarizeResumeChainBlocker(issue),
+        openChildCount: children.filter((child) => !child.runtimeState.lifecycle.isTerminal).length,
+        actionableChildCount: children.filter((child) => isResumeChainActionable(child)).length,
+      },
+    });
   });
 
   router.post("/issues/:id/checkout", validate(checkoutIssueSchema), async (req, res) => {

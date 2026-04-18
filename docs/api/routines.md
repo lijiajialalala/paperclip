@@ -31,6 +31,7 @@ POST /api/companies/{companyId}/routines
   "assigneeAgentId": "{agentId}",
   "projectId": "{projectId}",
   "goalId": "{goalId}",
+  "runIssueMode": "top_level_run_issue",
   "priority": "medium",
   "status": "active",
   "concurrencyPolicy": "coalesce_if_active",
@@ -49,11 +50,14 @@ Fields:
 | `assigneeAgentId` | yes | Agent who receives each run |
 | `projectId` | yes | Project this routine belongs to |
 | `goalId` | no | Goal to link runs to |
-| `parentIssueId` | no | Parent issue for created run issues |
+| `runIssueMode` | no | `top_level_run_issue` (default) makes each run its own top-level issue; `child_of_fixed_parent` keeps legacy child-of-parent placement |
+| `parentIssueId` | no | Required only when `runIssueMode` is `child_of_fixed_parent`; ignored for top-level run issues |
 | `priority` | no | `critical`, `high`, `medium` (default), `low` |
 | `status` | no | `active` (default), `paused`, `archived` |
 | `concurrencyPolicy` | no | Behaviour when a run fires while a previous one is still active |
 | `catchUpPolicy` | no | Behaviour for missed scheduled runs |
+
+Use `top_level_run_issue` for recurring audits, daily checks, and other routines where each run should create its own auditable parent issue. `child_of_fixed_parent` is primarily for legacy workflows that still intentionally attach every run beneath the same parent.
 
 **Concurrency policies:**
 

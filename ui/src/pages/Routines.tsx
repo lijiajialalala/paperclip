@@ -292,6 +292,8 @@ export function Routines() {
     description: string;
     projectId: string;
     assigneeAgentId: string;
+    dispatchMode: RoutineListItem["dispatchMode"];
+    runIssueMode: RoutineListItem["runIssueMode"];
     priority: string;
     concurrencyPolicy: string;
     catchUpPolicy: string;
@@ -301,6 +303,8 @@ export function Routines() {
     description: "",
     projectId: "",
     assigneeAgentId: "",
+    dispatchMode: "event_driven",
+    runIssueMode: "top_level_run_issue",
     priority: "medium",
     concurrencyPolicy: "coalesce_if_active",
     catchUpPolicy: "skip_missed",
@@ -362,16 +366,18 @@ export function Routines() {
         description: draft.description.trim() || null,
       }),
     onSuccess: async (routine) => {
-      setDraft({
-        title: "",
-        description: "",
-        projectId: "",
-        assigneeAgentId: "",
-        priority: "medium",
-        concurrencyPolicy: "coalesce_if_active",
-        catchUpPolicy: "skip_missed",
-        variables: [],
-      });
+        setDraft({
+          title: "",
+          description: "",
+          projectId: "",
+          assigneeAgentId: "",
+          dispatchMode: "event_driven",
+          runIssueMode: "top_level_run_issue",
+          priority: "medium",
+          concurrencyPolicy: "coalesce_if_active",
+          catchUpPolicy: "skip_missed",
+          variables: [],
+        });
       setComposerOpen(false);
       setAdvancedOpen(false);
       await queryClient.invalidateQueries({ queryKey: queryKeys.routines.list(selectedCompanyId!) });
@@ -500,6 +506,9 @@ export function Routines() {
   const runDialogProject = runDialogRoutine?.projectId ? projectById.get(runDialogRoutine.projectId) ?? null : null;
   const currentAssignee = draft.assigneeAgentId ? agentById.get(draft.assigneeAgentId) ?? null : null;
   const currentProject = draft.projectId ? projectById.get(draft.projectId) ?? null : null;
+  const dispatchModeDescription = draft.dispatchMode === "fixed_parallel_lanes"
+    ? "负责人默认按固定 lane 并行派工；恢复链条时也会优先续跑各 lane。"
+    : "负责人按事件驱动逐跳推进；恢复链条时优先唤醒当前最合理的下一跳。";
 
   function updateRoutineView(patch: Partial<RoutineViewState>) {
     setRoutineViewState((current) => {
@@ -824,6 +833,33 @@ export function Routines() {
                 </CollapsibleTrigger>
                 <CollapsibleContent className="pt-3">
                   <div className="grid gap-4 md:grid-cols-2">
+                    <div className="space-y-2">
+                      <p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">Dispatch mode</p>
+                      <Select
+                        value={draft.dispatchMode}
+                        onValueChange={(dispatchMode) =>
+                          setDraft((current) => ({
+                            ...current,
+                            dispatchMode: dispatchMode as RoutineListItem["dispatchMode"],
+                          }))}
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="event_driven">Event-driven</SelectItem>
+                          <SelectItem value="fixed_parallel_lanes">Fixed parallel lanes</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <p className="text-xs text-muted-foreground">{dispatchModeDescription}</p>
+                    </div>
+                    <div className="space-y-2">
+                      <p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">Run issue shape</p>
+                      <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-sm">
+                        Each run opens its own top-level issue by default. Use the routine detail page only when you need
+                        to migrate an older fixed-parent routine back to this safer model.
+                      </div>
+                    </div>
                     <div className="space-y-2">
                       <p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">Concurrency</p>
                       <Select

@@ -196,6 +196,7 @@ describeEmbeddedPostgres("routine routes end-to-end", () => {
         title: "Daily standup prep",
         description: "Summarize blockers and open PRs",
         assigneeAgentId: agentId,
+        dispatchMode: "event_driven",
         priority: "high",
         concurrencyPolicy: "coalesce_if_active",
         catchUpPolicy: "skip_missed",
@@ -204,6 +205,8 @@ describeEmbeddedPostgres("routine routes end-to-end", () => {
     expect(createRes.status).toBe(201);
     expect(createRes.body.title).toBe("Daily standup prep");
     expect(createRes.body.assigneeAgentId).toBe(agentId);
+    expect(createRes.body.dispatchMode).toBe("event_driven");
+    expect(createRes.body.runIssueMode).toBe("top_level_run_issue");
 
     const routineId = createRes.body.id as string;
 
@@ -251,6 +254,7 @@ describeEmbeddedPostgres("routine routes end-to-end", () => {
         id: issues.id,
         originId: issues.originId,
         originKind: issues.originKind,
+        parentId: issues.parentId,
         executionRunId: issues.executionRunId,
       })
       .from(issues)
@@ -260,6 +264,7 @@ describeEmbeddedPostgres("routine routes end-to-end", () => {
       id: runRes.body.linkedIssueId,
       originId: routineId,
       originKind: "routine_execution",
+      parentId: null,
     });
     expect(issue?.executionRunId).toBeTruthy();
 

@@ -1,4 +1,9 @@
-import type { IssueOriginKind, RoutineVariableType } from "../constants.js";
+import type {
+  IssueOriginKind,
+  RoutineDispatchMode,
+  RoutineRunIssueMode,
+  RoutineVariableType,
+} from "../constants.js";
 
 export interface RoutineProjectSummary {
   id: string;
@@ -42,6 +47,8 @@ export interface Routine {
   projectId: string;
   goalId: string | null;
   parentIssueId: string | null;
+  dispatchMode: RoutineDispatchMode;
+  runIssueMode: RoutineRunIssueMode;
   title: string;
   description: string | null;
   assigneeAgentId: string;

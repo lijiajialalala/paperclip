@@ -60,6 +60,7 @@ import type { RoutineTrigger, RoutineVariable } from "@paperclipai/shared";
 
 const concurrencyPolicies = ["coalesce_if_active", "always_enqueue", "skip_if_active"];
 const catchUpPolicies = ["skip_missed", "enqueue_missed_with_cap"];
+const dispatchModes = ["event_driven", "fixed_parallel_lanes"] as const;
 const triggerKinds = ["schedule", "webhook"];
 const signingModes = ["bearer", "hmac_sha256"];
 const routineTabs = ["triggers", "runs", "activity"] as const;
@@ -267,6 +268,8 @@ export function RoutineDetail() {
     description: string;
     projectId: string;
     assigneeAgentId: string;
+    dispatchMode: (typeof dispatchModes)[number];
+    runIssueMode: "top_level_run_issue" | "child_of_fixed_parent";
     priority: string;
     concurrencyPolicy: string;
     catchUpPolicy: string;
@@ -276,6 +279,8 @@ export function RoutineDetail() {
     description: "",
     projectId: "",
     assigneeAgentId: "",
+    dispatchMode: "event_driven",
+    runIssueMode: "top_level_run_issue",
     priority: "medium",
     concurrencyPolicy: "coalesce_if_active",
     catchUpPolicy: "skip_missed",
@@ -342,6 +347,8 @@ export function RoutineDetail() {
             description: routine.description ?? "",
             projectId: routine.projectId,
             assigneeAgentId: routine.assigneeAgentId,
+            dispatchMode: routine.dispatchMode,
+            runIssueMode: routine.runIssueMode,
             priority: routine.priority,
             concurrencyPolicy: routine.concurrencyPolicy,
             catchUpPolicy: routine.catchUpPolicy,
@@ -357,6 +364,8 @@ export function RoutineDetail() {
       editDraft.description !== routineDefaults.description ||
       editDraft.projectId !== routineDefaults.projectId ||
       editDraft.assigneeAgentId !== routineDefaults.assigneeAgentId ||
+      editDraft.dispatchMode !== routineDefaults.dispatchMode ||
+      editDraft.runIssueMode !== routineDefaults.runIssueMode ||
       editDraft.priority !== routineDefaults.priority ||
       editDraft.concurrencyPolicy !== routineDefaults.concurrencyPolicy ||
       editDraft.catchUpPolicy !== routineDefaults.catchUpPolicy ||
@@ -665,6 +674,13 @@ export function RoutineDetail() {
     : automationEnabled
       ? "text-emerald-400"
       : "text-muted-foreground";
+  const canKeepFixedParentMode = !!routine.parentIssueId;
+  const dispatchModeDescription = editDraft.dispatchMode === "fixed_parallel_lanes"
+    ? "负责人默认按固定 lane 并行组织子任务；恢复链条也会优先续跑各 lane。"
+    : "负责人按事件驱动逐跳推进；恢复链条时优先唤醒当前最合理的下一跳。";
+  const runIssueModeDescription = editDraft.runIssueMode === "child_of_fixed_parent"
+    ? "Each run becomes a child issue under the current fixed parent. Use this only for legacy workflows."
+    : "Each run becomes its own top-level issue so daily checks stay isolated and auditable.";
 
   return (
     <div className="max-w-2xl space-y-6">
@@ -868,6 +884,64 @@ export function RoutineDetail() {
         </CollapsibleTrigger>
         <CollapsibleContent className="pt-3">
           <div className="grid gap-4 md:grid-cols-2">
+            <div className="space-y-2">
+              <p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">Dispatch mode</p>
+              <Select
+                value={editDraft.dispatchMode}
+                onValueChange={(dispatchMode) =>
+                  setEditDraft((current) => ({
+                    ...current,
+                    dispatchMode: dispatchMode as (typeof dispatchModes)[number],
+                  }))}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="event_driven">Event-driven</SelectItem>
+                  <SelectItem value="fixed_parallel_lanes">Fixed parallel lanes</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">{dispatchModeDescription}</p>
+            </div>
+            <div className="space-y-2">
+              <p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">Run issue shape</p>
+              <Select
+                value={editDraft.runIssueMode}
+                onValueChange={(runIssueMode) =>
+                  setEditDraft((current) => ({
+                    ...current,
+                    runIssueMode: runIssueMode as "top_level_run_issue" | "child_of_fixed_parent",
+                  }))}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="top_level_run_issue">Top-level run issue</SelectItem>
+                  <SelectItem value="child_of_fixed_parent" disabled={!canKeepFixedParentMode}>
+                    Child of fixed parent
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">{runIssueModeDescription}</p>
+              {routine.parentIssue && editDraft.runIssueMode === "child_of_fixed_parent" ? (
+                <p className="text-xs text-muted-foreground">
+                  Current fixed parent:{" "}
+                  <Link
+                    to={`/issues/${routine.parentIssue.id}`}
+                    className="underline underline-offset-2 hover:text-foreground"
+                  >
+                    {routine.parentIssue.identifier ?? routine.parentIssue.title}
+                  </Link>
+                </p>
+              ) : null}
+              {!canKeepFixedParentMode ? (
+                <p className="text-xs text-muted-foreground">
+                  Fixed-parent mode is legacy and API-only. New routines should stay top-level.
+                </p>
+              ) : null}
+            </div>
             <div className="space-y-2">
               <p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">Concurrency</p>
               <Select

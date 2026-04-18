@@ -217,6 +217,8 @@ function createRoutine(overrides: Partial<RoutineListItem>): RoutineListItem {
     projectId: "project-1",
     goalId: null,
     parentIssueId: null,
+    dispatchMode: "event_driven",
+    runIssueMode: "top_level_run_issue",
     title: "Routine title",
     description: null,
     assigneeAgentId: "agent-1",
