@@ -1,0 +1,4 @@
+interface:
+  display_name: "Merge Gate Review"
+  short_description: "Pre-merge branch review and decision"
+  default_prompt: "Use $merge-gate-review to assess whether this branch should merge."
