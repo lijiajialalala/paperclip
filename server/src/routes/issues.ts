@@ -683,9 +683,12 @@ export function issueRoutes(
     return items.map((issue) => attachIssueRuntimeState(applyEffectiveStatus(issue, statusSummaries.get(issue.id) ?? null))) as ResumeChainRuntimeIssue[];
   }
 
-  async function resolveIssueDispatchMode(issue: IssueRecord): Promise<{
+  async function resolveIssueDispatchMode(
+    issue: IssueRecord,
+    children: Array<Pick<IssueRecord, "originId" | "originKind">> = [],
+  ): Promise<{
     mode: RoutineDispatchMode;
-    source: "issue_origin_routine" | "ancestor_origin_routine" | "default";
+    source: "issue_origin_routine" | "ancestor_origin_routine" | "child_origin_routine" | "default";
     routineId: string | null;
   }> {
     if (issue.originKind === "routine_execution" && issue.originId) {
@@ -708,6 +711,27 @@ export function issueRoutes(
       return {
         mode: routine.dispatchMode,
         source: "ancestor_origin_routine",
+        routineId: routine.id,
+      };
+    }
+
+    const childRoutineOriginIds = [
+      ...new Set(
+        children
+          .filter(
+            (child): child is Pick<IssueRecord, "originId" | "originKind"> & { originId: string } =>
+              child.originKind === "routine_execution" && typeof child.originId === "string" && child.originId.length > 0,
+          )
+          .map((child) => child.originId),
+      ),
+    ];
+
+    for (const routineId of childRoutineOriginIds) {
+      const routine = await routinesSvc.get(routineId);
+      if (!routine || routine.parentIssueId !== issue.id) continue;
+      return {
+        mode: routine.dispatchMode,
+        source: "child_origin_routine",
         routineId: routine.id,
       };
     }
@@ -2423,7 +2447,7 @@ export function issueRoutes(
     const children = await svc
       .list(existing.companyId, { parentId: existing.id, includeHidden: false })
       .then((items) => hydrateIssuesForResumeChain(items as IssueRecord[]));
-    const dispatch = await resolveIssueDispatchMode(existing);
+    const dispatch = await resolveIssueDispatchMode(existing, children);
     const selection = selectResumeChainTargets({
       issue,
       children,

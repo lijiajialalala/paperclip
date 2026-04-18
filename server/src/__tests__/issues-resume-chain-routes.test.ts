@@ -228,6 +228,70 @@ describe("issue resume-chain routes", () => {
     );
   });
 
+  it("derives fixed-parent routine dispatch from child routine executions", async () => {
+    const fixedParent = makeIssue({
+      identifier: "CMPA-213",
+      title: "Fixed parent batch",
+      originKind: null,
+      originId: null,
+      canStart: true,
+    });
+    const childA = makeIssue({
+      parentId: fixedParent.id,
+      identifier: "CMPA-214",
+      title: "Lane A",
+      assigneeAgentId: randomUUID(),
+      originKind: "routine_execution",
+      originId: ROUTINE_ID,
+      canStart: true,
+    });
+    const childB = makeIssue({
+      parentId: fixedParent.id,
+      identifier: "CMPA-215",
+      title: "Lane B",
+      assigneeAgentId: randomUUID(),
+      originKind: "routine_execution",
+      originId: ROUTINE_ID,
+      canStart: true,
+    });
+
+    mockIssueSvc.getById.mockResolvedValue(fixedParent);
+    mockIssueSvc.list.mockResolvedValue([childA, childB]);
+    mockRoutineSvc.get.mockResolvedValue({
+      id: ROUTINE_ID,
+      dispatchMode: "fixed_parallel_lanes",
+      parentIssueId: fixedParent.id,
+      runIssueMode: "child_of_fixed_parent",
+    });
+    mockHeartbeat.wakeup
+      .mockResolvedValueOnce({ id: randomUUID() })
+      .mockResolvedValueOnce({ id: randomUUID() });
+
+    const app = makeApp(boardActor());
+    const res = await request(app).post(`/api/issues/${fixedParent.id}/resume-chain`).send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body.dispatchMode).toBe("fixed_parallel_lanes");
+    expect(res.body.dispatchSource).toBe("child_origin_routine");
+    expect(res.body.decision).toBe("woke_child_lanes");
+    expect(res.body.targets).toHaveLength(2);
+    expect(mockHeartbeat.wakeup).toHaveBeenCalledTimes(2);
+    expect(mockHeartbeat.wakeup).toHaveBeenNthCalledWith(
+      1,
+      childA.assigneeAgentId,
+      expect.objectContaining({
+        payload: expect.objectContaining({ issueId: childA.id, dispatchMode: "fixed_parallel_lanes" }),
+      }),
+    );
+    expect(mockHeartbeat.wakeup).toHaveBeenNthCalledWith(
+      2,
+      childB.assigneeAgentId,
+      expect.objectContaining({
+        payload: expect.objectContaining({ issueId: childB.id, dispatchMode: "fixed_parallel_lanes" }),
+      }),
+    );
+  });
+
   it("returns no actionable target without waking anyone when nothing runnable remains", async () => {
     const parent = makeIssue({
       identifier: "CMPA-220",
