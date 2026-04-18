@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   approvalComments,
@@ -776,7 +776,7 @@ describeEmbeddedPostgres("issueService.proposePlan", () => {
     });
 
     expect(result.issue.id).toBe(childIssueId);
-    expect(result.issue.status).toBe("todo");
+    expect(result.issue.status).toBe("in_review");
     expect(result.issue.planProposedAt).toBeTruthy();
     expect(result.issue.planApprovedAt).toBeNull();
     expect(result.issue.checkoutRunId).toBeNull();
@@ -809,6 +809,23 @@ describeEmbeddedPostgres("issueService.proposePlan", () => {
     expect(comments[0]?.body).toContain("Deliver this in two checkpoints.");
     expect(comments[0]?.createdByRunId).toBe(runId);
     expect(comments[0]?.authorAgentId).toBe(assigneeAgentId);
+
+    const statusActivities = await db
+      .select({
+        action: activityLog.action,
+        details: activityLog.details,
+      })
+      .from(activityLog)
+      .where(and(eq(activityLog.entityId, childIssueId), eq(activityLog.action, "issue.updated")));
+    expect(statusActivities).toEqual([
+      expect.objectContaining({
+        action: "issue.updated",
+        details: expect.objectContaining({
+          status: "in_review",
+          source: "plan_proposed",
+        }),
+      }),
+    ]);
   });
 
   it("rolls back the proposal edge when duplicate live work_plan approvals already exist", async () => {
@@ -1210,7 +1227,7 @@ describeEmbeddedPostgres("issueService.plan review settlement", () => {
       id: issueId,
       companyId,
       title: "Child issue",
-      status: "todo",
+      status: "in_review",
       priority: "medium",
       assigneeAgentId,
       planProposedAt: new Date("2026-04-16T02:00:00.000Z"),
@@ -1239,6 +1256,7 @@ describeEmbeddedPostgres("issueService.plan review settlement", () => {
       decisionNote: "Plan approved via issue review",
     });
 
+    expect(result.issue.status).toBe("todo");
     expect(result.issue.planApprovedAt).toBeTruthy();
     expect(result.approval?.id).toBe(approvalId);
     expect(result.approval?.status).toBe("approved");
@@ -1258,6 +1276,23 @@ describeEmbeddedPostgres("issueService.plan review settlement", () => {
       decidedByAgentId: reviewerAgentId,
       decisionNote: "Plan approved via issue review",
     });
+
+    const statusActivities = await db
+      .select({
+        action: activityLog.action,
+        details: activityLog.details,
+      })
+      .from(activityLog)
+      .where(and(eq(activityLog.entityId, issueId), eq(activityLog.action, "issue.updated")));
+    expect(statusActivities).toEqual([
+      expect.objectContaining({
+        action: "issue.updated",
+        details: expect.objectContaining({
+          status: "todo",
+          source: "plan_approved",
+        }),
+      }),
+    ]);
   });
 
   it("approvePlan syncs plan approval mirrors across every issue linked to the same work plan", async () => {
@@ -1437,6 +1472,84 @@ describeEmbeddedPostgres("issueService.plan review settlement", () => {
       planProposedAt: null,
       planApprovedAt: null,
     });
+  });
+
+  it("records a todo status activity when rejecting an in_review plan back to todo", async () => {
+    const companyId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const issueId = randomUUID();
+    const approvalId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: assigneeAgentId,
+      companyId,
+      name: "ChildEngineer",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Child issue",
+      status: "in_review",
+      priority: "medium",
+      assigneeAgentId,
+      planProposedAt: new Date("2026-04-16T02:00:00.000Z"),
+      planApprovedAt: null,
+    });
+    await db.insert(approvals).values({
+      id: approvalId,
+      companyId,
+      type: "work_plan",
+      requestedByAgentId: assigneeAgentId,
+      targetUserId: "board-user",
+      routingMode: "board_pool",
+      status: "pending",
+      payload: { issueId },
+    });
+    await db.insert(issueApprovals).values({
+      companyId,
+      issueId,
+      approvalId,
+      linkedByAgentId: assigneeAgentId,
+    });
+
+    const result = await svc.rejectPlan(issueId, {
+      decidedByUserId: "board-user",
+      decidedByAgentId: null,
+      decisionNote: "Please tighten the execution plan.",
+    });
+
+    expect(result.issue.status).toBe("todo");
+    expect(result.issue.planProposedAt).toBeNull();
+    expect(result.issue.planApprovedAt).toBeNull();
+
+    const statusActivities = await db
+      .select({
+        action: activityLog.action,
+        details: activityLog.details,
+      })
+      .from(activityLog)
+      .where(and(eq(activityLog.entityId, issueId), eq(activityLog.action, "issue.updated")));
+    expect(statusActivities).toEqual([
+      expect.objectContaining({
+        action: "issue.updated",
+        details: expect.objectContaining({
+          status: "todo",
+          source: "plan_rejected",
+        }),
+      }),
+    ]);
   });
 
   it("rejectPlan clears plan mirrors across every issue linked to the same work plan", async () => {

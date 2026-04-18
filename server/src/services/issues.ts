@@ -857,6 +857,17 @@ export function issueService(db: Db) {
       if (!livePlanApproval) {
         throw unprocessable("Issue has plan mirrors but no live work plan approval; manual repair required");
       }
+      const currentIssue = await tx
+        .select({
+          id: issues.id,
+          companyId: issues.companyId,
+          identifier: issues.identifier,
+          status: issues.status,
+        })
+        .from(issues)
+        .where(eq(issues.id, issueId))
+        .then((rows) => rows[0] ?? null);
+      if (!currentIssue) throw notFound("Issue not found");
       const result = input.action === "approved"
         ? await txApprovals.approveWithLinkedIssueSync(livePlanApproval.id, input.resolution)
         : await txApprovals.rejectWithLinkedIssueSync(livePlanApproval.id, input.resolution);
@@ -867,6 +878,28 @@ export function issueService(db: Db) {
         .where(eq(issues.id, issueId))
         .then((rows) => rows[0] ?? null);
       if (!updated) throw notFound("Issue not found");
+
+      if (currentIssue.status !== updated.status) {
+        const actorType = input.resolution.decidedByUserId ? "user" : input.resolution.decidedByAgentId ? "agent" : "system";
+        const actorId = input.resolution.decidedByUserId
+          ?? input.resolution.decidedByAgentId
+          ?? "system";
+        await logActivity(tx as unknown as Db, {
+          companyId: currentIssue.companyId,
+          actorType,
+          actorId,
+          agentId: input.resolution.decidedByAgentId,
+          action: "issue.updated",
+          entityType: "issue",
+          entityId: currentIssue.id,
+          details: {
+            identifier: currentIssue.identifier,
+            status: updated.status,
+            source: input.action === "approved" ? "plan_approved" : "plan_rejected",
+            _previous: { status: currentIssue.status },
+          },
+        });
+      }
 
       const [enrichedIssue] = await withIssueLabels(tx, [updated]);
       return {
@@ -2110,6 +2143,7 @@ export function issueService(db: Db) {
         const updated = await tx
           .update(issues)
           .set({
+            status: "in_review",
             planProposedAt: now,
             planApprovedAt: null,
             checkoutRunId: null,
@@ -2121,6 +2155,25 @@ export function issueService(db: Db) {
           .returning()
           .then((rows) => rows[0] ?? null);
         if (!updated) throw notFound("Issue not found");
+
+        if (issue.status !== updated.status) {
+          await logActivity(tx as unknown as Db, {
+            companyId: issue.companyId,
+            actorType: input.actor.actorType === "board" ? "user" : "agent",
+            actorId: input.actor.actorId,
+            agentId: input.actor.agentId ?? null,
+            runId: input.actor.runId ?? null,
+            action: "issue.updated",
+            entityType: "issue",
+            entityId: issue.id,
+            details: {
+              identifier: issue.identifier,
+              status: updated.status,
+              source: "plan_proposed",
+              _previous: { status: issue.status },
+            },
+          });
+        }
 
         const parentIssue = issue.parentId
           ? await tx

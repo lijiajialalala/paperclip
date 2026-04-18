@@ -247,9 +247,11 @@ export function approvalService(db: Db) {
           && Boolean(linkedIssue.planProposedAt);
         if (!planStillPending) continue;
 
+        const nextStatus = linkedIssue.status === "in_review" ? "todo" : linkedIssue.status;
         await database
           .update(issues)
           .set({
+            status: nextStatus,
             planApprovedAt: resolvedAt,
             updatedAt: new Date(),
           })
@@ -266,6 +268,7 @@ export function approvalService(db: Db) {
         await database
           .update(issues)
           .set({
+            status: linkedIssue.status === "in_review" ? "todo" : linkedIssue.status,
             planProposedAt: null,
             planApprovedAt: null,
             updatedAt: new Date(),
