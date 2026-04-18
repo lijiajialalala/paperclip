@@ -2359,28 +2359,45 @@ export function issueRoutes(
         }
       }
 
-      // Wake parent issue assignee when a child issue is completed
-      if (issue.status === "done" && existing.status !== "done" && issue.parentId) {
+      const parentWakeReason =
+        issue.status === "done" && existing.status !== "done"
+          ? {
+              reason: "child_issue_completed" as const,
+              mutation: "child_done" as const,
+              source: "issue.child_completed",
+              logMessage: "failed to wake parent issue assignee on child completion",
+            }
+          : issue.status === "blocked" && existing.status !== "blocked"
+            ? {
+                reason: "child_issue_blocked" as const,
+                mutation: "child_blocked" as const,
+                source: "issue.child_blocked",
+                logMessage: "failed to wake parent issue assignee on child blocked update",
+              }
+            : null;
+
+      // Wake parent issue assignee when a child issue needs explicit closeout attention.
+      if (parentWakeReason && issue.parentId) {
         try {
           const parent = await svc.getById(issue.parentId);
           if (parent?.assigneeAgentId && !wakeups.has(parent.assigneeAgentId)) {
             wakeups.set(parent.assigneeAgentId, {
               source: "automation",
               triggerDetail: "system",
-              reason: "child_issue_completed",
-              payload: { issueId: parent.id, childIssueId: issue.id, mutation: "child_done" },
+              reason: parentWakeReason.reason,
+              payload: { issueId: parent.id, childIssueId: issue.id, mutation: parentWakeReason.mutation },
               requestedByActorType: actor.actorType,
               requestedByActorId: actor.actorId,
               contextSnapshot: {
                 issueId: parent.id,
                 childIssueId: issue.id,
-                source: "issue.child_completed",
-                wakeReason: "child_issue_completed",
+                source: parentWakeReason.source,
+                wakeReason: parentWakeReason.reason,
               },
             });
           }
         } catch (err) {
-          logger.warn({ err, issueId: issue.id, parentId: issue.parentId }, "failed to wake parent issue assignee on child completion");
+          logger.warn({ err, issueId: issue.id, parentId: issue.parentId }, parentWakeReason.logMessage);
         }
       }
 
