@@ -291,6 +291,7 @@ export interface Issue {
   projectWorkspaceId: string | null;
   goalId: string | null;
   parentId: string | null;
+  taskRootIssueId?: string | null;
   ancestors?: IssueAncestor[];
   title: string;
   description: string | null;

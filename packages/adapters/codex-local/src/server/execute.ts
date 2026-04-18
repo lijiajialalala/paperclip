@@ -242,6 +242,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const workspaceRepoRef = asString(workspaceContext.repoRef, "");
   const workspaceBranch = asString(workspaceContext.branchName, "");
   const workspaceWorktreePath = asString(workspaceContext.worktreePath, "");
+  const taskContext = parseObject(context.paperclipTask);
+  const taskRootIssueId =
+    asString(taskContext.rootIssueId, "") || asString(workspaceContext.taskRootIssueId, "");
+  const taskRootDir =
+    asString(taskContext.rootDir, "") || asString(workspaceContext.taskRootDir, "");
+  const deliverableRoot =
+    asString(taskContext.deliverableRoot, "") || asString(workspaceContext.deliverableRoot, "");
   const agentHome = asString(workspaceContext.agentHome, "");
   const workspaceHints = Array.isArray(context.paperclipWorkspaces)
     ? context.paperclipWorkspaces.filter(
@@ -360,6 +367,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   }
   if (workspaceWorktreePath) {
     env.PAPERCLIP_WORKSPACE_WORKTREE_PATH = workspaceWorktreePath;
+  }
+  if (taskRootIssueId) {
+    env.PAPERCLIP_TASK_ROOT_ISSUE_ID = taskRootIssueId;
+  }
+  if (taskRootDir) {
+    env.PAPERCLIP_TASK_ROOT_DIR = taskRootDir;
+  }
+  if (deliverableRoot) {
+    env.PAPERCLIP_DELIVERABLE_ROOT = deliverableRoot;
   }
   if (agentHome) {
     env.AGENT_HOME = agentHome;

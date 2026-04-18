@@ -1117,14 +1117,18 @@ async function buildPaperclipWakePayload(input: {
         title: string;
         status: string;
         priority: string;
+        taskRootIssueId?: string | null;
+        taskRootDir?: string | null;
+        deliverableRoot?: string | null;
       }
     | null;
 }) {
+  type PaperclipWakeIssueSummary = NonNullable<typeof input.issueSummary>;
   const commentIds = extractWakeCommentIds(input.contextSnapshot);
   if (commentIds.length === 0) return null;
 
   const issueId = readNonEmptyString(input.contextSnapshot.issueId);
-  const issueSummary =
+  const issueSummary: PaperclipWakeIssueSummary | null =
     input.issueSummary ??
     (issueId
       ? await input.db
@@ -1134,6 +1138,7 @@ async function buildPaperclipWakePayload(input: {
             title: issues.title,
             status: issues.status,
             priority: issues.priority,
+            taskRootIssueId: issues.taskRootIssueId,
           })
           .from(issues)
           .where(and(eq(issues.id, issueId), eq(issues.companyId, input.companyId)))
@@ -1210,6 +1215,9 @@ async function buildPaperclipWakePayload(input: {
           title: issueSummary.title,
           status: issueSummary.status,
           priority: issueSummary.priority,
+          taskRootIssueId: issueSummary.taskRootIssueId ?? null,
+          taskRootDir: issueSummary.taskRootDir ?? null,
+          deliverableRoot: issueSummary.deliverableRoot ?? null,
         }
       : null,
     commentIds,
@@ -2901,6 +2909,7 @@ export function heartbeatService(db: Db) {
             projectWorkspaceId: issues.projectWorkspaceId,
             executionWorkspaceId: issues.executionWorkspaceId,
             executionWorkspacePreference: issues.executionWorkspacePreference,
+            taskRootIssueId: issues.taskRootIssueId,
             assigneeAgentId: issues.assigneeAgentId,
             assigneeAdapterOverrides: issues.assigneeAdapterOverrides,
             executionWorkspaceSettings: issues.executionWorkspaceSettings,
@@ -2973,6 +2982,7 @@ export function heartbeatService(db: Db) {
           projectWorkspaceId: issueContext.projectWorkspaceId,
           executionWorkspaceId: issueContext.executionWorkspaceId,
           executionWorkspacePreference: issueContext.executionWorkspacePreference,
+          taskRootIssueId: issueContext.taskRootIssueId,
         }
       : null;
     const paperclipWakePayload = await buildPaperclipWakePayload({
@@ -2986,6 +2996,7 @@ export function heartbeatService(db: Db) {
             title: issueRef.title,
             status: issueRef.status,
             priority: issueRef.priority,
+            taskRootIssueId: issueRef.taskRootIssueId,
           }
         : null,
     });
@@ -3253,7 +3264,50 @@ export function heartbeatService(db: Db) {
         await fs.mkdir(home, { recursive: true });
         return home;
       })(),
+      taskRootIssueId: issueRef?.taskRootIssueId ?? issueRef?.id ?? null,
+      taskRootDir:
+        issueRef?.id
+          ? path.join(executionWorkspace.cwd, ".paperclip", "tasks", issueRef.taskRootIssueId ?? issueRef.id)
+          : null,
+      deliverableRoot:
+        issueRef?.id
+          ? path.join(
+            executionWorkspace.cwd,
+            ".paperclip",
+            "tasks",
+            issueRef.taskRootIssueId ?? issueRef.id,
+            "deliverables",
+          )
+          : null,
     };
+    const paperclipTaskContext = issueRef?.id
+      ? {
+          rootIssueId: issueRef.taskRootIssueId ?? issueRef.id,
+          rootDir: path.join(executionWorkspace.cwd, ".paperclip", "tasks", issueRef.taskRootIssueId ?? issueRef.id),
+          deliverableRoot: path.join(
+            executionWorkspace.cwd,
+            ".paperclip",
+            "tasks",
+            issueRef.taskRootIssueId ?? issueRef.id,
+            "deliverables",
+          ),
+        }
+      : null;
+    context.paperclipTask = paperclipTaskContext;
+    if (paperclipWakePayload) {
+      context[PAPERCLIP_WAKE_PAYLOAD_KEY] = paperclipWakePayload.issue
+        ? {
+            ...paperclipWakePayload,
+            issue: {
+              ...paperclipWakePayload.issue,
+              taskRootIssueId: paperclipTaskContext?.rootIssueId ?? paperclipWakePayload.issue.taskRootIssueId ?? null,
+              taskRootDir: paperclipTaskContext?.rootDir ?? paperclipWakePayload.issue.taskRootDir ?? null,
+              deliverableRoot:
+                paperclipTaskContext?.deliverableRoot ?? paperclipWakePayload.issue.deliverableRoot ?? null,
+            },
+          }
+        : paperclipWakePayload;
+    }
     context.paperclipWorkspaces = resolvedWorkspace.workspaceHints;
     const runtimeServiceIntents = (() => {
       const runtimeConfig = parseObject(resolvedConfig.workspaceRuntime);

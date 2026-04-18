@@ -1404,6 +1404,9 @@ describe("ensureRuntimeServicesForRun", () => {
         "  databaseUrl: process.env.DATABASE_URL ?? null,",
         "  customEnv: process.env.RUNTIME_CUSTOM_ENV ?? null,",
         "  port: process.env.PORT ?? null,",
+        "  taskRootIssueId: process.env.PAPERCLIP_TASK_ROOT_ISSUE_ID ?? null,",
+        "  taskRootDir: process.env.PAPERCLIP_TASK_ROOT_DIR ?? null,",
+        "  deliverableRoot: process.env.PAPERCLIP_DELIVERABLE_ROOT ?? null,",
         "}));",
         "require('node:http').createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1');",
         "",
@@ -1425,7 +1428,12 @@ describe("ensureRuntimeServicesForRun", () => {
         name: "Codex Coder",
         companyId: "company-1",
       },
-      issue: null,
+      issue: {
+        id: "issue-1",
+        identifier: "PAP-101",
+        title: "Runtime env capture",
+        taskRootIssueId: "task-root-1",
+      },
       workspace,
       executionWorkspaceId: "execution-workspace-1",
       config: {
@@ -1463,6 +1471,11 @@ describe("ensureRuntimeServicesForRun", () => {
     expect(captured.databaseUrl).toBeNull();
     expect(captured.customEnv).toBe("from-adapter");
     expect(captured.port).toMatch(/^\d+$/);
+    expect(captured.taskRootIssueId).toBe("task-root-1");
+    expect(captured.taskRootDir).toBe(path.join(workspaceRoot, ".paperclip", "tasks", "task-root-1"));
+    expect(captured.deliverableRoot).toBe(path.join(workspaceRoot, ".paperclip", "tasks", "task-root-1", "deliverables"));
+    expect((await fs.stat(captured.taskRootDir ?? "")).isDirectory()).toBe(true);
+    expect((await fs.stat(captured.deliverableRoot ?? "")).isDirectory()).toBe(true);
     expect(services[0]?.executionWorkspaceId).toBe("execution-workspace-1");
     expect(services[0]?.scopeType).toBe("execution_workspace");
     expect(services[0]?.scopeId).toBe("execution-workspace-1");

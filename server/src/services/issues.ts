@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { and, asc, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
@@ -211,6 +212,7 @@ async function getWorkspaceInheritanceIssue(
       projectWorkspaceId: issues.projectWorkspaceId,
       executionWorkspaceId: issues.executionWorkspaceId,
       executionWorkspaceSettings: issues.executionWorkspaceSettings,
+      taskRootIssueId: issues.taskRootIssueId,
     })
     .from(issues)
     .where(and(eq(issues.id, issueId), eq(issues.companyId, companyId)))
@@ -219,6 +221,43 @@ async function getWorkspaceInheritanceIssue(
     throw notFound("Workspace inheritance issue not found");
   }
   return issue;
+}
+
+function resolveTaskRootIssueId(issue: { id: string; taskRootIssueId: string | null }) {
+  return issue.taskRootIssueId ?? issue.id;
+}
+
+async function syncTaskRootForDescendants(
+  dbOrTx: any,
+  rootIssueId: string,
+  taskRootIssueId: string,
+) {
+  const queue: string[] = [rootIssueId];
+  const visited = new Set<string>(queue);
+
+  while (queue.length > 0) {
+    const batch = queue.splice(0, 50);
+    const children = await dbOrTx
+      .select({ id: issues.id })
+      .from(issues)
+      .where(inArray(issues.parentId, batch));
+
+    const childIds = children
+      .map((row: { id: string }) => row.id)
+      .filter((childId: string) => !visited.has(childId));
+
+    if (childIds.length === 0) continue;
+
+    await dbOrTx
+      .update(issues)
+      .set({ taskRootIssueId })
+      .where(inArray(issues.id, childIds));
+
+    for (const childId of childIds) {
+      visited.add(childId);
+      queue.push(childId);
+    }
+  }
 }
 
 function isAuthoritativeBusinessVerdict(
@@ -1823,7 +1862,12 @@ export function issueService(db: Db) {
       companyId: string,
       data: IssueCreateInput,
     ) => {
-      const { labelIds: inputLabelIds, inheritExecutionWorkspaceFromIssueId, ...issueData } = data;
+      const {
+        labelIds: inputLabelIds,
+        inheritExecutionWorkspaceFromIssueId,
+        taskRootIssueId: _ignoredTaskRootIssueId,
+        ...issueData
+      } = data as IssueCreateInput & { taskRootIssueId?: string | null };
       const isolatedWorkspacesEnabled = (await instanceSettings.getExperimental()).enableIsolatedWorkspaces;
       if (!isolatedWorkspacesEnabled) {
         delete issueData.executionWorkspaceId;
@@ -1843,6 +1887,7 @@ export function issueService(db: Db) {
         throw unprocessable("in_progress issues require an assignee");
       }
       return db.transaction(async (tx) => {
+        const issueId = issueData.id ?? randomUUID();
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, companyId);
         const projectGoalId = await getProjectDefaultGoalId(tx, companyId, issueData.projectId);
         let projectWorkspaceId = issueData.projectWorkspaceId ?? null;
@@ -1851,12 +1896,18 @@ export function issueService(db: Db) {
         let executionWorkspaceSettings =
           (issueData.executionWorkspaceSettings as Record<string, unknown> | null | undefined) ?? null;
         const workspaceInheritanceIssueId = inheritExecutionWorkspaceFromIssueId ?? issueData.parentId ?? null;
+        const taskRootSourceIssueId = issueData.parentId ?? inheritExecutionWorkspaceFromIssueId ?? null;
         const hasExplicitExecutionWorkspaceOverride =
           issueData.executionWorkspaceId !== undefined ||
           issueData.executionWorkspacePreference !== undefined ||
           issueData.executionWorkspaceSettings !== undefined;
+        let taskRootIssueId = issueId;
+        let workspaceSourceIssue:
+          | Awaited<ReturnType<typeof getWorkspaceInheritanceIssue>>
+          | null = null;
         if (workspaceInheritanceIssueId) {
-          const workspaceSource = await getWorkspaceInheritanceIssue(tx, companyId, workspaceInheritanceIssueId);
+          workspaceSourceIssue = await getWorkspaceInheritanceIssue(tx, companyId, workspaceInheritanceIssueId);
+          const workspaceSource = workspaceSourceIssue;
           if (projectWorkspaceId == null && workspaceSource.projectWorkspaceId) {
             projectWorkspaceId = workspaceSource.projectWorkspaceId;
           }
@@ -1882,6 +1933,13 @@ export function issueService(db: Db) {
               };
             }
           }
+        }
+        if (taskRootSourceIssueId) {
+          const taskRootSource =
+            workspaceSourceIssue && workspaceInheritanceIssueId === taskRootSourceIssueId
+              ? workspaceSourceIssue
+              : await getWorkspaceInheritanceIssue(tx, companyId, taskRootSourceIssueId);
+          taskRootIssueId = resolveTaskRootIssueId(taskRootSource);
         }
         if (
           executionWorkspaceSettings == null &&
@@ -1937,6 +1995,7 @@ export function issueService(db: Db) {
 
         const values = {
           ...issueData,
+          id: issueId,
           originKind: issueData.originKind ?? "manual",
           goalId: resolveIssueGoalId({
             projectId: issueData.projectId,
@@ -1951,6 +2010,7 @@ export function issueService(db: Db) {
           companyId,
           issueNumber,
           identifier,
+          taskRootIssueId,
         } as typeof issues.$inferInsert;
         if (values.status === "in_progress" && !values.startedAt) {
           values.startedAt = new Date();
@@ -1980,7 +2040,11 @@ export function issueService(db: Db) {
         .then((rows) => rows[0] ?? null);
       if (!existing) return null;
 
-      const { labelIds: nextLabelIds, ...issueData } = data;
+      const {
+        labelIds: nextLabelIds,
+        taskRootIssueId: _ignoredTaskRootIssueId,
+        ...issueData
+      } = data as Partial<typeof issues.$inferInsert> & { labelIds?: string[] };
       const isolatedWorkspacesEnabled = (await instanceSettings.getExperimental()).enableIsolatedWorkspaces;
       if (!isolatedWorkspacesEnabled) {
         delete issueData.executionWorkspaceId;
@@ -2014,6 +2078,7 @@ export function issueService(db: Db) {
       if (issueData.assigneeUserId) {
         await assertAssignableUser(existing.companyId, issueData.assigneeUserId);
       }
+      const nextParentId = issueData.parentId !== undefined ? issueData.parentId : existing.parentId;
       const nextProjectId = issueData.projectId !== undefined ? issueData.projectId : existing.projectId;
       const nextProjectWorkspaceId =
         issueData.projectWorkspaceId !== undefined ? issueData.projectWorkspaceId : existing.projectWorkspaceId;
@@ -2066,6 +2131,13 @@ export function issueService(db: Db) {
           projectGoalId: nextProjectGoalId,
           defaultGoalId: defaultCompanyGoal?.id ?? null,
         });
+        const shouldRefreshTaskRoot =
+          issueData.parentId !== undefined || existing.taskRootIssueId == null;
+        if (shouldRefreshTaskRoot) {
+          patch.taskRootIssueId = nextParentId
+            ? resolveTaskRootIssueId(await getWorkspaceInheritanceIssue(tx, existing.companyId, nextParentId))
+            : existing.id;
+        }
         const updated = await tx
           .update(issues)
           .set(patch)
@@ -2073,6 +2145,12 @@ export function issueService(db: Db) {
           .returning()
           .then((rows) => rows[0] ?? null);
         if (!updated) return null;
+        if (
+          typeof patch.taskRootIssueId === "string" &&
+          patch.taskRootIssueId !== (existing.taskRootIssueId ?? null)
+        ) {
+          await syncTaskRootForDescendants(tx, updated.id, patch.taskRootIssueId);
+        }
         if (nextLabelIds !== undefined) {
           await syncIssueLabels(updated.id, existing.companyId, nextLabelIds, tx);
         }

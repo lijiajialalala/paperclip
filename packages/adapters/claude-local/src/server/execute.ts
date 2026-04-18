@@ -121,6 +121,13 @@ async function buildClaudeRuntimeConfig(input: ClaudeExecutionInput): Promise<Cl
   const workspaceRepoRef = asString(workspaceContext.repoRef, "") || null;
   const workspaceBranch = asString(workspaceContext.branchName, "") || null;
   const workspaceWorktreePath = asString(workspaceContext.worktreePath, "") || null;
+  const taskContext = parseObject(context.paperclipTask);
+  const taskRootIssueId =
+    asString(taskContext.rootIssueId, "") || asString(workspaceContext.taskRootIssueId, "") || null;
+  const taskRootDir =
+    asString(taskContext.rootDir, "") || asString(workspaceContext.taskRootDir, "") || null;
+  const deliverableRoot =
+    asString(taskContext.deliverableRoot, "") || asString(workspaceContext.deliverableRoot, "") || null;
   const agentHome = asString(workspaceContext.agentHome, "") || null;
   const workspaceHints = Array.isArray(context.paperclipWorkspaces)
     ? context.paperclipWorkspaces.filter(
@@ -219,6 +226,15 @@ async function buildClaudeRuntimeConfig(input: ClaudeExecutionInput): Promise<Cl
   }
   if (workspaceWorktreePath) {
     env.PAPERCLIP_WORKSPACE_WORKTREE_PATH = workspaceWorktreePath;
+  }
+  if (taskRootIssueId) {
+    env.PAPERCLIP_TASK_ROOT_ISSUE_ID = taskRootIssueId;
+  }
+  if (taskRootDir) {
+    env.PAPERCLIP_TASK_ROOT_DIR = taskRootDir;
+  }
+  if (deliverableRoot) {
+    env.PAPERCLIP_DELIVERABLE_ROOT = deliverableRoot;
   }
   if (agentHome) {
     env.AGENT_HOME = agentHome;

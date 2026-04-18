@@ -2049,6 +2049,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     expect(child.executionWorkspaceSettings).toEqual({
       mode: "shared_workspace",
     });
+    expect(child.taskRootIssueId).toBe(parentIssueId);
   });
 
   it("inherits workspace linkage from an explicit source issue without creating a parent-child relationship", async () => {
@@ -2120,6 +2121,27 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     expect(followUp.executionWorkspaceSettings).toEqual({
       mode: "operator_branch",
     });
+    expect(followUp.taskRootIssueId).toBe(sourceIssueId);
+  });
+
+  it("assigns taskRootIssueId to the new top-level issue when no lineage is inherited", async () => {
+    const companyId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    const created = await svc.create(companyId, {
+      title: "Independent issue",
+      status: "todo",
+      priority: "medium",
+    });
+
+    expect(created.parentId).toBeNull();
+    expect(created.taskRootIssueId).toBe(created.id);
   });
 
   describe("assertCanTransitionIssueToDone", () => {

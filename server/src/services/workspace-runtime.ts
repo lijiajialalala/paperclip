@@ -160,12 +160,46 @@ export interface ExecutionWorkspaceIssueRef {
   id: string;
   identifier: string | null;
   title: string | null;
+  taskRootIssueId?: string | null;
+  taskRootDir?: string | null;
+  deliverableRoot?: string | null;
 }
 
 export interface ExecutionWorkspaceAgentRef {
   id: string | null;
   name: string;
   companyId: string;
+}
+
+interface TaskNamespaceLayout {
+  taskRootIssueId: string;
+  taskRootDir: string;
+  deliverableRoot: string;
+}
+
+function resolveTaskNamespaceLayout(
+  workspaceCwd: string | null | undefined,
+  issue: ExecutionWorkspaceIssueRef | null,
+): TaskNamespaceLayout | null {
+  const cwd = typeof workspaceCwd === "string" && workspaceCwd.trim().length > 0 ? workspaceCwd.trim() : null;
+  if (!cwd || !issue?.id) return null;
+  const taskRootIssueId = issue.taskRootIssueId ?? issue.id;
+  const taskRootDir = path.join(cwd, ".paperclip", "tasks", taskRootIssueId);
+  return {
+    taskRootIssueId,
+    taskRootDir,
+    deliverableRoot: path.join(taskRootDir, "deliverables"),
+  };
+}
+
+async function ensureTaskNamespaceLayout(
+  workspaceCwd: string | null | undefined,
+  issue: ExecutionWorkspaceIssueRef | null,
+): Promise<TaskNamespaceLayout | null> {
+  const layout = resolveTaskNamespaceLayout(workspaceCwd, issue);
+  if (!layout) return null;
+  await fs.mkdir(layout.deliverableRoot, { recursive: true });
+  return layout;
 }
 
 export interface RealizedExecutionWorkspace extends ExecutionWorkspaceInput {
@@ -336,6 +370,7 @@ function renderWorkspaceTemplate(template: string, input: {
       id: input.issue?.id ?? "",
       identifier: input.issue?.identifier ?? "",
       title: input.issue?.title ?? "",
+      taskRootIssueId: input.issue?.taskRootIssueId ?? input.issue?.id ?? "",
     },
     agent: {
       id: input.agent.id ?? "",
@@ -485,6 +520,7 @@ function buildWorkspaceCommandEnv(input: {
   created: boolean;
 }) {
   const env: NodeJS.ProcessEnv = { ...process.env };
+  const taskLayout = resolveTaskNamespaceLayout(input.worktreePath, input.issue);
   env.PAPERCLIP_WORKSPACE_CWD = input.worktreePath;
   env.PAPERCLIP_WORKSPACE_PATH = input.worktreePath;
   env.PAPERCLIP_WORKSPACE_WORKTREE_PATH = input.worktreePath;
@@ -503,6 +539,9 @@ function buildWorkspaceCommandEnv(input: {
   env.PAPERCLIP_ISSUE_ID = input.issue?.id ?? "";
   env.PAPERCLIP_ISSUE_IDENTIFIER = input.issue?.identifier ?? "";
   env.PAPERCLIP_ISSUE_TITLE = input.issue?.title ?? "";
+  env.PAPERCLIP_TASK_ROOT_ISSUE_ID = taskLayout?.taskRootIssueId ?? "";
+  env.PAPERCLIP_TASK_ROOT_DIR = taskLayout?.taskRootDir ?? "";
+  env.PAPERCLIP_DELIVERABLE_ROOT = taskLayout?.deliverableRoot ?? "";
   return env;
 }
 
@@ -738,6 +777,7 @@ export async function realizeExecutionWorkspace(input: {
   const rawStrategy = parseObject(input.config.workspaceStrategy);
   const strategyType = asString(rawStrategy.type, "project_primary");
   if (strategyType !== "git_worktree") {
+    await ensureTaskNamespaceLayout(input.base.baseCwd, input.issue);
     return {
       ...input.base,
       strategy: "project_primary",
@@ -795,6 +835,7 @@ export async function realizeExecutionWorkspace(input: {
           }),
         });
       }
+      await ensureTaskNamespaceLayout(worktreePath, input.issue);
       await provisionExecutionWorktree({
         strategy: rawStrategy,
         base: input.base,
@@ -854,6 +895,7 @@ export async function realizeExecutionWorkspace(input: {
       failureLabel: `git worktree add ${worktreePath}`,
     });
   }
+  await ensureTaskNamespaceLayout(worktreePath, input.issue);
   await provisionExecutionWorktree({
     strategy: rawStrategy,
     base: input.base,
@@ -1059,6 +1101,7 @@ function buildTemplateData(input: {
   adapterEnv: Record<string, string>;
   port: number | null;
 }) {
+  const taskLayout = resolveTaskNamespaceLayout(input.workspace.cwd, input.issue);
   return {
     workspace: {
       cwd: input.workspace.cwd,
@@ -1072,6 +1115,12 @@ function buildTemplateData(input: {
       id: input.issue?.id ?? "",
       identifier: input.issue?.identifier ?? "",
       title: input.issue?.title ?? "",
+      taskRootIssueId: taskLayout?.taskRootIssueId ?? input.issue?.taskRootIssueId ?? input.issue?.id ?? "",
+    },
+    task: {
+      rootIssueId: taskLayout?.taskRootIssueId ?? "",
+      rootDir: taskLayout?.taskRootDir ?? "",
+      deliverableRoot: taskLayout?.deliverableRoot ?? "",
     },
     agent: {
       id: input.agent.id ?? "",
@@ -1420,10 +1469,21 @@ async function startLocalRuntimeService(input: {
     port === identityPort
       ? identity.serviceCwd
       : resolveConfiguredPath(renderTemplate(asString(input.service.cwd, "."), templateData), input.workspace.cwd);
+  const taskLayout = resolveTaskNamespaceLayout(input.workspace.cwd, input.issue);
   const env: Record<string, string> = {
     ...sanitizeRuntimeServiceBaseEnv(process.env),
     ...input.adapterEnv,
   } as Record<string, string>;
+  if (input.issue?.id) {
+    env.PAPERCLIP_ISSUE_ID = input.issue.id;
+    env.PAPERCLIP_ISSUE_IDENTIFIER = input.issue.identifier ?? "";
+    env.PAPERCLIP_ISSUE_TITLE = input.issue.title ?? "";
+  }
+  if (taskLayout) {
+    env.PAPERCLIP_TASK_ROOT_ISSUE_ID = taskLayout.taskRootIssueId;
+    env.PAPERCLIP_TASK_ROOT_DIR = taskLayout.taskRootDir;
+    env.PAPERCLIP_DELIVERABLE_ROOT = taskLayout.deliverableRoot;
+  }
   for (const [key, value] of Object.entries(renderRuntimeServiceEnv({ envConfig, templateData }))) {
     env[key] = value;
   }
@@ -1736,6 +1796,7 @@ export async function ensureRuntimeServicesForRun(input: {
   const acquiredServiceIds: string[] = [];
   const refs: RuntimeServiceRef[] = [];
   runtimeServiceLeasesByRun.set(input.runId, acquiredServiceIds);
+  await ensureTaskNamespaceLayout(input.workspace.cwd, input.issue);
 
   try {
     for (const service of rawServices) {

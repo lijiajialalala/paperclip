@@ -267,6 +267,9 @@ type PaperclipWakeIssue = {
   title: string | null;
   status: string | null;
   priority: string | null;
+  taskRootIssueId: string | null;
+  taskRootDir: string | null;
+  deliverableRoot: string | null;
 };
 
 type PaperclipWakeComment = {
@@ -299,6 +302,9 @@ function normalizePaperclipWakeIssue(value: unknown): PaperclipWakeIssue | null 
   const title = asString(issue.title, "").trim() || null;
   const status = asString(issue.status, "").trim() || null;
   const priority = asString(issue.priority, "").trim() || null;
+  const taskRootIssueId = asString(issue.taskRootIssueId, "").trim() || null;
+  const taskRootDir = asString(issue.taskRootDir, "").trim() || null;
+  const deliverableRoot = asString(issue.deliverableRoot, "").trim() || null;
   if (!id && !identifier && !title) return null;
   return {
     id,
@@ -306,6 +312,9 @@ function normalizePaperclipWakeIssue(value: unknown): PaperclipWakeIssue | null 
     title,
     status,
     priority,
+    taskRootIssueId,
+    taskRootDir,
+    deliverableRoot,
   };
 }
 
@@ -405,6 +414,15 @@ export function renderPaperclipWakePrompt(
   }
   if (normalized.issue?.priority) {
     lines.push(`- issue priority: ${normalized.issue.priority}`);
+  }
+  if (normalized.issue?.taskRootIssueId) {
+    lines.push(`- task root issue: ${normalized.issue.taskRootIssueId}`);
+  }
+  if (normalized.issue?.taskRootDir) {
+    lines.push(`- task root dir: ${normalized.issue.taskRootDir}`);
+  }
+  if (normalized.issue?.deliverableRoot) {
+    lines.push(`- deliverable root: ${normalized.issue.deliverableRoot}`);
   }
   if (normalized.missingCount > 0) {
     lines.push(`- omitted comments: ${normalized.missingCount}`);

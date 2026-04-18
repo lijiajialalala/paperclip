@@ -322,6 +322,17 @@ function resolvePaperclipApiUrlOverride(value: unknown): string | null {
 
 function buildPaperclipEnvForWake(ctx: AdapterExecutionContext, wakePayload: WakePayload): Record<string, string> {
   const paperclipApiUrlOverride = resolvePaperclipApiUrlOverride(ctx.config.paperclipApiUrl);
+  const taskContext = parseObject(ctx.context.paperclipTask);
+  const workspaceContext = parseObject(ctx.context.paperclipWorkspace);
+  const taskRootIssueId =
+    asString(taskContext.rootIssueId, "") ||
+    asString(workspaceContext.taskRootIssueId, "") ||
+    wakePayload.taskId ||
+    wakePayload.issueId;
+  const taskRootDir =
+    asString(taskContext.rootDir, "") || asString(workspaceContext.taskRootDir, "");
+  const deliverableRoot =
+    asString(taskContext.deliverableRoot, "") || asString(workspaceContext.deliverableRoot, "");
   const paperclipEnv: Record<string, string> = {
     ...buildPaperclipEnv(ctx.agent),
     PAPERCLIP_RUN_ID: ctx.runId,
@@ -338,6 +349,9 @@ function buildPaperclipEnvForWake(ctx: AdapterExecutionContext, wakePayload: Wak
   if (wakePayload.issueIds.length > 0) {
     paperclipEnv.PAPERCLIP_LINKED_ISSUE_IDS = wakePayload.issueIds.join(",");
   }
+  if (taskRootIssueId) paperclipEnv.PAPERCLIP_TASK_ROOT_ISSUE_ID = taskRootIssueId;
+  if (taskRootDir) paperclipEnv.PAPERCLIP_TASK_ROOT_DIR = taskRootDir;
+  if (deliverableRoot) paperclipEnv.PAPERCLIP_DELIVERABLE_ROOT = deliverableRoot;
 
   return paperclipEnv;
 }
@@ -359,6 +373,9 @@ function buildWakeText(
     "PAPERCLIP_APPROVAL_ID",
     "PAPERCLIP_APPROVAL_STATUS",
     "PAPERCLIP_LINKED_ISSUE_IDS",
+    "PAPERCLIP_TASK_ROOT_ISSUE_ID",
+    "PAPERCLIP_TASK_ROOT_DIR",
+    "PAPERCLIP_DELIVERABLE_ROOT",
   ];
 
   const envLines: string[] = [];

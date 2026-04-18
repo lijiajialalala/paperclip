@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ensurePaperclipSkillSymlink,
   readInstalledSkillTargets,
+  renderPaperclipWakePrompt,
 } from "./server-utils.js";
 
 function makeSymlinkPermissionError(): NodeJS.ErrnoException {
@@ -108,5 +109,49 @@ describe("ensurePaperclipSkillSymlink", () => {
     expect(result).toBe("skipped");
     expect(linkSkill).not.toHaveBeenCalled();
     expect(await fs.readFile(path.join(target, "notes.txt"), "utf8")).toBe("keep me\n");
+  });
+});
+
+describe("renderPaperclipWakePrompt", () => {
+  it("renders task root guidance when the wake payload includes task namespace metadata", () => {
+    const prompt = renderPaperclipWakePrompt({
+      reason: "issue_assigned",
+      issue: {
+        id: "issue-1",
+        identifier: "PAP-101",
+        title: "Prepare research report",
+        status: "todo",
+        priority: "medium",
+        taskRootIssueId: "task-root-1",
+        taskRootDir: "/workspace/.paperclip/tasks/task-root-1",
+        deliverableRoot: "/workspace/.paperclip/tasks/task-root-1/deliverables",
+      },
+      commentIds: ["comment-1"],
+      latestCommentId: "comment-1",
+      comments: [
+        {
+          id: "comment-1",
+          issueId: "issue-1",
+          body: "继续在任务命名空间下产出报告。",
+          bodyTruncated: false,
+          createdAt: "2026-04-18T09:00:00.000Z",
+          author: {
+            type: "user",
+            id: "board-user",
+          },
+        },
+      ],
+      commentWindow: {
+        requestedCount: 1,
+        includedCount: 1,
+        missingCount: 0,
+      },
+      truncated: false,
+      fallbackFetchNeeded: false,
+    });
+
+    expect(prompt).toContain("task root issue: task-root-1");
+    expect(prompt).toContain("task root dir: /workspace/.paperclip/tasks/task-root-1");
+    expect(prompt).toContain("deliverable root: /workspace/.paperclip/tasks/task-root-1/deliverables");
   });
 });
