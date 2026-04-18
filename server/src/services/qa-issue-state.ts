@@ -8,6 +8,7 @@ import {
   parseQaVerdictFromBody,
   readQaIssueWriteback,
 } from "./qa-writeback.js";
+import { isRuntimeInterruptionErrorCode } from "./runtime-interruption.js";
 
 export interface IssueQaSummary {
   verdict: QaVerdict | null;
@@ -133,8 +134,8 @@ export function qaIssueStateService(db: Db) {
 
       const persistedWriteback =
         readQaIssueWriteback(latestRun.resultJson)
-        ?? (latestRun.errorCode === "process_lost"
-          // process_lost runs are platform failures, not product failures.
+        ?? (isRuntimeInterruptionErrorCode(latestRun.errorCode)
+          // Runtime interruption runs are platform failures, not product failures.
           // Use platform_interrupted (canCloseUpstream: null) so the close gate is not blocked.
           ? buildQaIssueWriteback({
               status: "platform_interrupted",

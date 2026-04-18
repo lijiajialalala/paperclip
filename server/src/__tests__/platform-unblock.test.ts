@@ -165,6 +165,56 @@ describeEmbeddedPostgres("platformUnblockService", () => {
     }));
   });
 
+  it("classifies repeated server_restarted runs as the same runtime platform blocker family", async () => {
+    const { companyId, issueId, backendId } = await seedCompany();
+
+    await db.insert(heartbeatRuns).values([{
+      id: "d0d0d0d0-d0d0-4d0d-8d0d-d0d0d0d0d0d0",
+      companyId,
+      agentId: backendId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "failed",
+      contextSnapshot: { issueId },
+      resultJson: {},
+      errorCode: "server_restarted",
+      error: "server restarted",
+      processLossRetryCount: 1,
+      startedAt: new Date("2026-04-08T00:00:00.000Z"),
+      finishedAt: new Date("2026-04-08T00:01:00.000Z"),
+      createdAt: new Date("2026-04-08T00:01:00.000Z"),
+      updatedAt: new Date("2026-04-08T00:01:00.000Z"),
+    }, {
+      id: "e1e1e1e1-e1e1-4e1e-8e1e-e1e1e1e1e1e1",
+      companyId,
+      agentId: backendId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "failed",
+      contextSnapshot: { issueId },
+      resultJson: {},
+      errorCode: "server_restarted",
+      error: "server restarted again",
+      processLossRetryCount: 2,
+      startedAt: new Date("2026-04-08T00:09:00.000Z"),
+      finishedAt: new Date("2026-04-08T00:10:00.000Z"),
+      createdAt: new Date("2026-04-08T00:10:00.000Z"),
+      updatedAt: new Date("2026-04-08T00:10:00.000Z"),
+    }]);
+
+    const summary = await platformUnblockService(db).getIssuePlatformUnblockSummary(issueId);
+
+    expect(summary).toEqual(expect.objectContaining({
+      mode: "platform",
+      primaryCategory: "runtime_process",
+      primaryOwnerRole: "runtime_owner",
+      blocksExecutionRetry: true,
+      blocksCloseOut: false,
+      canRetryEngineering: false,
+      canCloseUpstream: null,
+    }));
+  });
+
   it("builds run platform hints from close-gate activity and writeback alerts", async () => {
     const { companyId, issueId, backendId } = await seedCompany();
     const runId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";

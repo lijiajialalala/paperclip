@@ -51,6 +51,7 @@ import { defaultWorkPlanApprovalRouting } from "./approval-routing.js";
 import { resolveIssueGoalId, resolveNextIssueGoalId } from "./issue-goal-fallback.js";
 import { getDefaultCompanyGoal } from "./goals.js";
 import { issueApprovalService } from "./issue-approvals.js";
+import { PROCESS_LOST_ERROR_CODE, SERVER_RESTARTED_ERROR_CODE } from "./runtime-interruption.js";
 
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
@@ -1003,9 +1004,15 @@ export function issueService(db: Db) {
           eq(sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'issueId'`, issueId),
           inArray(heartbeatRuns.status, [...TERMINAL_HEARTBEAT_RUN_STATUSES]),
           sql<boolean>`nullif(btrim(${heartbeatRuns.resultJson} ->> 'verdict'), '') is not null`,
-          // Platform-failure runs (process_lost) are not product verdicts and
+          // Platform-failure runs are not product verdicts and
           // must not block the done gate.
-          or(isNull(heartbeatRuns.errorCode), ne(heartbeatRuns.errorCode, "process_lost")),
+          or(
+            isNull(heartbeatRuns.errorCode),
+            and(
+              ne(heartbeatRuns.errorCode, PROCESS_LOST_ERROR_CODE),
+              ne(heartbeatRuns.errorCode, SERVER_RESTARTED_ERROR_CODE),
+            ),
+          ),
         ),
       )
       .orderBy(desc(heartbeatRuns.finishedAt), desc(heartbeatRuns.createdAt))

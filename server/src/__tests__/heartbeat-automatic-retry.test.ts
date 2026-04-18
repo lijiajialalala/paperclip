@@ -48,6 +48,18 @@ describe("classifyAutomaticRetry", () => {
     });
   });
 
+  it("classifies server_restarted as the same retry family as process_lost", () => {
+    expect(
+      classifyAutomaticRetry({
+        errorCode: "server_restarted",
+        errorMessage: "Server restarted while the local run was active",
+      }),
+    ).toEqual({
+      reason: "process_lost",
+      maxAttempts: 2,
+    });
+  });
+
   it("does not classify agent auth failures as transient retries", () => {
     expect(
       classifyAutomaticRetry({
@@ -116,6 +128,28 @@ describe("resolveAutomaticRetryPlan", () => {
       attempt: 1,
       maxAttempts: 2,
       retryAfterMs: 10_000,
+    });
+  });
+
+  it("retries server_restarted runs with the runtime interruption policy", () => {
+    const now = new Date("2026-04-05T10:00:00.000Z");
+    expect(
+      resolveAutomaticRetryPlan(
+        {
+          contextSnapshot: null,
+          processLossRetryCount: 0,
+        },
+        {
+          errorCode: "server_restarted",
+          errorMessage: "Server restarted while the run was active",
+        },
+        now,
+      ),
+    ).toMatchObject({
+      reason: "process_lost",
+      attempt: 1,
+      maxAttempts: 2,
+      retryAfterMs: 5_000,
     });
   });
 });

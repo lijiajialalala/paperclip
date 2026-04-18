@@ -279,6 +279,50 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(issue?.checkoutRunId).toBe(runId);
   });
 
+  it("classifies dead child processes from a previous server boot as server_restarted", async () => {
+    const { agentId, runId, issueId } = await seedRunFixture({
+      processPid: 999_999_999,
+    });
+    await db
+      .update(heartbeatRuns)
+      .set({
+        contextSnapshot: {
+          issueId,
+          paperclipServerBoot: {
+            pid: 11111,
+            bootedAt: "2026-03-18T23:59:59.000Z",
+          },
+        },
+      })
+      .where(eq(heartbeatRuns.id, runId));
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reapOrphanedRuns();
+    expect(result.reaped).toBe(1);
+    expect(result.runIds).toEqual([runId]);
+
+    const runs = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.agentId, agentId));
+    expect(runs).toHaveLength(2);
+
+    const failedRun = runs.find((row) => row.id === runId);
+    const retryRun = runs.find((row) => row.id !== runId);
+    expect(failedRun?.status).toBe("failed");
+    expect(failedRun?.errorCode).toBe("server_restarted");
+    expect(failedRun?.error).toContain("Server restarted");
+    expect(retryRun?.status).toBe("queued");
+    expect(retryRun?.retryOfRunId).toBe(runId);
+
+    const issue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(issue?.executionRunId).toBe(retryRun?.id ?? null);
+  });
+
   it("queues a second retry when one process-loss retry was already used", async () => {
     const { agentId, runId, issueId } = await seedRunFixture({
       processPid: 999_999_999,

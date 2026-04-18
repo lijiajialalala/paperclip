@@ -2585,6 +2585,33 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
         }),
       ).resolves.toBeUndefined();
     });
+
+    it("allows done when the only active platform blocker is a server restart", async () => {
+      const { companyId, agentId, issueId } = await seedDoneGuardFixture();
+      const actorRunId = randomUUID();
+
+      await insertIssueRun({
+        companyId,
+        agentId,
+        issueId,
+        runId: actorRunId,
+        status: "failed",
+        errorCode: "server_restarted",
+        error: "server restarted",
+        processLossRetryCount: 1,
+        createdAt: new Date("2026-04-05T16:05:00.000Z"),
+      });
+
+      await expect(
+        svc.assertCanTransitionIssueToDone({
+          issueId,
+          companyId,
+          actorType: "agent",
+          actorAgentId: agentId,
+          actorRunId,
+        }),
+      ).resolves.toBeUndefined();
+    });
   });
 
   describe("ancestor status recomputation", () => {

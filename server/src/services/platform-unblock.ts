@@ -5,6 +5,7 @@ import { normalizeAgentUrlKey } from "@paperclipai/shared";
 import { deriveHeartbeatRunBusinessVerdict } from "./heartbeat-run-verdict.js";
 import { qaIssueStateService } from "./qa-issue-state.js";
 import { readQaIssueWriteback } from "./qa-writeback.js";
+import { isRuntimeInterruptionErrorCode } from "./runtime-interruption.js";
 
 export type PlatformRecoveryKind =
   | "runtime_recovered"
@@ -409,10 +410,10 @@ export function platformUnblockService(db: Db) {
 
       const runtimeActive = Boolean(
         latestTerminalRun
-        && latestTerminalRun.errorCode === "process_lost"
+        && isRuntimeInterruptionErrorCode(latestTerminalRun.errorCode)
         && (
           latestTerminalRun.processLossRetryCount > 0
-          || previousTerminalRun?.errorCode === "process_lost"
+          || isRuntimeInterruptionErrorCode(previousTerminalRun?.errorCode)
         )
         && (!runtimeRecoveryAt || latestDate(latestTerminalRun.finishedAt, latestTerminalRun.createdAt)!.getTime() > runtimeRecoveryAt.getTime()),
       );
@@ -508,7 +509,7 @@ export function platformUnblockService(db: Db) {
 
       if (primaryCategory === "runtime_process") {
         recommendedNextAction = "Restore the execution environment or approve a substitute completion path.";
-        recoveryCriteria = "Record one fresh non-process_lost terminal run for the issue or an approved manual override.";
+        recoveryCriteria = "Record one fresh non-runtime-interruption terminal run for the issue or an approved manual override.";
       } else if (primaryCategory === "qa_writeback_gate") {
         recommendedNextAction = "Repair QA writeback settlement or clear the erroneous close gate without asking for fresh product code.";
         recoveryCriteria = "Settle QA summary to a single non-alerting state and record a successful close signal or explicit override.";
@@ -534,7 +535,7 @@ export function platformUnblockService(db: Db) {
           createEvidence(
             issue,
             "run",
-            runtimeActive ? "Latest process_lost run" : "Latest terminal run",
+            runtimeActive ? "Latest runtime interruption run" : "Latest terminal run",
             latestDate(latestTerminalRun.finishedAt, latestTerminalRun.createdAt),
             runHref(issue, latestTerminalRun, companyAgents.find((agent) => agent.id === latestTerminalRun.agentId) ?? null),
           ),
@@ -636,7 +637,7 @@ export function platformUnblockService(db: Db) {
       if (!issueId) {
         return {
           latestForIssue: false,
-          processLost: run.errorCode === "process_lost",
+          processLost: isRuntimeInterruptionErrorCode(run.errorCode),
           processLossRetryCount: run.processLossRetryCount ?? 0,
           writebackAlertType: readQaIssueWriteback(run.resultJson)?.alertType ?? null,
           closeGateBlocked: false,
@@ -671,7 +672,7 @@ export function platformUnblockService(db: Db) {
 
       return {
         latestForIssue: latestRun?.id === runId,
-        processLost: run.errorCode === "process_lost",
+        processLost: isRuntimeInterruptionErrorCode(run.errorCode),
         processLossRetryCount: run.processLossRetryCount ?? 0,
         writebackAlertType: readQaIssueWriteback(run.resultJson)?.alertType ?? null,
         closeGateBlocked: closeGateBlock != null,

@@ -185,6 +185,43 @@ describeEmbeddedPostgres("qaWritebackService", () => {
     expect(comments).toHaveLength(0);
   });
 
+  it("treats server_restarted as the same neutral platform interruption as process_lost", async () => {
+    const { companyId, qaAgentId, issueId } = await seedFixture();
+    const agent = await getAgent(qaAgentId);
+
+    await db.insert(heartbeatRuns).values({
+      id: "bcbcbcbc-bcbc-4cbc-8cbc-bcbcbcbcbcbc",
+      companyId,
+      agentId: qaAgentId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "failed",
+      contextSnapshot: { issueId },
+      resultJson: {},
+      errorCode: "server_restarted",
+      error: "Paperclip server restarted during execution",
+      startedAt: new Date("2026-04-08T00:11:00.000Z"),
+      finishedAt: new Date("2026-04-08T00:12:00.000Z"),
+      createdAt: new Date("2026-04-08T00:12:00.000Z"),
+      updatedAt: new Date("2026-04-08T00:12:00.000Z"),
+    });
+
+    const run = await getRun("bcbcbcbc-bcbc-4cbc-8cbc-bcbcbcbcbcbc");
+    const settlement = await qaWritebackService(db).settleTerminalQaRun({
+      run,
+      runAgent: agent,
+      issueId,
+    });
+
+    const updatedIssue = await getIssue(issueId);
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+
+    expect(settlement.issueWriteback.status).toBe("platform_interrupted");
+    expect(settlement.issueWriteback.canCloseUpstream).toBeNull();
+    expect(updatedIssue.status).toBe("in_review");
+    expect(comments).toHaveLength(0);
+  });
+
   it("keeps plan-pending issues in review and raises a platform gate instead of auto-closing them", async () => {
     const { companyId, qaAgentId, issueId } = await seedFixture();
     const createdAt = new Date("2026-04-08T00:20:00.000Z");
