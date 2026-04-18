@@ -234,7 +234,7 @@ describeEmbeddedPostgres("approvalService linked work_plan sync", () => {
       id: issueId,
       companyId,
       title: "Child issue",
-      status: "todo",
+      status: "in_review",
       priority: "medium",
       assigneeAgentId: requesterAgentId,
       planProposedAt: proposedAt,
@@ -275,11 +275,13 @@ describeEmbeddedPostgres("approvalService linked work_plan sync", () => {
 
     const [issueRow] = await db
       .select({
+        status: issues.status,
         planProposedAt: issues.planProposedAt,
         planApprovedAt: issues.planApprovedAt,
       })
       .from(issues)
       .where(eq(issues.id, issueId));
+    expect(issueRow?.status).toBe("todo");
     expect(issueRow?.planProposedAt?.toISOString()).toBe(proposedAt.toISOString());
     expect(issueRow?.planApprovedAt).toBeTruthy();
 
@@ -386,6 +388,80 @@ describeEmbeddedPostgres("approvalService linked work_plan sync", () => {
       status: "rejected",
       decidedByUserId: "board-user",
       decisionNote: "redo the plan",
+    });
+  });
+
+  it("rejectWithLinkedIssueSync returns an in_review issue to todo when the work_plan is rejected", async () => {
+    const companyId = randomUUID();
+    const requesterAgentId = randomUUID();
+    const approvalId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "PAP",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: requesterAgentId,
+      companyId,
+      name: "Requester",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Child issue",
+      status: "in_review",
+      priority: "medium",
+      assigneeAgentId: requesterAgentId,
+      planProposedAt: new Date("2026-04-16T10:00:00.000Z"),
+      planApprovedAt: null,
+    });
+    await db.insert(approvals).values({
+      id: approvalId,
+      companyId,
+      type: "work_plan",
+      status: "pending",
+      payload: { issueId },
+      requestedByAgentId: requesterAgentId,
+      targetUserId: "board-user",
+      routingMode: "board_pool",
+    });
+    await db.insert(issueApprovals).values({
+      companyId,
+      issueId,
+      approvalId,
+      linkedByAgentId: requesterAgentId,
+    });
+
+    const result = await svc.rejectWithLinkedIssueSync(approvalId, {
+      decidedByUserId: "board-user",
+      decidedByAgentId: null,
+      decisionNote: "redo the plan",
+    });
+
+    expect(result.applied).toBe(true);
+    expect(result.approval.status).toBe("rejected");
+
+    const [issueRow] = await db
+      .select({
+        status: issues.status,
+        planProposedAt: issues.planProposedAt,
+        planApprovedAt: issues.planApprovedAt,
+      })
+      .from(issues)
+      .where(eq(issues.id, issueId));
+    expect(issueRow).toEqual({
+      status: "todo",
+      planProposedAt: null,
+      planApprovedAt: null,
     });
   });
 

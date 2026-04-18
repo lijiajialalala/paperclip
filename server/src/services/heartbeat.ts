@@ -64,6 +64,13 @@ import {
   type SessionCompactionPolicy,
 } from "@paperclipai/adapter-utils";
 import { loadConfig } from "../config.js";
+import {
+  getProcessHeartbeatServerBootMarker,
+  PROCESS_LOST_ERROR_CODE,
+  SERVER_RESTARTED_ERROR_CODE,
+  runBelongsToDifferentServerBoot,
+  writeHeartbeatServerBootMarker,
+} from "./runtime-interruption.js";
 
 const MAX_LIVE_LOG_CHUNK_BYTES = 8 * 1024;
 const HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT = 1;
@@ -121,9 +128,9 @@ export function classifyAutomaticRetry(input: {
   const errorCode = readNonEmptyString(input.errorCode)?.toLowerCase() ?? "";
   const errorMessage = readNonEmptyString(input.errorMessage)?.toLowerCase() ?? "";
 
-  if (errorCode === "process_lost") {
+  if (errorCode === PROCESS_LOST_ERROR_CODE || errorCode === SERVER_RESTARTED_ERROR_CODE) {
     return {
-      reason: "process_lost",
+      reason: PROCESS_LOST_ERROR_CODE,
       maxAttempts: 2,
     };
   }
@@ -1343,6 +1350,7 @@ function resolveNextSessionState(input: {
 
 export function heartbeatService(db: Db) {
   const heartbeatSchedulerEnabled = loadConfig().heartbeatSchedulerEnabled;
+  const serverBootMarker = getProcessHeartbeatServerBootMarker();
   const instanceSettings = instanceSettingsService(db);
   const getCurrentUserRedactionOptions = async () => ({
     enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
@@ -2425,11 +2433,13 @@ export function heartbeatService(db: Db) {
     }
 
     const claimedAt = new Date();
+    const claimedContextSnapshot = writeHeartbeatServerBootMarker(run.contextSnapshot, serverBootMarker);
     const claimed = await db
       .update(heartbeatRuns)
       .set({
         status: "running",
         startedAt: run.startedAt ?? claimedAt,
+        contextSnapshot: claimedContextSnapshot,
         updatedAt: claimedAt,
       })
       .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "queued")))
@@ -2566,15 +2576,28 @@ export function heartbeatService(db: Db) {
         continue;
       }
 
-      const baseMessage = run.processPid
-        ? `Process lost -- child pid ${run.processPid} is no longer running`
-        : "Process lost -- server may have restarted";
+      const runFromPreviousServerBoot =
+        tracksLocalChild && runBelongsToDifferentServerBoot(run.contextSnapshot, serverBootMarker);
+      const runtimeInterruptionErrorCode = runFromPreviousServerBoot
+        ? SERVER_RESTARTED_ERROR_CODE
+        : PROCESS_LOST_ERROR_CODE;
+      const baseMessage = runFromPreviousServerBoot
+        ? (
+            run.processPid
+              ? `Server restarted -- child pid ${run.processPid} from a previous Paperclip server process is no longer running`
+              : "Server restarted -- run belonged to a previous Paperclip server process"
+          )
+        : (
+            run.processPid
+              ? `Process lost -- child pid ${run.processPid} is no longer running`
+              : "Process lost -- server may have restarted"
+          );
       const retryPlan =
-        tracksLocalChild && run.processPid
+        tracksLocalChild && (run.processPid || runFromPreviousServerBoot)
           ? resolveAutomaticRetryPlan(
               run,
               {
-                errorCode: "process_lost",
+                errorCode: runtimeInterruptionErrorCode,
                 errorMessage: baseMessage,
               },
               now,
@@ -2585,7 +2608,7 @@ export function heartbeatService(db: Db) {
 
       let finalizedRun = await setRunStatus(run.id, "failed", {
         error: shouldRetry ? `${baseMessage}; retrying once` : baseMessage,
-        errorCode: "process_lost",
+        errorCode: runtimeInterruptionErrorCode,
         finishedAt: now,
       });
       await setWakeupStatus(run.wakeupRequestId, "failed", {
@@ -2617,6 +2640,7 @@ export function heartbeatService(db: Db) {
         level: "error",
         message: lifecycleMessage,
         payload: {
+          runtimeInterruption: runtimeInterruptionErrorCode,
           ...(run.processPid ? { processPid: run.processPid } : {}),
           ...(retriedRunId ? { retryRunId: retriedRunId } : {}),
           ...(retryResult.retrySuppressedByScheduler ? { automaticRetrySuppressed: "scheduler_disabled" } : {}),
@@ -2630,10 +2654,10 @@ export function heartbeatService(db: Db) {
       }
 
       // Fix #4: Write a traceable blocker comment to the linked Issue when
-      // process_lost exhausts retries on an ENGINEERING run.
+      // a runtime interruption exhausts retries on an ENGINEERING run.
       //
       // IMPORTANT: QA agent runs are explicitly excluded.
-      // Their process_lost lifecycle is handled by qaWritebackService.settleTerminalQaRun
+      // Their runtime interruption lifecycle is handled by qaWritebackService.settleTerminalQaRun
       // which emits platform_interrupted (canCloseUpstream: null, no comment).
       // Writing a blocker/recovery comment here for QA runs would:
       //  1. Contradict the neutral QA contract defined in qa-writeback.ts
@@ -2651,7 +2675,7 @@ export function heartbeatService(db: Db) {
           if (!isQaAgent) {
             const stderrExcerpt = readNonEmptyString((finalizedRun as any).stderrExcerpt);
             const lines = [
-              "## ⚠️ Platform Interruption — process_lost",
+              `## ⚠️ Platform Interruption — ${runtimeInterruptionErrorCode}`,
               "",
               `- **Run:** \`${finalizedRun.id}\``,
               run.processPid ? `- **PID:** \`${run.processPid}\`` : null,
@@ -2664,11 +2688,11 @@ export function heartbeatService(db: Db) {
 
             await issuesSvc
               .addComment(issueId, lines, { agentId: undefined, userId: undefined, runId: finalizedRun.id })
-              .catch((err) => logger.warn({ err, issueId, runId: finalizedRun.id }, "failed to post process_lost blocker comment"));
+              .catch((err) => logger.warn({ err, issueId, runId: finalizedRun.id }, "failed to post runtime interruption blocker comment"));
           } else {
             logger.info(
               { runId: finalizedRun.id, issueId, agentRole: "qa" },
-              "skipping process_lost blocker comment for QA agent run — platform_interrupted is handled by QA writeback",
+              "skipping runtime interruption blocker comment for QA agent run — platform_interrupted is handled by QA writeback",
             );
           }
         }

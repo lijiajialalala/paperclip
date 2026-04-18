@@ -1,4 +1,5 @@
 export type IssuePlanPolicyRecord = {
+  originKind?: string | null;
   parentId?: string | null;
   assigneeAgentId?: string | null;
   planProposedAt?: Date | string | null;
@@ -20,6 +21,7 @@ function readDate(value: Date | string | null | undefined): Date | null {
 }
 
 export function issueRequiresApprovedPlan(issue: IssuePlanPolicyRecord): boolean {
+  if (issue.originKind === "routine_execution") return false;
   return Boolean(issue.parentId && issue.assigneeAgentId);
 }
 

@@ -57,6 +57,7 @@ export type QaIssueWritebackStatus =
   | "agent_written"
   | "platform_written"
   | "platform_repaired_partial"
+  | "platform_interrupted"
   | "alerted_missing"
   | "alerted_inconclusive";
 

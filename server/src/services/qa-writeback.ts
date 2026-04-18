@@ -7,6 +7,7 @@ import { getIssueExecutionPlanGateReason } from "./issue-plan-policy.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { getTelemetryClient } from "../telemetry.js";
 import { redactCurrentUserText } from "../log-redaction.js";
+import { isRuntimeInterruptionErrorCode } from "./runtime-interruption.js";
 
 export type QaVerdict = "pass" | "fail" | "inconclusive";
 
@@ -377,7 +378,7 @@ export function qaWritebackService(db: Db) {
         return { issueWriteback: existingWriteback };
       }
 
-      if (input.run.errorCode === "process_lost") {
+      if (isRuntimeInterruptionErrorCode(input.run.errorCode)) {
         // platform_interrupted is a neutral status: it does NOT block canCloseUpstream.
         // The QA gate must not penalize product completion for platform-level failures.
         return {

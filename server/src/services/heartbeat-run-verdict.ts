@@ -1,3 +1,9 @@
+import {
+  PROCESS_LOST_ERROR_CODE,
+  SERVER_RESTARTED_ERROR_CODE,
+  isRuntimeInterruptionErrorCode,
+} from "./runtime-interruption.js";
+
 export type HeartbeatRunBusinessVerdictKind = "passed" | "changes_requested" | "blocked" | "unknown";
 
 export interface HeartbeatRunBusinessVerdict {
@@ -61,13 +67,18 @@ export function deriveHeartbeatRunBusinessVerdict(
   }
 
   if (errorCode || error) {
-    if (errorCode === "process_lost") {
+    if (isRuntimeInterruptionErrorCode(errorCode)) {
       return {
         kind: "unknown",
         rawVerdict: null,
         source: "run_error",
-        reasonCode: "process_lost",
-        message: "Platform process lost",
+        reasonCode: errorCode,
+        message:
+          errorCode === SERVER_RESTARTED_ERROR_CODE
+            ? "Paperclip server restarted during execution"
+            : errorCode === PROCESS_LOST_ERROR_CODE
+              ? "Platform process lost"
+              : "Platform runtime interrupted",
       };
     }
     return {

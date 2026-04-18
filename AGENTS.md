@@ -118,6 +118,21 @@ pnpm build
 
 If anything cannot be run, explicitly report what was not run and why.
 
+## 7.1 Repro-First Bugfix Policy
+
+For bugs, regressions, flaky behavior, status drift, or reliability work:
+
+1. Use `$repro-first-bugfix` before changing code.
+2. Write a stable reproduction procedure first:
+   - prerequisites
+   - exact steps
+   - expected result
+   - actual result
+   - evidence source
+3. When practical, turn the reproduction into a failing test or deterministic script before implementation.
+4. If the bug is not yet reproducible, improve observability first instead of guessing at a fix.
+5. After the change, rerun the same reproduction procedure. A bug is only fixed when the original reproduction no longer succeeds.
+
 ## 8. API and Auth Expectations
 
 - Base path: `/api`
