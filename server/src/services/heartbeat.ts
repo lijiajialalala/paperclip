@@ -1357,7 +1357,11 @@ export function heartbeatService(db: Db) {
   const secretsSvc = secretService(db);
   const companySkills = companySkillService(db);
   const issuesSvc = issueService(db);
-  const qaWriteback = qaWritebackService(db);
+  const qaWriteback = qaWritebackService(db, {
+    heartbeat: {
+      wakeup: enqueueWakeup,
+    },
+  });
   const executionWorkspacesSvc = executionWorkspaceService(db);
   const workspaceOperationsSvc = workspaceOperationService(db);
   const activeRunExecutions = new Set<string>();

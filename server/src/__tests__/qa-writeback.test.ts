@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
   agents,
@@ -88,6 +88,21 @@ describeEmbeddedPostgres("qaWritebackService", () => {
     return { companyId, qaAgentId, issueId };
   }
 
+  async function seedAgent(input: { companyId: string; agentId: string; name: string; role: string; reportsTo?: string | null }) {
+    await db.insert(agents).values({
+      id: input.agentId,
+      companyId: input.companyId,
+      name: input.name,
+      role: input.role,
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+      reportsTo: input.reportsTo ?? null,
+    });
+  }
+
   async function getRun(runId: string) {
     return db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)).then((rows) => rows[0]!);
   }
@@ -103,6 +118,38 @@ describeEmbeddedPostgres("qaWritebackService", () => {
   it("writes a durable pass verdict to the issue and run", async () => {
     const { companyId, qaAgentId, issueId } = await seedFixture();
     const createdAt = new Date("2026-04-08T00:00:00.000Z");
+    const parentAssigneeAgentId = randomUUID();
+    const parentIssueId = randomUUID();
+    const heartbeat = {
+      wakeup: vi.fn(async () => undefined),
+    };
+
+    await seedAgent({
+      companyId,
+      agentId: parentAssigneeAgentId,
+      name: "Tech Lead",
+      role: "tech_lead",
+    });
+
+    await db.insert(issues).values({
+      id: parentIssueId,
+      companyId,
+      issueNumber: 40,
+      identifier: "CMPA-40",
+      title: "Parent task",
+      status: "in_progress",
+      priority: "high",
+      assigneeAgentId: parentAssigneeAgentId,
+    });
+
+    await db
+      .update(issues)
+      .set({
+        parentId: parentIssueId,
+        planProposedAt: new Date("2026-04-07T23:55:00.000Z"),
+        planApprovedAt: new Date("2026-04-07T23:58:00.000Z"),
+      })
+      .where(eq(issues.id, issueId));
 
     await db.insert(heartbeatRuns).values({
       id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -124,7 +171,7 @@ describeEmbeddedPostgres("qaWritebackService", () => {
 
     const run = await getRun("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
     const agent = await getAgent(qaAgentId);
-    const settlement = await qaWritebackService(db).settleTerminalQaRun({
+    const settlement = await (qaWritebackService as any)(db, { heartbeat }).settleTerminalQaRun({
       run,
       runAgent: agent,
       issueId,
@@ -140,6 +187,23 @@ describeEmbeddedPostgres("qaWritebackService", () => {
     expect(comments).toHaveLength(1);
     expect(comments[0]?.body).toContain("## QA Verdict");
     expect(comments[0]?.body).toContain("Verdict: pass");
+    expect(heartbeat.wakeup).toHaveBeenCalledWith(
+      parentAssigneeAgentId,
+      expect.objectContaining({
+        reason: "child_issue_completed",
+        payload: expect.objectContaining({
+          issueId: parentIssueId,
+          childIssueId: issueId,
+          mutation: "child_done",
+        }),
+        contextSnapshot: expect.objectContaining({
+          issueId: parentIssueId,
+          childIssueId: issueId,
+          source: "issue.child_completed",
+          wakeReason: "child_issue_completed",
+        }),
+      }),
+    );
   });
 
   it("uses platform_interrupted (not alerted_missing) when the run failed with process_lost", async () => {
@@ -329,6 +393,17 @@ describeEmbeddedPostgres("qaWritebackService", () => {
     const createdAt = new Date("2026-04-08T00:30:00.000Z");
     const agent = await getAgent(qaAgentId);
     const parentIssueId = randomUUID();
+    const parentAssigneeAgentId = randomUUID();
+    const heartbeat = {
+      wakeup: vi.fn(async () => undefined),
+    };
+
+    await seedAgent({
+      companyId,
+      agentId: parentAssigneeAgentId,
+      name: "Research Lead",
+      role: "research_lead",
+    });
 
     await db.insert(issues).values({
       id: parentIssueId,
@@ -338,7 +413,7 @@ describeEmbeddedPostgres("qaWritebackService", () => {
       title: "Parent task",
       status: "in_progress",
       priority: "high",
-      assigneeAgentId: qaAgentId,
+      assigneeAgentId: parentAssigneeAgentId,
     });
 
     await db
@@ -370,7 +445,7 @@ describeEmbeddedPostgres("qaWritebackService", () => {
     });
 
     const run = await getRun("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee");
-    const settlement = await qaWritebackService(db).settleTerminalQaRun({
+    const settlement = await (qaWritebackService as any)(db, { heartbeat }).settleTerminalQaRun({
       run,
       runAgent: agent,
       issueId,
@@ -387,6 +462,23 @@ describeEmbeddedPostgres("qaWritebackService", () => {
     expect(updatedIssue.status).toBe("blocked");
     expect(comments).toHaveLength(1);
     expect(comments[0]?.body).toContain("Type: missing_plan_approval");
+    expect(heartbeat.wakeup).toHaveBeenCalledWith(
+      parentAssigneeAgentId,
+      expect.objectContaining({
+        reason: "child_issue_blocked",
+        payload: expect.objectContaining({
+          issueId: parentIssueId,
+          childIssueId: issueId,
+          mutation: "child_blocked",
+        }),
+        contextSnapshot: expect.objectContaining({
+          issueId: parentIssueId,
+          childIssueId: issueId,
+          source: "issue.child_blocked",
+          wakeReason: "child_issue_blocked",
+        }),
+      }),
+    );
   });
 
   it("is idempotent: calling settleTerminalQaRun twice does not write extra comments", async () => {

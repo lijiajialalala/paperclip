@@ -3,6 +3,11 @@ import type { Db } from "@paperclipai/db";
 import { activityLog, agents, heartbeatRuns, issueComments, issues } from "@paperclipai/db";
 import { normalizeAgentUrlKey } from "@paperclipai/shared";
 import { logActivity } from "./activity-log.js";
+import {
+  queueParentIssueCloseoutWake,
+  resolveParentIssueCloseoutWakeReason,
+  type IssueParentCloseoutWakeDeps,
+} from "./issue-parent-closeout-wakeup.js";
 import { getIssueExecutionPlanGateReason } from "./issue-plan-policy.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { getTelemetryClient } from "../telemetry.js";
@@ -301,7 +306,11 @@ export interface QaWritebackSettlement {
   issueWriteback: QaIssueWriteback;
 }
 
-export function qaWritebackService(db: Db) {
+export interface QaWritebackServiceDeps {
+  heartbeat?: IssueParentCloseoutWakeDeps;
+}
+
+export function qaWritebackService(db: Db, deps: QaWritebackServiceDeps = {}) {
   const settings = instanceSettingsService(db);
 
   async function insertIssueComment(issue: IssueRow, body: string, actor: { agentId: string; runId: string }) {
@@ -329,14 +338,44 @@ export function qaWritebackService(db: Db) {
     return comment;
   }
 
-  async function updateIssueStatus(issue: IssueRow, status: IssueRow["status"]) {
+  async function updateIssueStatus(
+    issue: IssueRow,
+    status: IssueRow["status"],
+    actor?: { requestedByActorType?: "user" | "agent" | "system"; requestedByActorId?: string | null },
+  ) {
     const now = new Date();
     const [updated] = await db
       .update(issues)
       .set(buildIssueStatusPatch(status, now))
       .where(eq(issues.id, issue.id))
       .returning();
-    return updated ?? issue;
+    const nextIssue = updated ?? issue;
+    const closeoutReason = resolveParentIssueCloseoutWakeReason({
+      previousStatus: issue.status,
+      nextStatus: nextIssue.status,
+    });
+
+    if (deps.heartbeat && nextIssue.parentId && closeoutReason) {
+      const parentIssue = await db
+        .select({
+          id: issues.id,
+          assigneeAgentId: issues.assigneeAgentId,
+        })
+        .from(issues)
+        .where(eq(issues.id, nextIssue.parentId))
+        .then((rows) => rows[0] ?? null);
+
+      await queueParentIssueCloseoutWake({
+        heartbeat: deps.heartbeat,
+        parentIssue,
+        childIssue: nextIssue,
+        closeoutReason,
+        requestedByActorType: actor?.requestedByActorType,
+        requestedByActorId: actor?.requestedByActorId ?? null,
+      });
+    }
+
+    return nextIssue;
   }
 
   async function writeIssueWriteback(run: HeartbeatRunRow, issueWriteback: QaIssueWriteback) {
@@ -526,7 +565,10 @@ export function qaWritebackService(db: Db) {
         }
 
         if (alertType === "missing_plan_approval" && issue.status !== "blocked") {
-          await updateIssueStatus(issue, "blocked");
+          await updateIssueStatus(issue, "blocked", {
+            requestedByActorType: "agent",
+            requestedByActorId: input.runAgent.id,
+          });
           await logActivity(db, {
             companyId: issue.companyId,
             actorType: "agent",
@@ -617,7 +659,10 @@ export function qaWritebackService(db: Db) {
         }
 
         if (shouldPatchStatus) {
-          await updateIssueStatus(issue, desiredStatus);
+          await updateIssueStatus(issue, desiredStatus, {
+            requestedByActorType: "agent",
+            requestedByActorId: input.runAgent.id,
+          });
           await logActivity(db, {
             companyId: issue.companyId,
             actorType: "agent",
@@ -707,7 +752,10 @@ export function qaWritebackService(db: Db) {
         }
 
         if (issue.status !== "blocked") {
-          await updateIssueStatus(issue, "blocked");
+          await updateIssueStatus(issue, "blocked", {
+            requestedByActorType: "agent",
+            requestedByActorId: input.runAgent.id,
+          });
           await logActivity(db, {
             companyId: issue.companyId,
             actorType: "agent",
