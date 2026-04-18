@@ -348,6 +348,81 @@ describeEmbeddedPostgres("projectService issue lifecycle", () => {
     ).resolves.toEqual([]);
   });
 
+  it("re-roots detached cross-project children when deleting a project issue graph", async () => {
+    const companyId = randomUUID();
+    const projectAId = randomUUID();
+    const projectBId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "CMPA",
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(projects).values([
+      {
+        id: projectAId,
+        companyId,
+        name: "Project A",
+        status: "in_progress",
+      },
+      {
+        id: projectBId,
+        companyId,
+        name: "Project B",
+        status: "in_progress",
+      },
+    ]);
+
+    const root = await issueSvc.create(companyId, {
+      projectId: projectAId,
+      title: "Project A root",
+      status: "todo",
+      priority: "medium",
+    });
+
+    const crossProjectChild = await issueSvc.create(companyId, {
+      projectId: projectBId,
+      parentId: root.id,
+      title: "Project B child",
+      status: "todo",
+      priority: "medium",
+    });
+
+    const descendant = await issueSvc.create(companyId, {
+      projectId: projectBId,
+      parentId: crossProjectChild.id,
+      title: "Project B descendant",
+      status: "todo",
+      priority: "medium",
+    });
+
+    await expect(projectSvc.remove(projectAId)).resolves.toEqual(expect.objectContaining({ id: projectAId }));
+
+    const survivingRows = await db
+      .select({
+        id: issues.id,
+        parentId: issues.parentId,
+        taskRootIssueId: issues.taskRootIssueId,
+      })
+      .from(issues)
+      .where(eq(issues.projectId, projectBId));
+
+    expect(survivingRows).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: crossProjectChild.id,
+        parentId: null,
+        taskRootIssueId: crossProjectChild.id,
+      }),
+      expect.objectContaining({
+        id: descendant.id,
+        parentId: crossProjectChild.id,
+        taskRootIssueId: crossProjectChild.id,
+      }),
+    ]));
+  });
+
   it("removes approvals that become orphaned after project issue deletion", async () => {
     const companyId = randomUUID();
     const projectId = randomUUID();

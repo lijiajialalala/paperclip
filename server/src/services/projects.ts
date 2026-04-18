@@ -43,6 +43,7 @@ import { parseProjectExecutionWorkspacePolicy } from "./execution-workspace-poli
 import { mergeProjectWorkspaceRuntimeConfig, readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-config.js";
 import { resolveManagedProjectWorkspaceDir } from "../home-paths.js";
 import { approvalService } from "./approvals.js";
+import { repairTaskRootReferencesForDeletedIssues } from "./issue-task-roots.js";
 
 type ProjectRow = typeof projects.$inferSelect;
 type ProjectWorkspaceRow = typeof projectWorkspaces.$inferSelect;
@@ -419,6 +420,7 @@ async function deleteProjectIssueGraph(dbOrTx: any, projectId: string) {
         ),
       ),
     );
+  await repairTaskRootReferencesForDeletedIssues(dbOrTx, issueIds);
 
   const linkedApprovalIds = await dbOrTx
     .select({ approvalId: issueApprovals.approvalId })

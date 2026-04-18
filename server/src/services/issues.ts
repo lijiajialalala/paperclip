@@ -53,6 +53,11 @@ import { resolveIssueGoalId, resolveNextIssueGoalId } from "./issue-goal-fallbac
 import { getDefaultCompanyGoal } from "./goals.js";
 import { issueApprovalService } from "./issue-approvals.js";
 import { PROCESS_LOST_ERROR_CODE, SERVER_RESTARTED_ERROR_CODE } from "./runtime-interruption.js";
+import {
+  repairTaskRootReferencesForDeletedIssues,
+  resolveTaskRootIssueId,
+  syncTaskRootForDescendants,
+} from "./issue-task-roots.js";
 
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
@@ -221,43 +226,6 @@ async function getWorkspaceInheritanceIssue(
     throw notFound("Workspace inheritance issue not found");
   }
   return issue;
-}
-
-function resolveTaskRootIssueId(issue: { id: string; taskRootIssueId: string | null }) {
-  return issue.taskRootIssueId ?? issue.id;
-}
-
-async function syncTaskRootForDescendants(
-  dbOrTx: any,
-  rootIssueId: string,
-  taskRootIssueId: string,
-) {
-  const queue: string[] = [rootIssueId];
-  const visited = new Set<string>(queue);
-
-  while (queue.length > 0) {
-    const batch = queue.splice(0, 50);
-    const children = await dbOrTx
-      .select({ id: issues.id })
-      .from(issues)
-      .where(inArray(issues.parentId, batch));
-
-    const childIds = children
-      .map((row: { id: string }) => row.id)
-      .filter((childId: string) => !visited.has(childId));
-
-    if (childIds.length === 0) continue;
-
-    await dbOrTx
-      .update(issues)
-      .set({ taskRootIssueId })
-      .where(inArray(issues.id, childIds));
-
-    for (const childId of childIds) {
-      visited.add(childId);
-      queue.push(childId);
-    }
-  }
 }
 
 function isAuthoritativeBusinessVerdict(
@@ -2388,6 +2356,7 @@ export function issueService(db: Db) {
         await tx
           .delete(activityLog)
           .where(and(eq(activityLog.entityType, "issue"), eq(activityLog.entityId, id)));
+        await repairTaskRootReferencesForDeletedIssues(tx, [id]);
 
         const removedIssue = await tx
           .delete(issues)

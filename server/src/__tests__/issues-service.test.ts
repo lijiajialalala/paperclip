@@ -3579,5 +3579,71 @@ describeEmbeddedPostgres("issueService.remove cleanup", () => {
       .where(eq(routineRuns.companyId, companyId));
     expect(routineRows).toEqual([{ linkedIssueId: null }]);
   });
+
+  it("re-roots surviving inherited follow-ups when deleting their source issue", async () => {
+    const companyId = randomUUID();
+    const projectId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "CMPA",
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(projects).values({
+      id: projectId,
+      companyId,
+      name: "Cleanup project",
+      status: "in_progress",
+    });
+
+    const source = await svc.create(companyId, {
+      projectId,
+      title: "Source task",
+      status: "todo",
+      priority: "medium",
+    });
+
+    const followUp = await svc.create(companyId, {
+      projectId,
+      title: "Follow-up task",
+      status: "todo",
+      priority: "medium",
+      inheritExecutionWorkspaceFromIssueId: source.id,
+    });
+
+    const descendant = await svc.create(companyId, {
+      projectId,
+      parentId: followUp.id,
+      title: "Follow-up child",
+      status: "todo",
+      priority: "medium",
+    });
+
+    await expect(svc.remove(source.id)).resolves.toEqual(expect.objectContaining({ id: source.id }));
+
+    const survivingRows = await db
+      .select({
+        id: issues.id,
+        parentId: issues.parentId,
+        taskRootIssueId: issues.taskRootIssueId,
+      })
+      .from(issues)
+      .where(inArray(issues.id, [followUp.id, descendant.id]));
+
+    expect(survivingRows).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: followUp.id,
+        parentId: null,
+        taskRootIssueId: followUp.id,
+      }),
+      expect.objectContaining({
+        id: descendant.id,
+        parentId: followUp.id,
+        taskRootIssueId: followUp.id,
+      }),
+    ]));
+  });
 });
 
