@@ -43,6 +43,7 @@ vi.mock("@paperclipai/shared/telemetry", async () => {
 
 import { heartbeatService } from "../services/heartbeat.ts";
 import { issueService } from "../services/issues.ts";
+import { getProcessHeartbeatServerBootMarker } from "../services/runtime-interruption.ts";
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 const embeddedPostgresSuiteTimeoutMs = 60_000;
@@ -321,6 +322,43 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       .where(eq(issues.id, issueId))
       .then((rows) => rows[0] ?? null);
     expect(issue?.executionRunId).toBe(retryRun?.id ?? null);
+  });
+
+  it("does not misclassify same-process runs as server_restarted when reaped by another heartbeat service instance", async () => {
+    const heartbeatA = heartbeatService(db);
+    const heartbeatB = heartbeatService(db);
+    const { agentId, runId, issueId } = await seedRunFixture({
+      processPid: 999_999_999,
+    });
+
+    await db
+      .update(heartbeatRuns)
+      .set({
+        contextSnapshot: {
+          issueId,
+          paperclipServerBoot: getProcessHeartbeatServerBootMarker(),
+        },
+      })
+      .where(eq(heartbeatRuns.id, runId));
+
+    const result = await heartbeatB.reapOrphanedRuns();
+    expect(result.reaped).toBe(1);
+    expect(result.runIds).toEqual([runId]);
+
+    const runs = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.agentId, agentId));
+    expect(runs).toHaveLength(2);
+
+    const failedRun = runs.find((row) => row.id === runId);
+    const retryRun = runs.find((row) => row.id !== runId);
+    expect(failedRun?.status).toBe("failed");
+    expect(failedRun?.errorCode).toBe("process_lost");
+    expect(retryRun?.status).toBe("queued");
+    expect(retryRun?.retryOfRunId).toBe(runId);
+
+    expect(heartbeatA).toBeTruthy();
   });
 
   it("queues a second retry when one process-loss retry was already used", async () => {

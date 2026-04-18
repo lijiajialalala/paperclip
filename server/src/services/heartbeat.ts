@@ -65,6 +65,7 @@ import {
 } from "@paperclipai/adapter-utils";
 import { loadConfig } from "../config.js";
 import {
+  getProcessHeartbeatServerBootMarker,
   PROCESS_LOST_ERROR_CODE,
   SERVER_RESTARTED_ERROR_CODE,
   runBelongsToDifferentServerBoot,
@@ -1349,10 +1350,7 @@ function resolveNextSessionState(input: {
 
 export function heartbeatService(db: Db) {
   const heartbeatSchedulerEnabled = loadConfig().heartbeatSchedulerEnabled;
-  const serverBootMarker = {
-    pid: Number.isInteger(process.pid) && process.pid > 0 ? process.pid : null,
-    bootedAt: new Date().toISOString(),
-  };
+  const serverBootMarker = getProcessHeartbeatServerBootMarker();
   const instanceSettings = instanceSettingsService(db);
   const getCurrentUserRedactionOptions = async () => ({
     enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,

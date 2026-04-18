@@ -12,10 +12,18 @@ export type RuntimeInterruptionErrorCode = (typeof RUNTIME_INTERRUPTION_ERROR_CO
 
 const RUNTIME_INTERRUPTION_ERROR_CODE_SET = new Set<string>(RUNTIME_INTERRUPTION_ERROR_CODES);
 const SERVER_BOOT_CONTEXT_KEY = "paperclipServerBoot";
+const PROCESS_HEARTBEAT_SERVER_BOOT_MARKER: HeartbeatServerBootMarker = Object.freeze({
+  pid: Number.isInteger(process.pid) && process.pid > 0 ? process.pid : null,
+  bootedAt: new Date().toISOString(),
+});
 
 export interface HeartbeatServerBootMarker {
   pid: number | null;
   bootedAt: string;
+}
+
+export function getProcessHeartbeatServerBootMarker(): HeartbeatServerBootMarker {
+  return PROCESS_HEARTBEAT_SERVER_BOOT_MARKER;
 }
 
 export function isRuntimeInterruptionErrorCode(value: unknown): value is RuntimeInterruptionErrorCode {
