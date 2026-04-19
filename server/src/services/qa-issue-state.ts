@@ -1,11 +1,10 @@
-import { and, desc, eq, gt, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { activityLog, agents, heartbeatRuns, issueComments, issues } from "@paperclipai/db";
+import { agents, heartbeatRuns, issues } from "@paperclipai/db";
 import type { QaIssueWriteback, QaVerdict } from "./qa-writeback.js";
 import {
   buildQaIssueWriteback,
   classifyQaVerdictFromRun,
-  parseQaVerdictFromBody,
   readQaIssueWriteback,
 } from "./qa-writeback.js";
 import { isRuntimeInterruptionErrorCode } from "./runtime-interruption.js";
@@ -156,62 +155,9 @@ export function qaIssueStateService(db: Db) {
               alertType: "missing_writeback",
             }));
       const baseSummary = buildSummaryFromWriteback(latestRun, persistedWriteback);
-
-      if (!baseSummary.alertOpen) {
-        return baseSummary;
-      }
-
-      const afterTime = persistedWriteback?.writebackAt ? new Date(persistedWriteback.writebackAt) : latestRun.finishedAt;
-      if (!afterTime) return baseSummary;
-
-      const [recoveryComment, laterDoneStatus] = await Promise.all([
-        db
-          .select({
-            id: issueComments.id,
-            body: issueComments.body,
-            createdAt: issueComments.createdAt,
-          })
-          .from(issueComments)
-          .where(and(eq(issueComments.issueId, issueId), gt(issueComments.createdAt, afterTime)))
-          .orderBy(desc(issueComments.createdAt))
-          .then((rows) => rows.find((row) => parseQaVerdictFromBody(row.body) != null) ?? null),
-        db
-          .select({ details: activityLog.details, createdAt: activityLog.createdAt })
-          .from(activityLog)
-          .where(
-            and(
-              eq(activityLog.entityType, "issue"),
-              eq(activityLog.entityId, issueId),
-              gt(activityLog.createdAt, afterTime),
-            ),
-          )
-          .orderBy(desc(activityLog.createdAt))
-          .then((rows) =>
-            rows.find((row) => readNonEmptyString(asRecord(row.details)?.status) === "done") ?? null),
-      ]);
-
-      const recoveredVerdict = parseQaVerdictFromBody(recoveryComment?.body) ?? baseSummary.verdict;
-      if (!recoveryComment && !laterDoneStatus) {
-        return baseSummary;
-      }
-
-      return {
-        verdict: recoveredVerdict,
-        source: "manual",
-        canCloseUpstream:
-          recoveredVerdict === "pass"
-            ? true
-            : recoveredVerdict === "fail" || recoveredVerdict === "inconclusive"
-              ? false
-              : baseSummary.canCloseUpstream,
-        latestRunId: baseSummary.latestRunId,
-        latestRunFinishedAt: baseSummary.latestRunFinishedAt,
-        writebackAt: recoveryComment?.createdAt?.toISOString() ?? laterDoneStatus?.createdAt?.toISOString() ?? baseSummary.writebackAt,
-        alertOpen: false,
-        alertType: null,
-        alertMessage: null,
-        latestLabel: "latest",
-      };
+      // QA issue state is intentionally derived from the durable run writeback only.
+      // Later issue comments or row-status edits are not authoritative QA settlement signals.
+      return baseSummary;
     },
 
     getRunIssueWriteback: async (runId: string): Promise<QaIssueWriteback | null> => {
