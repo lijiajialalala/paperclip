@@ -336,6 +336,7 @@ function normalizePaperclipWakeComment(value: unknown): PaperclipWakeComment | n
 
 export function normalizePaperclipWakePayload(value: unknown): PaperclipWakePayload | null {
   const payload = parseObject(value);
+  const issue = normalizePaperclipWakeIssue(payload.issue);
   const comments = Array.isArray(payload.comments)
     ? payload.comments
         .map((entry) => normalizePaperclipWakeComment(entry))
@@ -348,11 +349,11 @@ export function normalizePaperclipWakePayload(value: unknown): PaperclipWakePayl
         .map((entry) => entry.trim())
     : [];
 
-  if (comments.length === 0 && commentIds.length === 0) return null;
+  if (comments.length === 0 && commentIds.length === 0 && !issue) return null;
 
   return {
     reason: asString(payload.reason, "").trim() || null,
-    issue: normalizePaperclipWakeIssue(payload.issue),
+    issue,
     commentIds,
     latestCommentId: asString(payload.latestCommentId, "").trim() || null,
     comments,
@@ -377,23 +378,27 @@ export function renderPaperclipWakePrompt(
   const normalized = normalizePaperclipWakePayload(value);
   if (!normalized) return "";
   const resumedSession = options.resumedSession === true;
+  const hasInlineComments = normalized.comments.length > 0 || normalized.commentIds.length > 0;
 
-  const lines = resumedSession
-      ? [
-        "## Paperclip Resume Delta",
-        "",
-        "You are resuming an existing Paperclip session.",
-        "This heartbeat is scoped to the issue below. Do not switch to another issue until you have handled this wake.",
-        "Focus on the new wake delta below and continue the current task without restating the full heartbeat boilerplate.",
-        "Fetch the API thread only when `fallbackFetchNeeded` is true or you need broader history than this batch.",
-        "",
-        `- reason: ${normalized.reason ?? "unknown"}`,
-        `- issue: ${normalized.issue?.identifier ?? normalized.issue?.id ?? "unknown"}${normalized.issue?.title ? ` ${normalized.issue.title}` : ""}`,
-        `- pending comments: ${normalized.includedCount}/${normalized.requestedCount}`,
-        `- latest comment id: ${normalized.latestCommentId ?? "unknown"}`,
-        `- fallback fetch needed: ${normalized.fallbackFetchNeeded ? "yes" : "no"}`,
-      ]
-    : [
+  const lines = (() => {
+    if (hasInlineComments) {
+      if (resumedSession) {
+        return [
+          "## Paperclip Resume Delta",
+          "",
+          "You are resuming an existing Paperclip session.",
+          "This heartbeat is scoped to the issue below. Do not switch to another issue until you have handled this wake.",
+          "Focus on the new wake delta below and continue the current task without restating the full heartbeat boilerplate.",
+          "Fetch the API thread only when `fallbackFetchNeeded` is true or you need broader history than this batch.",
+          "",
+          `- reason: ${normalized.reason ?? "unknown"}`,
+          `- issue: ${normalized.issue?.identifier ?? normalized.issue?.id ?? "unknown"}${normalized.issue?.title ? ` ${normalized.issue.title}` : ""}`,
+          `- pending comments: ${normalized.includedCount}/${normalized.requestedCount}`,
+          `- latest comment id: ${normalized.latestCommentId ?? "unknown"}`,
+          `- fallback fetch needed: ${normalized.fallbackFetchNeeded ? "yes" : "no"}`,
+        ];
+      }
+      return [
         "## Paperclip Wake Payload",
         "",
         "Treat this wake payload as the highest-priority change for the current heartbeat.",
@@ -408,6 +413,38 @@ export function renderPaperclipWakePrompt(
         `- latest comment id: ${normalized.latestCommentId ?? "unknown"}`,
         `- fallback fetch needed: ${normalized.fallbackFetchNeeded ? "yes" : "no"}`,
       ];
+    }
+
+    if (resumedSession) {
+      return [
+        "## Paperclip Resume Scope",
+        "",
+        "You are resuming an existing Paperclip session.",
+        "This heartbeat is scoped to the issue below. Do not switch to another issue until you have handled this wake.",
+        "No inline comments accompanied this wake, so continue from the issue scope below instead of stale local session context.",
+        "",
+        `- reason: ${normalized.reason ?? "unknown"}`,
+        `- issue: ${normalized.issue?.identifier ?? normalized.issue?.id ?? "unknown"}${normalized.issue?.title ? ` ${normalized.issue.title}` : ""}`,
+        `- pending comments: ${normalized.includedCount}/${normalized.requestedCount}`,
+        `- latest comment id: ${normalized.latestCommentId ?? "none"}`,
+        `- fallback fetch needed: ${normalized.fallbackFetchNeeded ? "yes" : "no"}`,
+      ];
+    }
+
+    return [
+      "## Paperclip Wake Payload",
+      "",
+      "Treat this wake payload as the highest-priority scope for the current heartbeat.",
+      "This heartbeat is scoped to the issue below. Do not switch to another issue until you have handled this wake.",
+      "No inline comments accompanied this wake, so start from the issue scope below instead of stale local session context.",
+      "",
+      `- reason: ${normalized.reason ?? "unknown"}`,
+      `- issue: ${normalized.issue?.identifier ?? normalized.issue?.id ?? "unknown"}${normalized.issue?.title ? ` ${normalized.issue.title}` : ""}`,
+      `- pending comments: ${normalized.includedCount}/${normalized.requestedCount}`,
+      `- latest comment id: ${normalized.latestCommentId ?? "none"}`,
+      `- fallback fetch needed: ${normalized.fallbackFetchNeeded ? "yes" : "no"}`,
+    ];
+  })();
 
   if (normalized.issue?.status) {
     lines.push(`- issue status: ${normalized.issue.status}`);
@@ -426,6 +463,10 @@ export function renderPaperclipWakePrompt(
   }
   if (normalized.missingCount > 0) {
     lines.push(`- omitted comments: ${normalized.missingCount}`);
+  }
+
+  if (!hasInlineComments) {
+    return lines.join("\n").trim();
   }
 
   lines.push("", "New comments in order:");

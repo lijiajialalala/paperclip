@@ -1122,8 +1122,6 @@ async function buildPaperclipWakePayload(input: {
 }) {
   type PaperclipWakeIssueSummary = NonNullable<typeof input.issueSummary>;
   const commentIds = extractWakeCommentIds(input.contextSnapshot);
-  if (commentIds.length === 0) return null;
-
   const issueId = readNonEmptyString(input.contextSnapshot.issueId);
   const issueSummary: PaperclipWakeIssueSummary | null =
     input.issueSummary ??
@@ -1141,25 +1139,70 @@ async function buildPaperclipWakePayload(input: {
           .where(and(eq(issues.id, issueId), eq(issues.companyId, input.companyId)))
           .then((rows) => rows[0] ?? null)
       : null);
+  const shouldBuildIssueScopedWake =
+    commentIds.length === 0 &&
+    readNonEmptyString(input.contextSnapshot.wakeReason) === "issue_assigned" &&
+    Boolean(issueSummary);
+  if (commentIds.length === 0 && !shouldBuildIssueScopedWake) return null;
 
-  const commentRows = await input.db
-    .select({
-      id: issueComments.id,
-      issueId: issueComments.issueId,
-      body: issueComments.body,
-      authorAgentId: issueComments.authorAgentId,
-      authorUserId: issueComments.authorUserId,
-      createdAt: issueComments.createdAt,
-    })
-    .from(issueComments)
-    .where(
-      and(
-        eq(issueComments.companyId, input.companyId),
-        inArray(issueComments.id, commentIds),
-      ),
-    );
+  const commentRows =
+    commentIds.length === 0
+      ? []
+      : await input.db
+          .select({
+            id: issueComments.id,
+            issueId: issueComments.issueId,
+            body: issueComments.body,
+            authorAgentId: issueComments.authorAgentId,
+            authorUserId: issueComments.authorUserId,
+            createdAt: issueComments.createdAt,
+          })
+          .from(issueComments)
+          .where(
+            and(
+              eq(issueComments.companyId, input.companyId),
+              inArray(issueComments.id, commentIds),
+            ),
+          );
 
-  const commentsById = new Map(commentRows.map((comment) => [comment.id, comment]));
+  return buildPaperclipWakePayloadFromCommentRows({
+    contextSnapshot: input.contextSnapshot,
+    issueSummary,
+    commentRows,
+  });
+}
+
+export function buildPaperclipWakePayloadFromCommentRows(input: {
+  contextSnapshot: Record<string, unknown>;
+  issueSummary:
+    | {
+        id: string;
+        identifier: string | null;
+        title: string;
+        status: string;
+        priority: string;
+        taskRootIssueId?: string | null;
+        taskRootDir?: string | null;
+        deliverableRoot?: string | null;
+      }
+    | null;
+  commentRows: Array<{
+    id: string;
+    issueId: string;
+    body: string;
+    authorAgentId: string | null;
+    authorUserId: string | null;
+    createdAt: Date;
+  }>;
+}) {
+  const commentIds = extractWakeCommentIds(input.contextSnapshot);
+  const issueScopedAssignmentWake =
+    commentIds.length === 0 &&
+    readNonEmptyString(input.contextSnapshot.wakeReason) === "issue_assigned" &&
+    Boolean(input.issueSummary);
+  if (commentIds.length === 0 && !issueScopedAssignmentWake) return null;
+
+  const commentsById = new Map(input.commentRows.map((comment) => [comment.id, comment]));
   const comments: Array<Record<string, unknown>> = [];
   let remainingBodyChars = MAX_INLINE_WAKE_COMMENT_BODY_TOTAL_CHARS;
   let truncated = false;
@@ -1205,16 +1248,16 @@ async function buildPaperclipWakePayload(input: {
 
   return {
     reason: readNonEmptyString(input.contextSnapshot.wakeReason),
-    issue: issueSummary
+    issue: input.issueSummary
       ? {
-          id: issueSummary.id,
-          identifier: issueSummary.identifier,
-          title: issueSummary.title,
-          status: issueSummary.status,
-          priority: issueSummary.priority,
-          taskRootIssueId: issueSummary.taskRootIssueId ?? null,
-          taskRootDir: issueSummary.taskRootDir ?? null,
-          deliverableRoot: issueSummary.deliverableRoot ?? null,
+          id: input.issueSummary.id,
+          identifier: input.issueSummary.identifier,
+          title: input.issueSummary.title,
+          status: input.issueSummary.status,
+          priority: input.issueSummary.priority,
+          taskRootIssueId: input.issueSummary.taskRootIssueId ?? null,
+          taskRootDir: input.issueSummary.taskRootDir ?? null,
+          deliverableRoot: input.issueSummary.deliverableRoot ?? null,
         }
       : null,
     commentIds,
