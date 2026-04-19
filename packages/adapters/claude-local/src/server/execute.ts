@@ -33,6 +33,7 @@ import {
   isClaudeUnknownSessionError,
 } from "./parse.js";
 import { resolveClaudeDesiredSkillNames } from "./skills.js";
+import { prepareManagedClaudeConfigDir } from "./claude-home.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -68,6 +69,7 @@ interface ClaudeExecutionInput {
   config: Record<string, unknown>;
   context: Record<string, unknown>;
   authToken?: string;
+  onLog?: AdapterExecutionContext["onLog"];
 }
 
 interface ClaudeRuntimeConfig {
@@ -110,6 +112,7 @@ function resolveClaudeBillingType(env: Record<string, string>): "api" | "subscri
 
 async function buildClaudeRuntimeConfig(input: ClaudeExecutionInput): Promise<ClaudeRuntimeConfig> {
   const { runId, agent, config, context, authToken } = input;
+  const log = input.onLog ?? (async () => {});
 
   const command = asString(config.command, "claude");
   const workspaceContext = parseObject(context.paperclipWorkspace);
@@ -152,10 +155,21 @@ async function buildClaudeRuntimeConfig(input: ClaudeExecutionInput): Promise<Cl
   await ensureAbsoluteDirectory(cwd, { createIfMissing: true });
 
   const envConfig = parseObject(config.env);
+  const configuredClaudeConfigDir =
+    typeof envConfig.CLAUDE_CONFIG_DIR === "string" && envConfig.CLAUDE_CONFIG_DIR.trim().length > 0
+      ? path.resolve(envConfig.CLAUDE_CONFIG_DIR.trim())
+      : null;
+  const managedClaudeConfigDir = configuredClaudeConfigDir
+    ? null
+    : await prepareManagedClaudeConfigDir(process.env, log, agent.companyId, agent.id);
+  const effectiveClaudeConfigDir = configuredClaudeConfigDir ?? managedClaudeConfigDir;
   const hasExplicitApiKey =
     typeof envConfig.PAPERCLIP_API_KEY === "string" && envConfig.PAPERCLIP_API_KEY.trim().length > 0;
   const env: Record<string, string> = { ...buildPaperclipEnv(agent) };
   env.PAPERCLIP_RUN_ID = runId;
+  if (effectiveClaudeConfigDir) {
+    env.CLAUDE_CONFIG_DIR = effectiveClaudeConfigDir;
+  }
 
   const wakeTaskId =
     (typeof context.taskId === "string" && context.taskId.trim().length > 0 && context.taskId.trim()) ||
@@ -307,6 +321,7 @@ export async function runClaudeLogin(input: {
     config: input.config,
     context: input.context ?? {},
     authToken: input.authToken,
+    onLog,
   });
 
   const proc = await runChildProcess(input.runId, runtime.command, ["login"], {
@@ -355,6 +370,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     config,
     context,
     authToken,
+    onLog,
   });
   const {
     command,

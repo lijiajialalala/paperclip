@@ -5,6 +5,7 @@ import { resolveDefaultAgentWorkspaceDir } from "../home-paths.js";
 import {
   applySyntheticTimerAdapterDefaults,
   applyPersistedExecutionWorkspaceConfig,
+  buildPaperclipWakePayloadFromCommentRows,
   buildRealizedExecutionWorkspaceFromPersisted,
   buildExplicitResumeSessionOverride,
   deriveTaskKeyWithHeartbeatFallback,
@@ -436,6 +437,68 @@ describe("comment wake batching", () => {
     expect(merged.commentId).toBe("comment-2");
     expect(merged.wakeCommentId).toBe("comment-2");
     expect(merged.paperclipWake).toBeUndefined();
+  });
+});
+
+describe("buildPaperclipWakePayloadFromCommentRows", () => {
+  it("creates an issue-scoped wake payload for assignment wakes without comments", () => {
+    const payload = buildPaperclipWakePayloadFromCommentRows({
+      contextSnapshot: {
+        wakeReason: "issue_assigned",
+        issueId: "issue-1",
+      },
+      issueSummary: {
+        id: "issue-1",
+        identifier: "PAP-101",
+        title: "Run routine batch",
+        status: "todo",
+        priority: "medium",
+        taskRootIssueId: "task-root-1",
+      },
+      commentRows: [],
+    });
+
+    expect(payload).toMatchObject({
+      reason: "issue_assigned",
+      issue: {
+        id: "issue-1",
+        identifier: "PAP-101",
+        title: "Run routine batch",
+        status: "todo",
+        priority: "medium",
+        taskRootIssueId: "task-root-1",
+      },
+      commentIds: [],
+      latestCommentId: null,
+      comments: [],
+      commentWindow: {
+        requestedCount: 0,
+        includedCount: 0,
+        missingCount: 0,
+      },
+      truncated: false,
+      fallbackFetchNeeded: false,
+    });
+  });
+
+  it("does not synthesize issue-only wake payloads for non-assignment wakes", () => {
+    const payload = buildPaperclipWakePayloadFromCommentRows({
+      contextSnapshot: {
+        wakeReason: "manual_wakeup",
+        issueId: "issue-1",
+      },
+      issueSummary: {
+        id: "issue-1",
+        identifier: "PAP-101",
+        title: "Run routine batch",
+        status: "todo",
+        priority: "medium",
+        taskRootIssueId: "task-root-1",
+      },
+      commentRows: [],
+    });
+
+    expect(payload).toBeNull();
   });
 });
 

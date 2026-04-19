@@ -154,4 +154,32 @@ describe("renderPaperclipWakePrompt", () => {
     expect(prompt).toContain("task root dir: /workspace/.paperclip/tasks/task-root-1");
     expect(prompt).toContain("deliverable root: /workspace/.paperclip/tasks/task-root-1/deliverables");
   });
+
+  it("renders issue-scoped guidance even when an assignment wake has no inline comments", () => {
+    const prompt = renderPaperclipWakePrompt({
+      reason: "issue_assigned",
+      issue: {
+        id: "issue-1",
+        identifier: "PAP-102",
+        title: "Recover quality routine",
+        status: "todo",
+        priority: "high",
+      },
+      commentIds: [],
+      latestCommentId: null,
+      comments: [],
+      commentWindow: {
+        requestedCount: 0,
+        includedCount: 0,
+        missingCount: 0,
+      },
+      truncated: false,
+      fallbackFetchNeeded: false,
+    });
+
+    expect(prompt).toContain("issue: PAP-102 Recover quality routine");
+    expect(prompt).toContain("issue status: todo");
+    expect(prompt).toContain("issue priority: high");
+    expect(prompt).toContain("No inline comments accompanied this wake");
+  });
 });
