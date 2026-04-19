@@ -1,265 +1,174 @@
 ---
-title: Team Configuration Templates
-summary: A repeatable template for defining team topology, dispatch rules, handoffs, and recovery behavior
+title: 团队配置模板
+summary: 用来设计新团队或调整团队架构的参考模板，不代表当前线上现状
 ---
 
-A Paperclip team is not just an org chart. It is a working model for how tasks enter the team, how they move, when they split into lanes, how they recover, and what counts as done.
+## 这份文档是干什么的
 
-Use this guide when:
-
-- you are creating a new team
-- you are cleaning up an existing team that has drifted into ad hoc behavior
-- you want one page that explains how a team works without reading every agent config
-- you want reusable examples that can later become importable team packages
-
-This page is the reference model. For the live saved state of the current teams, use [team current state](./team-current-state).
-
-## Why this template exists
-
-Without a standard team sheet, most teams drift into the same failure modes:
-
-- too many agents with no clear workflow
-- work split into parallel lanes before the upstream brief is stable
-- no explicit owner for user clarification or final sign-off
-- recovery paths that depend on a human remembering who to wake up
-- runtime settings copied from another team even when the work pattern is different
-
-This template gives every team one visible contract.
-
-## What every team should define
-
-| Field | What to decide | Typical values | Maps to |
-| --- | --- | --- | --- |
-| Team purpose | What the team is responsible for end to end | research, engineering, quality, growth | team docs, agent instructions |
-| Workflow pattern | How work usually moves | pipeline, hub-and-spoke, collaborative, on-demand | org design, delegation rules |
-| Team owner | Who owns end-to-end outcomes | lead, manager, director, chief role | `reportsTo`, delegation, final sign-off |
-| Default roles | Which roles are normally on | lead, challenger, editor, engineer, reviewer | agent roster |
-| Optional roles | Which roles are only enabled for certain work | auditor, security reviewer, specialist lane | conditional agents or optional subtasks |
-| Entry points | How work enters the team | manual issue, routine, approval callback, comment wake, webhook | issues, routines, wakeups |
-| Dispatch mode | How the team resumes and fans out work | `event_driven`, `fixed_parallel_lanes` | routines, `/issues/:id/resume-chain` |
-| Run issue mode | Where each recurring run lives | `top_level_run_issue`, `child_of_fixed_parent` | routines |
-| Clarification policy | Who may ask the board or user for missing facts or decisions | owner only, manager only, nobody by default | issue comments, blocked flow |
-| Blackboard and artifacts | Where shared state lives | issue documents, work products, comments | issue docs, work products, handoffs |
-| Review or challenge policy | How counterarguments and review are handled | one-round challenge, targeted review, no default challenger | subtasks, approvals, comments |
-| Acceptance gate | Who decides pass or fail and what object is being gated | QA, acceptance lead, source issue differs from target issue | approvals, acceptance writeback |
-| Recovery policy | What happens when work stalls, blocks, or a run is skipped | resume owner, lane wake, defer, fallback | wakeups, `resume-chain`, blocked state |
-| Concurrency and cadence | How often the team wakes and whether overlaps are allowed | `coalesce_if_active`, `always_enqueue`, scheduled, on-demand | routines, heartbeat settings |
-| Cost profile | Where to spend strong models and where to stay lean | strong lead, cheap editor, on-demand reviewer | agent adapter config, budgets |
-| Success signals | What counts as done for this team | signed report, accepted feature, closed audit batch | issue status, acceptance verdict |
-
-## Team Sheet Template
-
-Use this as the minimum fill-in template for any new team.
-
-```yaml
-name:
-purpose:
-workflowPattern:
-teamOwner:
-
-defaultRoles:
-  - name:
-    responsibility:
-    alwaysOn: true
-
-optionalRoles:
-  - name:
-    enableWhen:
-    responsibility:
-
-entryPoints:
-  - manual_issue
-  - routine
-  - comment_wake
-  - approval_callback
-
-dispatchMode:
-runIssueMode:
-concurrencyPolicy:
-catchUpPolicy:
-
-clarificationPolicy:
-  ownerMayAskUser:
-  childRolesMayAskUserDirectly:
-  timeoutFallback:
-
-blackboard:
-  parentIssueDocuments:
-    - brief
-    - notes
-  workProducts:
-    - type:
-      when:
-  commentPolicy:
-
-reviewPolicy:
-  style:
-  maxRounds:
-  resolutionOwner:
-
-acceptanceGate:
-  required:
-  gateOwner:
-  sourceIssueId:
-  targetIssueId:
-  verdicts:
-    - pass
-    - fail
-    - inconclusive
-
-recoveryPolicy:
-  onBlocked:
-  onSkippedWake:
-  resumeChainOwner:
-  laneRecoveryMode:
-
-costProfile:
-  strongModelRoles:
-    - name:
-      reason:
-  leanRoles:
-    - name:
-      reason:
-
-successSignals:
-  runLevel:
-    - ""
-  teamLevel:
-    - ""
-```
-
-## How to use the template
-
-Fill the sheet in this order:
-
-1. Define the team purpose and workflow pattern.
-2. Name the single end-to-end owner.
-3. Decide which roles are default and which are conditional.
-4. Lock the entry points, dispatch mode, and run issue mode.
-5. Decide who may ask for clarification and how long the team waits before falling back.
-6. Decide the shared blackboard shape before adding more agents.
-7. Decide how review, challenge, and acceptance close the loop.
-8. Decide how the team recovers when runs stall, skip, or block.
-9. Only then tune cadence, concurrency, and model cost.
-
-If a field is still vague, the team is probably not ready to run at scale.
-
-## Reference Pattern: Research Team
-
-| Field | Recommended value |
+| 项目 | 说明 |
 | --- | --- |
-| Team purpose | Produce decision-quality research and user-facing reports |
-| Workflow pattern | Pipeline with a strong editorial owner |
-| Team owner | Research Lead |
-| Default roles | Research Lead, Challenger, Editor |
-| Optional roles | Evidence Auditor for high-risk or external-facing work |
-| Entry points | Manual issue, manager delegation |
-| Dispatch mode | `event_driven` by default |
-| Run issue mode | Usually issue-driven, not routine-driven |
-| Clarification policy | Only the Research Lead may ask the user; child lanes must escalate |
-| Blackboard and artifacts | Parent issue documents such as `brief`, `source-matrix`, `skeleton`, `challenge-log`, `final-report` |
-| Review or challenge policy | One challenge round by default, two at most for high-risk work |
-| Acceptance gate | Lead signs off by default; Auditor may down-rank evidence but should not own the conclusion |
-| Recovery policy | If blocked on user-only information, mark blocked once, ask once, then resume on reply |
-| Concurrency and cadence | Do not fan out before the brief and source matrix are stable |
-| Cost profile | Spend stronger reasoning on Lead and Challenger; keep Editor leaner |
-| Success signals | Final report, action memo, and evidence trace agree |
+| 给谁看 | 设计团队的人、改团队架构的人、要新建团队的人 |
+| 什么时候看 | 想新建一个团队，或者准备重构一个已有团队时 |
+| 不该拿它做什么 | 不要拿它当“当前线上真实配置” |
+| 想看当前真实情况 | 去看 [团队当前现状](./team-current-state) |
+| 谁负责维护 | 改团队架构的人 |
 
-### Research-specific notes
+这份文档只回答一个问题：
 
-- Do not default to six parallel roles.
-- The blackboard matters more than raw search transcript sharing.
-- Forum, community, and browser-ground-truth work should be explicit source classes, not accidental side quests.
+一个团队应该按什么表来定义，才不会越跑越乱。
 
-## Reference Pattern: Engineering Team
+## 新建团队时必须先填的表
 
-| Field | Recommended value |
+新团队不要先配 agent，不要先配 routine，不要先抄 heartbeat。
+先把下面这张表填完。
+
+| 字段 | 你要说明什么 | 对应到平台哪里 |
+| --- | --- | --- |
+| 团队名称 | 这个团队叫什么 | 团队文档、项目命名 |
+| 团队目标 | 这个团队端到端负责什么 | agent instructions、project 描述 |
+| 工作模式 | 线性流水、负责人分发、协作式、按需调用 | 组织方式、子任务策略 |
+| 团队负责人 | 最终谁收口，谁拍板 | `reportsTo`、父 issue owner |
+| 默认角色 | 平时固定开启哪些角色 | agent roster |
+| 条件角色 | 只在特定场景才开的角色 | 可选 agent、可选子任务 |
+| 任务入口 | 工作从哪里进来 | 手工 issue、routine、comment wake、approval callback |
+| 派工模式 | 是 `event_driven` 还是 `fixed_parallel_lanes` | routine dispatch |
+| 运行 issue 模式 | 是每次新建顶层父 issue，还是挂固定父 issue | `runIssueMode` |
+| 澄清规则 | 谁可以问用户，谁不可以 | comment、blocked、负责人职责 |
+| 共享工作区 | 团队共享状态写在哪里 | issue documents、work products、comments |
+| 评审规则 | 是否有 challenger / review / 审校 | 子 issue、审批链、评论流 |
+| 验收规则 | 谁给 pass/fail，gate 的对象是谁 | acceptance gate、approval/writeback |
+| 恢复规则 | 卡住了、skip 了、run 没接上时找谁恢复 | `resume-chain`、manual wake、blocked |
+| 节奏和并发 | 多久唤醒，冲突时合并还是排队 | heartbeat、routine concurrency |
+| 成本策略 | 哪些角色值得强模型，哪些角色该省 | model、budget、timeout |
+| 完成标准 | 这个团队什么叫 done | issue closeout、验收 verdict |
+
+## 复制用空白模板
+
+下面这张表就是以后新团队的标准模板。
+不要跳字段。
+
+| 字段 | 填写内容 |
 | --- | --- |
-| Team purpose | Turn approved product or platform work into accepted changes safely |
-| Workflow pattern | Hub-and-spoke from a technical owner, with optional lane fan-out for well-shaped epics |
-| Team owner | Technical Lead or Engineering Manager |
-| Default roles | Product or Technical Lead, implementation engineers, acceptance reviewer |
-| Optional roles | Security reviewer, migration specialist, release owner |
-| Entry points | Manual issue, delegated feature parent, approval callback |
-| Dispatch mode | `event_driven` for most work; `fixed_parallel_lanes` only for pre-shaped epics |
-| Run issue mode | Feature parent with explicit child issues for implementation lanes |
-| Clarification policy | Only the lead may escalate decision gaps to the board; engineers escalate upward |
-| Blackboard and artifacts | Parent issue documents such as `plan`, `design`, `test-plan`, `release-notes`; work products for previews or build outputs |
-| Review or challenge policy | Targeted architecture, code, or security review; no open-ended multi-agent debate |
-| Acceptance gate | Use a general acceptance gate, not a QA-only writeback chain; source and target issue must be explicit |
-| Recovery policy | Parent owner is responsible for reconciling child completion, blockage, and wake order |
-| Concurrency and cadence | Keep lead cadence slower, ICs more on-demand, reviewer lanes mostly wake-on-demand |
-| Cost profile | Stronger models for planning and risky review, cheaper models for bounded implementation or formatting work |
-| Success signals | Code lands, tests pass, acceptance verdict is explicit, and upstream issue closes for the right reason |
+| 团队名称 |  |
+| 团队目标 |  |
+| 工作模式 |  |
+| 团队负责人 |  |
+| 默认角色 |  |
+| 条件角色 |  |
+| 任务入口 |  |
+| 派工模式 |  |
+| 运行 issue 模式 |  |
+| 澄清规则 |  |
+| 共享工作区 |  |
+| 评审规则 |  |
+| 验收规则 |  |
+| 恢复规则 |  |
+| 节奏和并发 |  |
+| 成本策略 |  |
+| 完成标准 |  |
 
-### Engineering-specific notes
+## 填表顺序
 
-- A large feature should not become parallel implementation lanes until plan and interfaces are stable.
-- Acceptance truth must be separate from raw run success.
-- Child completion should wake the correct owner instead of relying on manual babysitting.
+不要按技术参数顺序填，按下面顺序填：
 
-## Reference Pattern: Platform Quality Team
+1. 先定团队目标。
+2. 再定工作模式。
+3. 再定团队负责人。
+4. 再定默认角色和条件角色。
+5. 再定任务入口、派工模式、运行 issue 模式。
+6. 再定澄清规则、共享工作区、评审规则、验收规则。
+7. 最后才定 heartbeat、routine、并发和模型成本。
 
-| Field | Recommended value |
+如果前 6 步没定清楚，后面的 runtime 参数全是瞎配。
+
+## 三个参考模式
+
+下面这三段不是“当前线上现状”，只是以后建团队时最常见的参考模式。
+
+### 参考模式一：调研团队
+
+| 项目 | 建议 |
 | --- | --- |
-| Team purpose | Run recurring platform health audits and produce auditable findings batches |
-| Workflow pattern | Routine-created parent batch with optional fixed lanes |
-| Team owner | Quality Lead |
-| Default roles | Quality Lead plus the minimum lanes required for the audit type |
-| Optional roles | Security lane, UX lane, release lane, infra lane |
-| Entry points | Scheduled routine and manual routine run |
-| Dispatch mode | `fixed_parallel_lanes` for stable daily or weekly audit batches; `event_driven` for one-off special investigations |
-| Run issue mode | `top_level_run_issue` so each batch has its own auditable parent issue |
-| Clarification policy | Routine batches should not require fresh operator approval; escalate only when scope or severity crosses a threshold |
-| Blackboard and artifacts | Parent issue documents such as `audit-brief`, `findings-ledger`, `daily-summary`; work products for screenshots, logs, or repro evidence |
-| Review or challenge policy | No formal challenger by default; the lead consolidates and de-duplicates findings |
-| Acceptance gate | Batch verdict closes the run; follow-up defects become separate issues instead of hiding in comments |
-| Recovery policy | `resume-chain` should wake lane owners for fixed-lane batches and the lead for ambiguous batches |
-| Concurrency and cadence | Prefer `coalesce_if_active` for recurring runs; avoid stacking stale audit batches |
-| Cost profile | Keep routine lanes lean and reserve stronger reasoning for the lead on synthesis or dispute resolution |
-| Success signals | One parent batch issue, explicit verdict, linked follow-up issues, and no silent drift into `done` |
+| 工作模式 | 轻量流水线 |
+| 团队负责人 | 研究负责人 |
+| 默认角色 | Lead + Challenger + Editor |
+| 条件角色 | Evidence Auditor |
+| 派工模式 | `event_driven` |
+| 澄清规则 | 只有 Lead 可以问用户 |
+| 共享工作区 | `brief`、`source-matrix`、`skeleton`、`challenge-log`、`final-report` |
+| 评审规则 | 默认只做 1 轮 challenge |
+| 验收规则 | Lead 收口，高风险题再加审校 |
 
-### Quality-specific notes
+这类团队最怕：
 
-- Daily or weekly quality work should create a fresh parent issue per run.
-- Routine scope should be pre-declared, not reopened through generic intake every time.
-- Quality teams need strong recovery controls because recurring systems amplify drift quickly.
+- 默认开太多 lane
+- 还没定 brief 就并行
+- 所有人都能直接问用户
+- 原始材料到处飞，没有黑板
 
-## Converting a team sheet into runtime configuration
+### 参考模式二：研发团队
 
-Once a team sheet is stable, convert it into runtime changes in this order:
+| 项目 | 建议 |
+| --- | --- |
+| 工作模式 | 负责人分发，必要时再拆并行 lane |
+| 团队负责人 | 技术负责人 |
+| 默认角色 | 技术负责人 + 实施工程师 + 验收角色 |
+| 条件角色 | PM、安全评审、迁移专项、发布角色 |
+| 派工模式 | 默认 `event_driven`，大型明确史诗再用 `fixed_parallel_lanes` |
+| 澄清规则 | 只有负责人向上补问决策 |
+| 共享工作区 | `plan`、`design`、`test-plan`、`release-notes` |
+| 验收规则 | 用通用 acceptance gate，不要绑死 QA 命名 |
 
-1. Org tree: create or update the agents and reporting lines.
-2. Instructions: align each agent's instructions with the team owner, handoff, and done rules.
-3. Routines: add scheduled or manual routines only after dispatch mode and run issue mode are decided.
-4. Blackboard: standardize the issue document keys and work product types the team will use.
-5. Recovery: define when to use blocked, when to use `resume-chain`, and who owns restarts.
-6. Cost: tune models, intervals, and budgets after the workflow is already coherent.
+这类团队最怕：
 
-Do not start with cadence and model knobs. Those are last-mile settings, not team design.
+- 一上来就把大需求拆得很碎
+- run 成功被误当业务通过
+- 子任务做完没人唤醒父负责人
+- 负责人一个人串行卡住全队
 
-## When to create a new template
+### 参考模式三：平台质量团队
 
-Create a new team sheet when:
+| 项目 | 建议 |
+| --- | --- |
+| 工作模式 | routine 触发批次父 issue，再按 lane 展开 |
+| 团队负责人 | 质量负责人 |
+| 默认角色 | 质量负责人 + 最少必要 lane |
+| 条件角色 | 安全、体验、性能、发布专项 lane |
+| 派工模式 | 稳定批次优先 `fixed_parallel_lanes` |
+| 运行 issue 模式 | `top_level_run_issue` |
+| 共享工作区 | `audit-brief`、`findings-ledger`、`daily-summary` |
+| 验收规则 | 一个批次一个明确 verdict |
 
-- a team has a different end-to-end owner
-- the workflow pattern changes
-- the dispatch or run issue model changes
-- the clarification policy changes
-- the acceptance gate changes
+这类团队最怕：
 
-Do not create a new template just because one agent uses a different model or skill.
+- routine 每次都回到通用 intake
+- 新批次继续挂在长期父 issue 下
+- lane 都配了，但没人真正接批次
+- 发现问题后全埋在评论里，不生成后续 issue
 
-## What good looks like
+## 什么时候需要新增一份团队模板
 
-A good team template lets an operator answer these questions in under a minute:
+只有下面这些真的变了，才新增模板：
 
-- How does work enter this team?
-- Who owns the outcome?
-- When does the team split into lanes?
-- Who is allowed to ask the user for clarification?
-- Where does shared state live?
-- How does the team recover when something stalls?
-- What exactly counts as done?
+- 团队负责人变了
+- 工作模式变了
+- 派工模式变了
+- 澄清规则变了
+- 验收规则变了
 
-If the sheet cannot answer those quickly, the team is still underspecified.
+不要因为换了一个模型、换了一个 skill、或多了一个 agent 就新开一份模板。
+
+## 一份好模板最低要做到什么
+
+新线程只看这份模板，1 分钟内必须能回答：
+
+- 这个团队负责什么
+- 谁是最终负责人
+- 任务怎么进来
+- 什么时候拆 lane
+- 谁能问用户
+- 团队共享状态写在哪里
+- 卡住了该找谁恢复
+- 什么算 done
+
+如果答不出来，这份模板就是不合格的。

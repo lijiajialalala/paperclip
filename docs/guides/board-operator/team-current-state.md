@@ -1,229 +1,217 @@
 ---
-title: Team Current State
-summary: Canonical record of how the current core teams are actually configured and behaving
+title: 团队当前现状
+summary: 当前线上核心团队的真实配置、负责人、运行方式和主要偏差
 ---
 
-This page is the saved current-state ledger for the live company configuration.
+## 这份文档是干什么的
 
-Use it differently from the [team configuration template](./team-configuration-templates):
-
-- the template is the reference model
-- this page is the current runtime truth
-
-When agent rosters, heartbeat settings, routines, dispatch rules, or team workflows change, update this page in the same change.
-
-## Source and scope
-
-This page reflects the live runtime state observed on 2026-04-19 from the local Paperclip API for company `25eb9f83-74a2-4e08-98f8-869ddfef7f5d`.
-
-It focuses on the three core execution teams currently active in this company:
-
-- research
-- engineering
-- platform quality
-
-## Company-wide snapshot
-
-Observed from the live dashboard on 2026-04-19:
-
-- Agent health: `active=5`, `running=1`, `error=11`
-- Task health: `open=18`, `inProgress=3`, `blocked=6`, `done=52`
-- Pending approvals: `3`
-
-This means the current bottleneck is not only team design. It is also runtime reliability and recovery.
-
-## Research Team
-
-### Current role in the company
-
-The research team is the current owner for deep research and report generation work. Its active visible project is `调研PO岗位`.
-
-### Current owner and workflow
-
-| Field | Current state |
+| 项目 | 说明 |
 | --- | --- |
-| Team owner | `研究负责人` |
-| Reports to | `CEO` |
-| Workflow pattern | Heavy multi-lane pipeline |
-| Current default lanes | `主研究员` + `交叉研究员` + `证据审校员` + `报告架构师` + `研究审查官` |
-| Clarification owner | Not formally encoded; in practice the lead is the only sensible owner |
-| Entry points | Manual project issues, delegated subtasks |
-| Routine usage | None |
-| Dispatch mode | Effectively `event_driven` by issue orchestration, not by routine |
-| Shared state contract | Not yet formalized as a blackboard contract |
+| 给谁看 | 新线程、接手当前系统的人、看 live 状态的人 |
+| 什么时候看 | 想知道“现在到底是谁在负责、现在团队怎么跑、现在卡在哪里”时 |
+| 不该拿它做什么 | 不要拿它设计新团队，它不是模板 |
+| 想设计新团队 | 去看 [团队配置模板](./team-configuration-templates) |
+| 谁负责维护 | 改了该团队真实配置的人 |
 
-### Current roster
+这份文档只回答一个问题：
 
-| Agent | Role in practice | Heartbeat |
-| --- | --- | --- |
-| `研究负责人` | top-level organizer and closer | enabled, `21600s`, wake-on-demand |
-| `主研究员` | mainline evidence collection | enabled, `14400s`, wake-on-demand |
-| `交叉研究员` | counterevidence and edge cases | enabled, `14400s`, wake-on-demand |
-| `证据审校员` | source and evidence audit | enabled, `14400s`, wake-on-demand |
-| `报告架构师` | report assembly | enabled, `14400s`, wake-on-demand |
-| `研究审查官` | final review | enabled, `14400s`, wake-on-demand |
+当前这家公司里的核心团队，现在真实是什么状态。
 
-### Current health
+## 读这份文档的顺序
 
-Observed now:
+新线程默认这样读：
 
-- all 6 research agents are in `error`
-- the research workflow is still the older six-lane default, not the reduced `Lead + Challenger + Editor (+ Auditor)` target shape
+1. 先看本页，确认当前有哪些团队、该找谁。
+2. 再看对应团队的“当前偏差”，不要直接假设它已经按理想模式运行。
+3. 如果准备改团队架构，再去看 [团队配置模板](./team-configuration-templates)。
 
-### Current active work
+## 当前先找谁
 
-Current open blockers in `调研PO岗位`:
+如果你是新线程，先按这个表找人：
 
-- `CMPA-155` is `blocked` at the parent issue level and has no `executionRunId`
-- `CMPA-156` is `blocked` at the final review lane and has no `executionRunId`
-
-This means the team is currently in a blocked, non-executing state rather than an actively running state.
-
-### Current drift from target
-
-- Too many default lanes are still always-on.
-- Clarification is not yet a first-class gate.
-- Final review is still modeled as a standing lane instead of a lighter closeout function.
-- Shared state is still implicit in project files and issue flow, not yet a formal blackboard.
-
-## Engineering Team
-
-### Current role in the company
-
-The engineering team owns platform fixes, implementation work, smoke tests, and acceptance closeout. It is also the current place where runtime regressions and platform bugfixes are being repaired.
-
-### Current owner and workflow
-
-| Field | Current state |
+| 事情类型 | 先找谁 |
 | --- | --- |
-| Team owner | `技术负责人` |
-| Reports to | `CEO` |
-| Workflow pattern | Lead-led hub-and-spoke with PM, implementation, and acceptance |
-| Current default roles | `技术负责人`, `产品经理`, `前端工程师`, `后端工程师`, `验收审查官` |
-| Clarification owner | In practice `技术负责人` |
-| Entry points | Manual issues, delegated child issues, approval callbacks |
-| Routine usage | None |
-| Dispatch mode | Effectively `event_driven` |
-| Acceptance mode | Separate acceptance reviewer lane still exists as a distinct role |
+| 调研、报告、研究编排 | `研究负责人` |
+| 研发推进、技术设计、验收收口 | `技术负责人` |
+| 平台质量批次、质量周报、质量台账 | `质量负责人` |
+| 跨团队升级、最终拍板 | `CEO` |
 
-### Current roster
+## 数据来源
 
-| Agent | Role in practice | Heartbeat |
-| --- | --- | --- |
-| `技术负责人` | architecture, breakdown, orchestration | enabled, `21600s`, wake-on-demand |
-| `产品经理` | requirement shaping and PRD work | enabled, `21600s`, wake-on-demand |
-| `前端工程师` | frontend implementation | enabled, `14400s`, wake-on-demand |
-| `后端工程师` | backend implementation | enabled, `14400s`, wake-on-demand |
-| `验收审查官` | final acceptance lane | disabled, `14400s`, wake-on-demand only |
+本页基于 2026-04-19 从本地 live API 读取的真实状态写成。
+所以这里描述的是“现在实际在跑什么”，不是“我们希望它以后变成什么”。
 
-### Current health
+## 公司级总体状态
 
-Observed now:
+当前公司总览：
 
-- `技术负责人`, `产品经理`, `前端工程师`, `后端工程师` are all in `error`
-- `验收审查官` is `idle`
+- Agent 状态：`active=5`、`running=1`、`error=11`
+- Task 状态：`open=18`、`inProgress=3`、`blocked=6`、`done=52`
+- Pending approvals：`3`
 
-### Current active work
+一句话判断：
 
-Current notable open work:
+当前的主要问题不只是团队设计，还包括 runtime 恢复和状态漂移。
 
-- `CMPA-175` is `in_progress` under the engineering owner but has no `executionRunId`
-- `CMPA-176` is `in_progress` under the backend engineer but has no `executionRunId`
-- several older smoke or acceptance issues remain `blocked`
+## 调研团队
 
-So the engineering team currently has a state/execution mismatch problem: some issues say `in_progress`, but there is no active execution run bound to them.
+### 这个团队现在负责什么
 
-### Current drift from target
+负责调研、研究、成稿、终审。当前最重要的项目是 `调研PO岗位`。
 
-- Acceptance is still carried by a dedicated QA-style role instead of a generalized acceptance gate.
-- The team is still single-owner heavy; the technical lead remains the main orchestration bottleneck.
-- There is no separate runtime configuration profile for large parallel epics yet.
-- Recovery from blocked or stale child issues still depends heavily on the lead.
+### 先找谁
 
-## Platform Quality Team
+- 负责人：`研究负责人`
+- 上级：`CEO`
 
-### Current role in the company
+### 当前成员
 
-The platform quality team owns recurring quality audit work under the `平台质量运营` project.
+| 角色 | 当前人选 | 当前状态 | 当前节奏 |
+| --- | --- | --- | --- |
+| 负责人 | `研究负责人` | `error` | heartbeat 开启，`21600s`，支持手动唤醒 |
+| 主线研究 | `主研究员` | `error` | heartbeat 开启，`14400s` |
+| 交叉验证 | `交叉研究员` | `error` | heartbeat 开启，`14400s` |
+| 证据审校 | `证据审校员` | `error` | heartbeat 开启，`14400s` |
+| 成稿 | `报告架构师` | `error` | heartbeat 开启，`14400s` |
+| 终审 | `研究审查官` | `error` | heartbeat 开启，`14400s` |
 
-### Current owner and workflow
+### 当前真实工作模式
 
-| Field | Current state |
-| --- | --- |
-| Team owner | `质量负责人` |
-| Reports to | `CEO` |
-| Workflow pattern | Routine-driven batch owner with optional specialist lanes |
-| Current specialist lanes | `系统验证师`, `根因分析师`, `工程审计师`, `体验审计师` |
-| Entry points | Scheduled routines and manual routine runs |
-| Routines | daily deep audit batch, weekly quality summary |
-| Dispatch mode | both routines currently use `event_driven` |
-| Run issue mode | both routines currently use `top_level_run_issue` |
-| Concurrency policy | `coalesce_if_active` |
+- 这是一个“重 lane”的老调研编排。
+- 默认不是 `Lead + Challenger + Editor`，而是 6 个 lane 常驻。
+- 当前没有 formal blackboard 契约。
+- 当前也没有平台级 Clarification Gate。
 
-### Current roster
+### 当前最重要的 open work
 
-| Agent | Role in practice | Heartbeat |
-| --- | --- | --- |
-| `质量负责人` | batch owner and summarizer | disabled, `14400s`, wake-on-demand |
-| `系统验证师` | system verification lane | disabled, `14400s`, wake-on-demand |
-| `根因分析师` | root cause lane | disabled, `14400s`, wake-on-demand |
-| `工程审计师` | engineering quality lane | disabled, `14400s`, wake-on-demand |
-| `体验审计师` | UX and process lane | disabled, `14400s`, wake-on-demand |
+当前最关键的是：
 
-### Current routines
+- `CMPA-155` 处于 `blocked`
+- `CMPA-156` 处于 `blocked`
+- 这两个 issue 当前都没有 `executionRunId`
 
-| Routine | Trigger | Dispatch | Run issue mode | Current observation |
+所以调研团队现在不是“正在执行但慢”，而是“被卡住且没有真实 run 在接着跑”。
+
+### 当前偏差
+
+- lane 太多，默认过重
+- 问用户的权限边界没有正式收口
+- 终审还是独立常驻 lane，不够轻
+- 共享状态还没正式升级成黑板模式
+
+## 研发团队
+
+### 这个团队现在负责什么
+
+负责平台修复、架构设计、实施开发、验收收口。当前也承担大量平台 runtime 和流程修复工作。
+
+### 先找谁
+
+- 负责人：`技术负责人`
+- 上级：`CEO`
+
+### 当前成员
+
+| 角色 | 当前人选 | 当前状态 | 当前节奏 |
+| --- | --- | --- | --- |
+| 技术负责人 | `技术负责人` | `error` | heartbeat 开启，`21600s` |
+| 产品经理 | `产品经理` | `error` | heartbeat 开启，`21600s` |
+| 前端工程师 | `前端工程师` | `error` | heartbeat 开启，`14400s` |
+| 后端工程师 | `后端工程师` | `error` | heartbeat 开启，`14400s` |
+| 验收角色 | `验收审查官` | `idle` | heartbeat 关闭，按需唤醒 |
+
+### 当前真实工作模式
+
+- 本质上还是负责人驱动的 hub-and-spoke。
+- `技术负责人` 是核心单点编排者。
+- PM、前端、后端、验收都围绕负责人转。
+- 当前还保留了独立的 QA/验收角色，而不是彻底抽成通用 acceptance gate。
+
+### 当前最重要的 open work
+
+当前最重要的是两个“状态在做，但没有 run”的 issue：
+
+- `CMPA-175` 是 `in_progress`，但没有 `executionRunId`
+- `CMPA-176` 是 `in_progress`，但没有 `executionRunId`
+
+这说明研发团队当前存在明显的 issue 状态和 run 真相漂移。
+
+### 当前偏差
+
+- acceptance 还没有完全从 QA 专属链抽出来
+- 负责人单点过重
+- 大型任务的并行配置还没有单独成型
+- 子任务和父任务的恢复仍然太依赖负责人手工介入
+
+## 平台质量团队
+
+### 这个团队现在负责什么
+
+负责 `平台质量运营` 项目，承接每日深度审计批次和每周质量周报。
+
+### 先找谁
+
+- 负责人：`质量负责人`
+- 上级：`CEO`
+
+### 当前成员
+
+| 角色 | 当前人选 | 当前状态 | 当前节奏 |
+| --- | --- | --- | --- |
+| 质量负责人 | `质量负责人` | `error` | heartbeat 关闭，按需唤醒 |
+| 系统验证 | `系统验证师` | `idle` | heartbeat 关闭，按需唤醒 |
+| 根因分析 | `根因分析师` | `idle` | heartbeat 关闭，按需唤醒 |
+| 工程审计 | `工程审计师` | `idle` | heartbeat 关闭，按需唤醒 |
+| 体验审计 | `体验审计师` | `idle` | heartbeat 关闭，按需唤醒 |
+
+### 当前 routines
+
+| routine | 触发 | 派工模式 | run issue 模式 | 当前观察 |
 | --- | --- | --- | --- | --- |
-| `平台质量深度审计批次` | daily 02:00 | `event_driven` | `top_level_run_issue` | latest run created `CMPA-177` |
-| `平台质量周报汇总` | weekly Monday 06:00 | `event_driven` | `top_level_run_issue` | active routine, no active issue now |
+| `平台质量深度审计批次` | 每天 02:00 | `event_driven` | `top_level_run_issue` | 最新一次生成了 `CMPA-177` |
+| `平台质量周报汇总` | 每周一 06:00 | `event_driven` | `top_level_run_issue` | 当前 routine 活着，但没有 active issue |
 
-### Current health
+### 当前真实工作模式
 
-Observed now:
+- 方向上已经对了：routine 每次生成独立顶层父 issue。
+- 但实际还没变成真正稳定的“批次父 issue + lane 自动接单”系统。
+- 所有 lane 角色都在，但 runtime 上基本处于关闭或 idle。
 
-- `质量负责人` is in `error`
-- all four specialist lanes are `idle`
-- all five quality agents currently have heartbeat execution disabled
+### 当前最重要的 open work
 
-### Current active work
+当前质量线最关键的是：
 
-The most important current fact is:
+- `CMPA-177` 已被 routine 创建出来
+- 它现在还是 `todo`
+- 它没有 `executionRunId`
 
-- `CMPA-177` (`平台质量深度审计批次`) exists as a top-level run issue
-- it is still `todo`
-- it has no `executionRunId`
+也就是说，质量团队现在最大的问题不是“没有 routine”，而是“routine 已经产出了批次，但团队没有真正把批次接起来”。
 
-So the quality team already has the correct parent-issue-per-run direction, but the current execution chain is not actually picking the batch up.
+### 当前偏差
 
-### Current drift from target
+- routine 存在，但执行链不稳
+- dispatch 还是 `event_driven`，还没切到稳定的 `fixed_parallel_lanes`
+- specialist lane 存在，但 heartbeat 默认关闭
+- 从“批次 issue 已创建”到“团队正式开工”之间还有断层
 
-- The project has routines, but the team is not yet behaving like an actively scheduled quality system.
-- Dispatch is still `event_driven`, not `fixed_parallel_lanes`.
-- Specialist lanes are present as roles but dormant in runtime terms because heartbeat execution is disabled.
-- The team currently depends on manual intervention to turn a created batch issue into real work.
+## 当前跨团队判断
 
-## Current cross-team observations
+一句话总结当前三条线：
 
-The three core teams are all already distinct enough to deserve separate current-state tracking:
+- 调研团队：默认 lane 太重，而且当前是 blocked
+- 研发团队：负责人太重，而且存在 issue/run 真相漂移
+- 质量团队：routine 方向对，但批次接单链不稳
 
-- research is over-laned and blocked
-- engineering is orchestration-heavy and has issue/run truth drift
-- platform quality has the right routine direction but weak execution pickup
+所以这三条线都值得保留，但都还没有达到“看一眼就能放心自动跑”的程度。
 
-This is why the template and the current-state ledger must stay separate:
+## 维护规则
 
-- the template tells us what a coherent team should look like
-- the current-state ledger tells us what the live system is actually doing today
+下面这些变化发生时，必须同步改这份文档：
 
-## Maintenance rule
+- 某个团队换负责人
+- 某个团队增删角色
+- heartbeat 开关、频率、wake 方式变了
+- routine 的 dispatchMode 或 runIssueMode 变了
+- 某个团队从“参考模式”真正变成了“线上固定模式”
 
-Whenever one of these changes, update this page:
-
-- agent added, removed, or repurposed
-- heartbeat settings changed
-- routine dispatch or run issue mode changed
-- clarification authority changed
-- acceptance ownership changed
-- a team shifts from example pattern to actual production pattern
-
-If this page is stale, operators will start making decisions from memory instead of from the system.
+如果这份文档不更新，新线程就会继续靠猜。
