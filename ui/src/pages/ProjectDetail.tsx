@@ -24,6 +24,7 @@ import { ExecutionWorkspaceCloseDialog } from "../components/ExecutionWorkspaceC
 import { IssuesList } from "../components/IssuesList";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { PageTabBar } from "../components/PageTabBar";
+import { buildProjectIssueListFilters } from "../lib/project-issue-filters";
 import { buildProjectWorkspaceSummaries } from "../lib/project-workspaces-tab";
 import { projectRouteRef, projectWorkspaceUrl } from "../lib/utils";
 import { timeAgo } from "../lib/timeAgo";
@@ -183,7 +184,7 @@ function ProjectIssuesList({ projectId, companyId }: { projectId: string; compan
 
   const { data: issues, isLoading, error } = useQuery({
     queryKey: queryKeys.issues.listByProject(companyId, projectId),
-    queryFn: () => issuesApi.list(companyId, { projectId }),
+    queryFn: () => issuesApi.list(companyId, buildProjectIssueListFilters(projectId)),
     enabled: !!companyId,
   });
 
@@ -507,7 +508,7 @@ export function ProjectDetail() {
     queryKey: workspaceTabProjectId && resolvedCompanyId
       ? queryKeys.issues.listByProject(resolvedCompanyId, workspaceTabProjectId)
       : ["issues", "__workspace-tab__", "disabled"],
-    queryFn: () => issuesApi.list(resolvedCompanyId!, { projectId: workspaceTabProjectId! }),
+    queryFn: () => issuesApi.list(resolvedCompanyId!, buildProjectIssueListFilters(workspaceTabProjectId!)),
     enabled: Boolean(resolvedCompanyId && workspaceTabProjectId && isolatedWorkspacesEnabled),
   });
   const {
