@@ -46,6 +46,7 @@ import { StatusIcon } from "../components/StatusIcon";
 import { PriorityIcon } from "../components/PriorityIcon";
 import { StatusBadge } from "../components/StatusBadge";
 import { Identity } from "../components/Identity";
+import { IssuePlatformUnblockBanner } from "../components/IssuePlatformUnblockBanner";
 import { PluginSlotMount, PluginSlotOutlet, usePluginSlots } from "@/plugins/slots";
 import { PluginLauncherOutlet } from "@/plugins/launchers";
 import { Separator } from "@/components/ui/separator";
@@ -1537,6 +1538,7 @@ export function IssueDetail() {
       </div>
 
       <IssueTruthfulnessBanner issue={issue} agentMap={agentMap} />
+      <IssuePlatformUnblockBanner summary={issue.platformUnblockSummary} agentMap={agentMap} />
 
       {issue.planProposedAt && !issue.planApprovedAt && (
         <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 space-y-4">
