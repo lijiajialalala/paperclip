@@ -12,6 +12,8 @@ Use this guide when:
 - you want one page that explains how a team works without reading every agent config
 - you want reusable examples that can later become importable team packages
 
+This page is the reference model. For the live saved state of the current teams, use [team current state](./team-current-state).
+
 ## Why this template exists
 
 Without a standard team sheet, most teams drift into the same failure modes:
@@ -142,7 +144,7 @@ Fill the sheet in this order:
 
 If a field is still vague, the team is probably not ready to run at scale.
 
-## Example: Research Team
+## Reference Pattern: Research Team
 
 | Field | Recommended value |
 | --- | --- |
@@ -169,7 +171,7 @@ If a field is still vague, the team is probably not ready to run at scale.
 - The blackboard matters more than raw search transcript sharing.
 - Forum, community, and browser-ground-truth work should be explicit source classes, not accidental side quests.
 
-## Example: Engineering Team
+## Reference Pattern: Engineering Team
 
 | Field | Recommended value |
 | --- | --- |
@@ -196,7 +198,7 @@ If a field is still vague, the team is probably not ready to run at scale.
 - Acceptance truth must be separate from raw run success.
 - Child completion should wake the correct owner instead of relying on manual babysitting.
 
-## Example: Platform Quality Team
+## Reference Pattern: Platform Quality Team
 
 | Field | Recommended value |
 | --- | --- |

@@ -46,6 +46,7 @@
               "guides/board-operator/managing-agents",
               "guides/board-operator/org-structure",
               "guides/board-operator/team-configuration-templates",
+              "guides/board-operator/team-current-state",
               "guides/board-operator/managing-tasks",
               "guides/board-operator/execution-workspaces-and-runtime-services",
               "guides/board-operator/platform-bugfix-workflow",
