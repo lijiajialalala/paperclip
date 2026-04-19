@@ -96,7 +96,7 @@ const SESSIONED_LOCAL_ADAPTERS = new Set([
 ]);
 const ACTIVE_HEARTBEAT_RUN_STATUS_SET = new Set(["queued", "running"]);
 const HEARTBEAT_ACTIONABLE_ISSUE_STATUSES = ["todo", "in_progress", "blocked"] as const;
-const SYNTHETIC_TIMER_LOCAL_TIMEOUT_SEC = 15 * 60;
+const SESSIONED_LOCAL_TIMEOUT_FLOOR_SEC = 15 * 60;
 
 export type AutomaticRetryReason = "process_lost" | "rate_limited" | "auth_file_transient" | "browser_busy";
 
@@ -910,29 +910,26 @@ export function isSyntheticHeartbeatTimerRun(input: {
   return wakeSource === "timer" && input.taskKey === HEARTBEAT_TASK_KEY && !input.issueId;
 }
 
-export function applySyntheticTimerAdapterDefaults(input: {
-  contextSnapshot: Record<string, unknown> | null | undefined;
-  taskKey: string | null;
-  issueId?: string | null;
+function resolveSessionedLocalTimeoutDefaultSec(heartbeatIntervalSec: number | null | undefined) {
+  const normalizedHeartbeatIntervalSec =
+    typeof heartbeatIntervalSec === "number" && Number.isFinite(heartbeatIntervalSec) && heartbeatIntervalSec > 0
+      ? Math.floor(heartbeatIntervalSec)
+      : 0;
+  return Math.max(SESSIONED_LOCAL_TIMEOUT_FLOOR_SEC, normalizedHeartbeatIntervalSec);
+}
+
+export function applySessionedLocalAdapterDefaults(input: {
   adapterType: string;
   config: Record<string, unknown> | null | undefined;
+  heartbeatIntervalSec?: number | null;
 }) {
   const config = parseObject(input.config);
-  if (
-    !isSyntheticHeartbeatTimerRun({
-      contextSnapshot: input.contextSnapshot,
-      taskKey: input.taskKey,
-      issueId: input.issueId ?? null,
-    })
-  ) {
-    return config;
-  }
   if (!SESSIONED_LOCAL_ADAPTERS.has(input.adapterType)) return config;
   const configuredTimeoutSec = asNumber(config.timeoutSec, Number.NaN);
-  if (Number.isFinite(configuredTimeoutSec) && configuredTimeoutSec >= 0) return config;
+  if (Number.isFinite(configuredTimeoutSec) && configuredTimeoutSec > 0) return config;
   return {
     ...config,
-    timeoutSec: SYNTHETIC_TIMER_LOCAL_TIMEOUT_SEC,
+    timeoutSec: resolveSessionedLocalTimeoutDefaultSec(input.heartbeatIntervalSec),
   };
 }
 
@@ -1368,7 +1365,11 @@ export function heartbeatService(db: Db) {
   const secretsSvc = secretService(db);
   const companySkills = companySkillService(db);
   const issuesSvc = issueService(db);
-  const qaWriteback = qaWritebackService(db);
+  const qaWriteback = qaWritebackService(db, {
+    heartbeat: {
+      wakeup: enqueueWakeup,
+    },
+  });
   const executionWorkspacesSvc = executionWorkspaceService(db);
   const workspaceOperationsSvc = workspaceOperationService(db);
   const activeRunExecutions = new Set<string>();
@@ -3043,12 +3044,11 @@ export function heartbeatService(db: Db) {
       agent.companyId,
       executionRunConfig,
     );
-    const resolvedConfig = applySyntheticTimerAdapterDefaults({
-      contextSnapshot: context,
-      taskKey,
-      issueId,
+    const heartbeatPolicy = parseHeartbeatPolicy(agent);
+    const resolvedConfig = applySessionedLocalAdapterDefaults({
       adapterType: agent.adapterType,
       config: secretResolvedConfig,
+      heartbeatIntervalSec: heartbeatPolicy.intervalSec,
     });
     const runtimeSkillEntries = await companySkills.listRuntimeSkillEntries(agent.companyId);
     const runtimeConfig = {

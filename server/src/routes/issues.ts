@@ -58,6 +58,10 @@ import { assertCompanyAccess, getActorInfo } from "./authz.js";
 import { shouldWakeAssigneeOnCheckout } from "./issues-checkout-wakeup.js";
 import { isAllowedContentType, MAX_ATTACHMENT_BYTES } from "../attachment-types.js";
 import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
+import {
+  buildParentIssueCloseoutWake,
+  resolveParentIssueCloseoutWakeReason,
+} from "../services/issue-parent-closeout-wakeup.js";
 import { applyEffectiveStatus, issueStatusTruthService } from "../services/issue-status-truth.js";
 import { attachIssueRuntimeState } from "../services/issue-runtime-state.js";
 import { platformUnblockService } from "../services/platform-unblock.js";
@@ -2359,28 +2363,27 @@ export function issueRoutes(
         }
       }
 
-      // Wake parent issue assignee when a child issue is completed
-      if (issue.status === "done" && existing.status !== "done" && issue.parentId) {
+      const parentWakeReason = resolveParentIssueCloseoutWakeReason({
+        previousStatus: existing.status,
+        nextStatus: issue.status,
+      });
+
+      // Wake parent issue assignee when a child issue needs explicit closeout attention.
+      if (parentWakeReason && issue.parentId) {
         try {
           const parent = await svc.getById(issue.parentId);
-          if (parent?.assigneeAgentId && !wakeups.has(parent.assigneeAgentId)) {
-            wakeups.set(parent.assigneeAgentId, {
-              source: "automation",
-              triggerDetail: "system",
-              reason: "child_issue_completed",
-              payload: { issueId: parent.id, childIssueId: issue.id, mutation: "child_done" },
-              requestedByActorType: actor.actorType,
-              requestedByActorId: actor.actorId,
-              contextSnapshot: {
-                issueId: parent.id,
-                childIssueId: issue.id,
-                source: "issue.child_completed",
-                wakeReason: "child_issue_completed",
-              },
-            });
+          const parentWake = buildParentIssueCloseoutWake({
+            parentIssue: parent,
+            childIssue: issue,
+            closeoutReason: parentWakeReason,
+            requestedByActorType: actor.actorType,
+            requestedByActorId: actor.actorId,
+          });
+          if (parentWake && !wakeups.has(parentWake.agentId)) {
+            wakeups.set(parentWake.agentId, parentWake.wakeup);
           }
         } catch (err) {
-          logger.warn({ err, issueId: issue.id, parentId: issue.parentId }, "failed to wake parent issue assignee on child completion");
+          logger.warn({ err, issueId: issue.id, parentId: issue.parentId }, parentWakeReason.logMessage);
         }
       }
 

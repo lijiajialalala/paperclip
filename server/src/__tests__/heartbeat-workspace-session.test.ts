@@ -3,7 +3,7 @@ import type { agents } from "@paperclipai/db";
 import { sessionCodec as codexSessionCodec } from "@paperclipai/adapter-codex-local/server";
 import { resolveDefaultAgentWorkspaceDir } from "../home-paths.js";
 import {
-  applySyntheticTimerAdapterDefaults,
+  applySessionedLocalAdapterDefaults,
   applyPersistedExecutionWorkspaceConfig,
   buildRealizedExecutionWorkspaceFromPersisted,
   buildExplicitResumeSessionOverride,
@@ -332,12 +332,9 @@ describe("shouldResetTaskSessionForWake", () => {
   });
 });
 
-describe("applySyntheticTimerAdapterDefaults", () => {
-  it("injects a timeout for synthetic timer runs on local sessioned adapters", () => {
-    const result = applySyntheticTimerAdapterDefaults({
-      contextSnapshot: { wakeSource: "timer" },
-      taskKey: "__heartbeat__",
-      issueId: null,
+describe("applySessionedLocalAdapterDefaults", () => {
+  it("injects a bounded timeout for sessioned local adapters when one is not configured", () => {
+    const result = applySessionedLocalAdapterDefaults({
       adapterType: "codex_local",
       config: { model: "gpt-5.4" },
     });
@@ -349,10 +346,7 @@ describe("applySyntheticTimerAdapterDefaults", () => {
   });
 
   it("preserves an explicit timeout when one is already configured", () => {
-    const result = applySyntheticTimerAdapterDefaults({
-      contextSnapshot: { wakeSource: "timer" },
-      taskKey: "__heartbeat__",
-      issueId: null,
+    const result = applySessionedLocalAdapterDefaults({
       adapterType: "codex_local",
       config: { timeoutSec: 1200 },
     });
@@ -360,24 +354,28 @@ describe("applySyntheticTimerAdapterDefaults", () => {
     expect(result.timeoutSec).toBe(1200);
   });
 
-  it("preserves an explicit zero timeout when synthetic timers disable timeout", () => {
-    const result = applySyntheticTimerAdapterDefaults({
-      contextSnapshot: { wakeSource: "timer" },
-      taskKey: "__heartbeat__",
-      issueId: null,
+  it("replaces an explicit zero timeout with a bounded default", () => {
+    const result = applySessionedLocalAdapterDefaults({
       adapterType: "codex_local",
       config: { timeoutSec: 0 },
     });
 
-    expect(result.timeoutSec).toBe(0);
+    expect(result.timeoutSec).toBe(900);
   });
 
-  it("does not modify assignment or issue-scoped runs", () => {
-    const result = applySyntheticTimerAdapterDefaults({
-      contextSnapshot: { wakeSource: "assignment" },
-      taskKey: "issue-123",
-      issueId: "issue-123",
+  it("uses the heartbeat interval when it is larger than the floor timeout", () => {
+    const result = applySessionedLocalAdapterDefaults({
       adapterType: "codex_local",
+      config: { timeoutSec: 0 },
+      heartbeatIntervalSec: 3600,
+    });
+
+    expect(result.timeoutSec).toBe(3600);
+  });
+
+  it("does not modify non-sessioned adapters", () => {
+    const result = applySessionedLocalAdapterDefaults({
+      adapterType: "openclaw_gateway",
       config: {},
     });
 
