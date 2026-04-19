@@ -96,6 +96,40 @@ async function waitForRunStatus(
   throw new Error(`Timed out waiting for run ${runId} to enter one of: ${statuses.join(", ")}`);
 }
 
+async function waitForRunEventsToSettle(
+  db: ReturnType<typeof createDb>,
+  runId: string,
+  timeoutMs = 5_000,
+  intervalMs = 50,
+  stableMs = 100,
+) {
+  const startedAt = Date.now();
+  let lastMaxSeq = -1;
+  let lastChangedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const row = await db
+      .select({ maxSeq: sql<number | null>`max(${heartbeatRunEvents.seq})` })
+      .from(heartbeatRunEvents)
+      .where(eq(heartbeatRunEvents.runId, runId))
+      .then((rows) => rows[0] ?? { maxSeq: null });
+    const maxSeq = row.maxSeq ?? 0;
+
+    if (maxSeq !== lastMaxSeq) {
+      lastMaxSeq = maxSeq;
+      lastChangedAt = Date.now();
+    }
+
+    if (maxSeq > 0 && Date.now() - lastChangedAt >= stableMs) {
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+
+  throw new Error(`Timed out waiting for run ${runId} events to settle`);
+}
+
 describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
@@ -494,6 +528,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
 
     const staleRun = await waitForRunStatus(heartbeat, staleRunId, ["failed"]);
     const queuedRun = await waitForRunStatus(heartbeat, queuedRunId, ["succeeded", "failed"]);
+    await waitForRunEventsToSettle(db, staleRunId);
+    await waitForRunEventsToSettle(db, queuedRunId);
 
     expect(staleRun.status).toBe("failed");
     expect(staleRun.errorCode).toBe("process_lost");
