@@ -278,7 +278,7 @@ describeEmbeddedPostgres("heartbeat idle timer preflight", () => {
     expect(runtime?.sessionId).toBe("issue-session-1");
   });
 
-  it("continues into the adapter for issue-less synthetic timer runs when a heartbeat task session exists", async () => {
+  it("skips issue-less synthetic timer runs even when a stale heartbeat task session exists", async () => {
     const { agentId } = await seedAgentFixture({
       heartbeatTaskSessionDisplayId: "heartbeat-session-1",
     });
@@ -297,14 +297,21 @@ describeEmbeddedPostgres("heartbeat idle timer preflight", () => {
 
     expect(queuedRun).not.toBeNull();
     const finalizedRun = await waitForRunStatus(heartbeat, queuedRun!.id, ["succeeded"]);
-    await waitForRuntimeState(db, agentId, queuedRun!.id);
+    const runtime = await waitForRuntimeState(db, agentId, queuedRun!.id);
 
-    expect(timerAdapterExecute).toHaveBeenCalledTimes(1);
-    expect(timerAdapterExecute.mock.calls[0]?.[0]?.config?.timeoutSec).toBe(900);
+    expect(timerAdapterExecute).not.toHaveBeenCalled();
     expect(finalizedRun.resultJson).toMatchObject({
-      summary: "adapter executed",
-      timeoutSec: 900,
+      state: "idle_timer_skipped",
+      reason: "no_actionable_assigned_issues",
     });
+    expect(runtime?.sessionId).toBeNull();
+
+    const heartbeatTaskSession = await db
+      .select()
+      .from(agentTaskSessions)
+      .where(eq(agentTaskSessions.agentId, agentId))
+      .then((rows) => rows.find((row) => row.taskKey === "__heartbeat__") ?? null);
+    expect(heartbeatTaskSession).toBeNull();
   });
 
   it("continues into the adapter for synthetic timer runs when actionable work exists and injects a timeout", async () => {

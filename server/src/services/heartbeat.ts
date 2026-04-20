@@ -857,9 +857,9 @@ function parseIssueAssigneeAdapterOverrides(
 
 /**
  * Synthetic task key for timer/heartbeat wakes that have no issue context.
- * This allows timer wakes to participate in the `agentTaskSessions` system
- * and benefit from robust session resume, instead of relying solely on the
- * simpler `agentRuntimeState.sessionId` fallback.
+ * This lets generic timer wakes carry a stable identity while they are
+ * actively working. Idle no-issue timer wakes are still short-circuited
+ * before adapter execution, and stale synthetic sessions are cleared.
  */
 const HEARTBEAT_TASK_KEY = "__heartbeat__";
 const BLOCKED_QUEUE_ORPHAN_REAP_THRESHOLD_MS = 2 * 60 * 1000;
@@ -881,8 +881,9 @@ function deriveTaskKey(
 
 /**
  * Extended task key derivation that falls back to a stable synthetic key
- * for timer/heartbeat wakes. This ensures timer wakes can resume their
- * previous session via `agentTaskSessions` instead of starting fresh.
+ * for timer/heartbeat wakes. This gives in-flight timer work a stable
+ * `agentTaskSessions` lookup key without forcing issue-less idle timers
+ * to resume stale context.
  *
  * The synthetic key is only used when:
  * - No explicit task/issue key exists in the context
@@ -2174,7 +2175,13 @@ export function heartbeatService(db: Db) {
       Boolean(readNonEmptyString(contextSnapshot.resumeSessionDisplayId)) ||
       Boolean(readNonEmptyString(contextSnapshot.resumeFromRunId)) ||
       Boolean(readNonEmptyString(parseObject(contextSnapshot.resumeSessionParams).sessionId));
-    if (hasSavedTimerSession) return false;
+    const clearedSavedTimerSession =
+      taskKey === HEARTBEAT_TASK_KEY && savedTaskSession
+        ? (await clearTaskSessions(agent.companyId, agent.id, {
+            taskKey,
+            adapterType: agent.adapterType,
+          })) > 0
+        : false;
 
     const finishedAt = new Date();
     const resultJson = {
@@ -2182,7 +2189,8 @@ export function heartbeatService(db: Db) {
       state: "idle_timer_skipped",
       reason: "no_actionable_assigned_issues",
       actionableAssignedIssueCount,
-      hasSavedTimerSession: false,
+      hasSavedTimerSession,
+      clearedSavedTimerSession,
     } satisfies Record<string, unknown>;
     const finalizedRun = await setRunStatus(run.id, "succeeded", {
       finishedAt,
@@ -2210,6 +2218,8 @@ export function heartbeatService(db: Db) {
         payload: {
           reason: "no_actionable_assigned_issues",
           actionableAssignedIssueCount,
+          hasSavedTimerSession,
+          clearedSavedTimerSession,
         },
       });
       await updateRuntimeState(

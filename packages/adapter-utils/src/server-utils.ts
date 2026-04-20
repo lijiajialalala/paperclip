@@ -14,6 +14,7 @@ export interface RunProcessResult {
   stderr: string;
   pid: number | null;
   startedAt: string | null;
+  completionReason?: string | null;
 }
 
 interface RunningProcess {
@@ -1114,6 +1115,7 @@ export async function runChildProcess(
     timeoutSec: number;
     graceSec: number;
     onLog: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
+    detectCompletionReason?: (stream: "stdout" | "stderr", chunk: string) => string | null;
     onLogError?: (err: unknown, runId: string, message: string) => void;
     onSpawn?: (meta: { pid: number; startedAt: string }) => Promise<void>;
     stdin?: string;
@@ -1172,19 +1174,50 @@ export async function runChildProcess(
         let stdout = "";
         let stderr = "";
         let logChain: Promise<void> = Promise.resolve();
+        let completionReason: string | null = null;
+        let closed = false;
+        let forceKillTimer: NodeJS.Timeout | null = null;
+        let timeout: NodeJS.Timeout | null = null;
 
-        const timeout =
-          opts.timeoutSec > 0
-            ? setTimeout(() => {
-                timedOut = true;
-                child.kill("SIGTERM");
-                setTimeout(() => {
-                  if (!child.killed) {
-                    child.kill("SIGKILL");
-                  }
-                }, Math.max(1, opts.graceSec) * 1000);
-              }, opts.timeoutSec * 1000)
-            : null;
+        const clearForceKillTimer = () => {
+          if (forceKillTimer) {
+            clearTimeout(forceKillTimer);
+            forceKillTimer = null;
+          }
+        };
+
+        const requestTermination = (reason?: string | null) => {
+          if (reason && completionReason) return;
+          if (reason) completionReason = reason;
+
+          if (timeout) {
+            clearTimeout(timeout);
+            timeout = null;
+          }
+
+          try {
+            child.kill("SIGTERM");
+          } catch {
+            return;
+          }
+
+          clearForceKillTimer();
+          forceKillTimer = setTimeout(() => {
+            if (closed) return;
+            try {
+              child.kill("SIGKILL");
+            } catch {
+              // Ignore late cleanup failures once the child is already gone.
+            }
+          }, Math.max(1, opts.graceSec) * 1000);
+        };
+
+        if (opts.timeoutSec > 0) {
+          timeout = setTimeout(() => {
+            timedOut = true;
+            requestTermination();
+          }, opts.timeoutSec * 1000);
+        }
 
         child.stdout?.on("data", (chunk: unknown) => {
           const text = String(chunk);
@@ -1192,6 +1225,8 @@ export async function runChildProcess(
           logChain = logChain
             .then(() => opts.onLog("stdout", text))
             .catch((err) => onLogError(err, runId, "failed to append stdout log chunk"));
+          const detectedReason = opts.detectCompletionReason?.("stdout", text);
+          if (detectedReason) requestTermination(detectedReason);
         });
 
         child.stderr?.on("data", (chunk: unknown) => {
@@ -1200,10 +1235,13 @@ export async function runChildProcess(
           logChain = logChain
             .then(() => opts.onLog("stderr", text))
             .catch((err) => onLogError(err, runId, "failed to append stderr log chunk"));
+          const detectedReason = opts.detectCompletionReason?.("stderr", text);
+          if (detectedReason) requestTermination(detectedReason);
         });
 
         child.on("error", (err: Error) => {
           if (timeout) clearTimeout(timeout);
+          clearForceKillTimer();
           runningProcesses.delete(runId);
           const errno = (err as NodeJS.ErrnoException).code;
           const pathValue = mergedEnv.PATH ?? mergedEnv.Path ?? "";
@@ -1215,7 +1253,9 @@ export async function runChildProcess(
         });
 
         child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
+          closed = true;
           if (timeout) clearTimeout(timeout);
+          clearForceKillTimer();
           runningProcesses.delete(runId);
           void logChain.finally(() => {
             resolve({
@@ -1226,6 +1266,7 @@ export async function runChildProcess(
               stderr,
               pid: child.pid ?? null,
               startedAt,
+              completionReason,
             });
           });
         });

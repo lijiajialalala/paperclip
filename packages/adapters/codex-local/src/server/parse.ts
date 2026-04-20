@@ -1,5 +1,32 @@
 import { asString, asNumber, parseObject, parseJson } from "@paperclipai/adapter-utils/server-utils";
 
+export type CodexTerminalEventType = "turn.completed" | "turn.failed";
+
+export function createCodexTerminalEventDetector() {
+  let remainder = "";
+
+  return (chunk: string): CodexTerminalEventType | null => {
+    remainder += chunk;
+    const lines = remainder.split(/\r?\n/);
+    remainder = lines.pop() ?? "";
+
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line) continue;
+
+      const event = parseJson(line);
+      if (!event) continue;
+
+      const type = asString(event.type, "");
+      if (type === "turn.completed" || type === "turn.failed") {
+        return type;
+      }
+    }
+
+    return null;
+  };
+}
+
 export function parseCodexJsonl(stdout: string) {
   let sessionId: string | null = null;
   const messages: string[] = [];

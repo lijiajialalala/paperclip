@@ -23,7 +23,11 @@ import {
   joinPromptSections,
   runChildProcess,
 } from "@paperclipai/adapter-utils/server-utils";
-import { parseCodexJsonl, isCodexUnknownSessionError } from "./parse.js";
+import {
+  createCodexTerminalEventDetector,
+  parseCodexJsonl,
+  isCodexUnknownSessionError,
+} from "./parse.js";
 import { pathExists, prepareManagedCodexHome, resolveManagedCodexHomeDir, resolveSharedCodexHomeDir } from "./codex-home.js";
 import { resolveCodexDesiredSkillNames } from "./skills.js";
 
@@ -529,6 +533,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   const runAttempt = async (resumeSessionId: string | null) => {
     const args = buildArgs(resumeSessionId);
+    const detectTerminalEvent = createCodexTerminalEventDetector();
     if (onMeta) {
       await onMeta({
         adapterType: "codex_local",
@@ -553,6 +558,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       timeoutSec,
       graceSec,
       onSpawn,
+      detectCompletionReason: (stream, chunk) =>
+        stream === "stdout" ? detectTerminalEvent(chunk) : null,
       onLog: async (stream, chunk) => {
         if (stream !== "stderr") {
           await onLog(stream, chunk);
@@ -575,7 +582,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   };
 
   const toResult = (
-    attempt: { proc: { exitCode: number | null; signal: string | null; timedOut: boolean; stdout: string; stderr: string }; rawStderr: string; parsed: ReturnType<typeof parseCodexJsonl> },
+    attempt: {
+      proc: {
+        exitCode: number | null;
+        signal: string | null;
+        timedOut: boolean;
+        stdout: string;
+        stderr: string;
+        completionReason?: string | null;
+      };
+      rawStderr: string;
+      parsed: ReturnType<typeof parseCodexJsonl>;
+    },
     clearSessionOnMissingSession = false,
   ): AdapterExecutionResult => {
     if (attempt.proc.timedOut) {
@@ -600,19 +618,28 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       : null;
     const parsedError = typeof attempt.parsed.errorMessage === "string" ? attempt.parsed.errorMessage.trim() : "";
     const stderrLine = firstNonEmptyLine(attempt.proc.stderr);
+    const completedTurn = attempt.proc.completionReason === "turn.completed";
+    const failedTurn = attempt.proc.completionReason === "turn.failed";
     const fallbackErrorMessage =
       parsedError ||
       stderrLine ||
+      (failedTurn ? "Codex reported turn.failed." : "") ||
       `Codex exited with code ${attempt.proc.exitCode ?? -1}`;
+    const effectiveExitCode = completedTurn ? 0 : attempt.proc.exitCode;
+    const effectiveSignal = completedTurn ? null : attempt.proc.signal;
+    const errorMessage = completedTurn
+      ? null
+      : failedTurn
+        ? fallbackErrorMessage
+        : (effectiveExitCode ?? 0) === 0
+          ? null
+          : fallbackErrorMessage;
 
     return {
-      exitCode: attempt.proc.exitCode,
-      signal: attempt.proc.signal,
+      exitCode: effectiveExitCode,
+      signal: effectiveSignal,
       timedOut: false,
-      errorMessage:
-        (attempt.proc.exitCode ?? 0) === 0
-          ? null
-          : fallbackErrorMessage,
+      errorMessage,
       usage: attempt.parsed.usage,
       sessionId: resolvedSessionId,
       sessionParams: resolvedSessionParams,
@@ -625,6 +652,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       resultJson: {
         stdout: attempt.proc.stdout,
         stderr: attempt.proc.stderr,
+        completionReason: attempt.proc.completionReason ?? null,
       },
       summary: attempt.parsed.summary,
       clearSession: Boolean(clearSessionOnMissingSession && !resolvedSessionId),
@@ -635,7 +663,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (
     sessionId &&
     !initial.proc.timedOut &&
-    (initial.proc.exitCode ?? 0) !== 0 &&
+    (initial.proc.completionReason === "turn.failed" || (initial.proc.exitCode ?? 0) !== 0) &&
     isCodexUnknownSessionError(initial.proc.stdout, initial.rawStderr)
   ) {
     await onLog(

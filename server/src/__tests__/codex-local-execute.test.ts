@@ -39,6 +39,33 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, c
   return commandBasePath;
 }
 
+async function writeHangingAfterCompletionCodexCommand(commandBasePath: string): Promise<string> {
+  const script = `#!/usr/bin/env node
+const fs = require("node:fs");
+
+const capturePath = process.env.PAPERCLIP_TEST_CAPTURE_PATH;
+if (capturePath) {
+  fs.writeFileSync(capturePath, JSON.stringify({ pid: process.pid }), "utf8");
+}
+console.log(JSON.stringify({ type: "thread.started", thread_id: "codex-session-hang-1" }));
+console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "completed before exit" } }));
+console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } }));
+setInterval(() => {}, 1000);
+`;
+  if (process.platform === "win32") {
+    const scriptPath = `${commandBasePath}.js`;
+    const wrapperPath = `${commandBasePath}.cmd`;
+    const wrapper = `@echo off\r\nnode "%~dp0${path.basename(scriptPath)}" %*\r\n`;
+    await fs.writeFile(scriptPath, script, "utf8");
+    await fs.writeFile(wrapperPath, wrapper, "utf8");
+    return wrapperPath;
+  }
+
+  await fs.writeFile(commandBasePath, script, "utf8");
+  await fs.chmod(commandBasePath, 0o755);
+  return commandBasePath;
+}
+
 type CapturePayload = {
   argv: string[];
   prompt: string;
@@ -51,6 +78,25 @@ type LogEntry = {
   stream: "stdout" | "stderr";
   chunk: string;
 };
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForProcessExit(pid: number, timeoutMs = 5_000): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (!isProcessAlive(pid)) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+
+  throw new Error(`Timed out waiting for process ${pid} to exit`);
+}
 
 async function expectSharedAuthPreserved(targetPath: string, sharedPath: string): Promise<void> {
   const [targetStats, targetContents, sharedContents] = await Promise.all([
@@ -67,6 +113,69 @@ async function expectSharedAuthPreserved(targetPath: string, sharedPath: string)
 }
 
 describe("codex execute", () => {
+  it("finishes promptly after turn.completed even if the codex child process stays alive", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-terminal-close-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = await writeHangingAfterCompletionCodexCommand(path.join(root, "codex"));
+    const capturePath = path.join(root, "capture.json");
+    await fs.mkdir(workspace, { recursive: true });
+
+    const previousHome = process.env.HOME;
+    process.env.HOME = root;
+
+    let spawnedPid: number | null = null;
+    try {
+      const startedAt = Date.now();
+      const result = await execute({
+        runId: "run-terminal-close",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "Codex Coder",
+          adapterType: "codex_local",
+          adapterConfig: {},
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          timeoutSec: 1,
+          env: {
+            PAPERCLIP_TEST_CAPTURE_PATH: capturePath,
+          },
+          promptTemplate: "Follow the paperclip heartbeat.",
+        },
+        context: {},
+        authToken: "run-jwt-token",
+        onLog: async () => {},
+        onSpawn: async (meta) => {
+          spawnedPid = meta.pid;
+        },
+      });
+      const elapsedMs = Date.now() - startedAt;
+
+      expect(result.timedOut).toBe(false);
+      expect(result.exitCode).toBe(0);
+      expect(result.errorMessage).toBeNull();
+      expect(result.summary).toBe("completed before exit");
+      expect(elapsedMs).toBeLessThan(900);
+      expect(spawnedPid).not.toBeNull();
+      await waitForProcessExit(spawnedPid!);
+    } finally {
+      if (spawnedPid && isProcessAlive(spawnedPid)) {
+        process.kill(spawnedPid, "SIGKILL");
+      }
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("uses a Paperclip-managed CODEX_HOME outside worktree mode while preserving shared auth and config", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-default-"));
     const workspace = path.join(root, "workspace");
