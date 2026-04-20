@@ -152,6 +152,12 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function readNonEmptyString(value: unknown) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 function parseBooleanVariableValue(name: string, raw: unknown) {
   if (typeof raw === "boolean") return raw;
   if (typeof raw === "number" && (raw === 0 || raw === 1)) return raw === 1;
@@ -840,7 +846,7 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
         }
 
         // Keep the dispatch lock until the issue is linked to a queued heartbeat run.
-        await queueIssueAssignmentWakeup({
+        const wakeupRun = await queueIssueAssignmentWakeup({
           heartbeat,
           issue: createdIssue,
           reason: "issue_assigned",
@@ -857,6 +863,9 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
           },
           rethrowOnError: true,
         });
+        if (!readNonEmptyString(isPlainRecord(wakeupRun) ? wakeupRun.id : null)) {
+          throw new Error("Routine assignee wakeup did not queue a heartbeat run");
+        }
         const updated = await finalizeRun(createdRun.id, {
           status: "issue_created",
           linkedIssueId: createdIssue.id,

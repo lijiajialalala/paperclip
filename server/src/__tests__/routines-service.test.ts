@@ -344,10 +344,32 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
   it("waits for the assignee wakeup to be queued before returning the routine run", async () => {
     let wakeupResolved = false;
     const { routine, svc } = await seedFixture({
-      wakeup: async () => {
+      wakeup: async (wakeupAgentId, wakeupOpts) => {
+        const issueId =
+          (typeof wakeupOpts.payload?.issueId === "string" && wakeupOpts.payload.issueId) ||
+          (typeof wakeupOpts.contextSnapshot?.issueId === "string" && wakeupOpts.contextSnapshot.issueId) ||
+          null;
         await new Promise((resolve) => setTimeout(resolve, 10));
         wakeupResolved = true;
-        return null;
+        if (!issueId) return null;
+        const queuedRunId = randomUUID();
+        await db.insert(heartbeatRuns).values({
+          id: queuedRunId,
+          companyId: routine.companyId,
+          agentId: wakeupAgentId,
+          invocationSource: wakeupOpts.source ?? "assignment",
+          triggerDetail: wakeupOpts.triggerDetail ?? null,
+          status: "queued",
+          contextSnapshot: { ...(wakeupOpts.contextSnapshot ?? {}), issueId },
+        });
+        await db
+          .update(issues)
+          .set({
+            executionRunId: queuedRunId,
+            executionLockedAt: new Date(),
+          })
+          .where(eq(issues.id, issueId));
+        return { id: queuedRunId };
       },
     });
 
@@ -670,6 +692,25 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
 
     expect(run.status).toBe("failed");
     expect(run.failureReason).toContain("queue unavailable");
+    expect(run.linkedIssueId).toBeNull();
+
+    const routineIssues = await db
+      .select({ id: issues.id })
+      .from(issues)
+      .where(eq(issues.originId, routine.id));
+
+    expect(routineIssues).toHaveLength(0);
+  });
+
+  it("fails the run when issue assignment wakeup returns without queuing a run", async () => {
+    const { routine, svc } = await seedFixture({
+      wakeup: async () => null,
+    });
+
+    const run = await svc.runRoutine(routine.id, { source: "manual" });
+
+    expect(run.status).toBe("failed");
+    expect(run.failureReason).toContain("did not queue a heartbeat run");
     expect(run.linkedIssueId).toBeNull();
 
     const routineIssues = await db
