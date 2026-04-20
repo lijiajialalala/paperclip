@@ -1,4 +1,4 @@
-import { Router, type Request } from "express";
+import { Router, type Request, type Response } from "express";
 import type { Db } from "@paperclipai/db";
 import {
   createRoutineSchema,
@@ -19,6 +19,18 @@ export function routineRoutes(db: Db) {
   const router = Router();
   const svc = routineService(db);
   const access = accessService(db);
+  type RoutineRunResult = Awaited<ReturnType<typeof svc.runRoutine>>;
+
+  function respondWithRoutineRunResult(res: Response, run: RoutineRunResult) {
+    if (run.status === "failed") {
+      res.status(500).json({
+        error: run.failureReason ?? "Routine run failed",
+        run,
+      });
+      return;
+    }
+    res.status(202).json(run);
+  }
 
   async function assertBoardCanAssignTasks(req: Request, companyId: string) {
     assertCompanyAccess(req, companyId);
@@ -286,7 +298,7 @@ export function routineRoutes(db: Db) {
       entityId: run.id,
       details: { routineId: routine.id, source: run.source, status: run.status },
     });
-    res.status(202).json(run);
+    respondWithRoutineRunResult(res, run);
   });
 
   router.post("/routine-triggers/public/:publicId/fire", async (req, res) => {
@@ -298,7 +310,7 @@ export function routineRoutes(db: Db) {
       rawBody: (req as { rawBody?: Buffer }).rawBody ?? null,
       payload: typeof req.body === "object" && req.body !== null ? req.body as Record<string, unknown> : null,
     });
-    res.status(202).json(result);
+    respondWithRoutineRunResult(res, result);
   });
 
   return router;
