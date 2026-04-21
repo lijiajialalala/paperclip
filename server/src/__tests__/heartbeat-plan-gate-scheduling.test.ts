@@ -237,4 +237,55 @@ describeEmbeddedPostgres("heartbeat plan-gate-aware scheduling", () => {
       .then((rows) => rows[0] ?? null);
     expect(wakeup?.status).toBe("queued");
   });
+
+  it("re-enters scheduling when plan approval wakes an already queued run", async () => {
+    const { agentId, gatedIssueId } = await seedSchedulingFixture();
+    const heartbeat = heartbeatService(db);
+
+    const gatedRun = await heartbeat.invoke(
+      agentId,
+      "assignment",
+      { issueId: gatedIssueId },
+      "system",
+      { actorType: "system", actorId: "test" },
+    );
+    expect(gatedRun).not.toBeNull();
+
+    const queuedRun = await waitForRunStatus(heartbeat, gatedRun!.id, ["queued"]);
+    expect(queuedRun.status).toBe("queued");
+    expect(schedulingAdapterExecute).not.toHaveBeenCalled();
+
+    const approvedAt = new Date("2026-04-21T09:00:00.000Z");
+    await db
+      .update(issues)
+      .set({
+        planProposedAt: new Date("2026-04-21T08:55:00.000Z"),
+        planApprovedAt: approvedAt,
+        updatedAt: approvedAt,
+      })
+      .where(eq(issues.id, gatedIssueId));
+
+    const resumedRun = await heartbeat.wakeup(agentId, {
+      source: "automation",
+      triggerDetail: "system",
+      reason: "plan_approved",
+      requestedByActorType: "system",
+      requestedByActorId: "test",
+      contextSnapshot: {
+        issueId: gatedIssueId,
+        taskId: gatedIssueId,
+        source: "issue.plan_approved",
+        wakeReason: "plan_approved",
+      },
+    });
+
+    expect(resumedRun?.id).toBe(gatedRun!.id);
+    const finalizedRun = await waitForRunStatus(heartbeat, gatedRun!.id, ["succeeded"]);
+
+    expect(finalizedRun.status).toBe("succeeded");
+    expect(schedulingAdapterExecute).toHaveBeenCalledTimes(1);
+
+    const persistedRuns = await db.select().from(heartbeatRuns);
+    expect(persistedRuns).toHaveLength(1);
+  }, 15_000);
 });

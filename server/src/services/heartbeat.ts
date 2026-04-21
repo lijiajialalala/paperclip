@@ -4841,7 +4841,12 @@ export function heartbeatService(db: Db) {
       });
 
       if (outcome.kind === "deferred" || outcome.kind === "skipped") return null;
-      if (outcome.kind === "coalesced") return outcome.run;
+      if (outcome.kind === "coalesced") {
+        if (outcome.run.status === "queued") {
+          await startNextQueuedRunForAgent(agent.id);
+        }
+        return outcome.run;
+      }
 
       const newRun = outcome.run;
       publishLiveEvent({
@@ -4909,6 +4914,9 @@ export function heartbeatService(db: Db) {
         runId: mergedRun.id,
         finishedAt: new Date(),
       });
+      if (mergedRun.status === "queued") {
+        await startNextQueuedRunForAgent(agent.id);
+      }
       return mergedRun;
     }
 
