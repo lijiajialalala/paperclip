@@ -7,6 +7,7 @@ import { errorHandler } from "../middleware/index.js";
 const mockIssueService = vi.hoisted(() => ({
   assertCanTransitionIssueToDone: vi.fn(),
   assertCheckoutOwner: vi.fn(),
+  getAncestors: vi.fn(),
   getById: vi.fn(),
   update: vi.fn(),
   addComment: vi.fn(),
@@ -101,6 +102,7 @@ describe("issue comment reopen routes", () => {
     vi.clearAllMocks();
     mockIssueService.assertCanTransitionIssueToDone.mockResolvedValue(undefined);
     mockIssueService.getById.mockResolvedValue(makeIssue("todo"));
+    mockIssueService.getAncestors.mockResolvedValue([]);
     mockIssueService.assertCheckoutOwner.mockResolvedValue({
       id: "11111111-1111-4111-8111-111111111111",
       status: "in_progress",

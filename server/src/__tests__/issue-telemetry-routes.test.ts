@@ -7,6 +7,7 @@ import { errorHandler } from "../middleware/index.js";
 
 const mockIssueService = vi.hoisted(() => ({
   assertCanTransitionIssueToDone: vi.fn(),
+  getAncestors: vi.fn(),
   getById: vi.fn(),
   update: vi.fn(),
 }));
@@ -85,6 +86,7 @@ describe("issue telemetry routes", () => {
     mockHeartbeatService.reportRunActivity.mockResolvedValue(undefined);
     mockHeartbeatService.wakeup.mockResolvedValue(undefined);
     mockIssueService.assertCanTransitionIssueToDone.mockResolvedValue(undefined);
+    mockIssueService.getAncestors.mockResolvedValue([]);
     mockIssueService.getById.mockResolvedValue(makeIssue("todo"));
     mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
       ...makeIssue("todo"),

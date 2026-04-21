@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { getIssueExecutionPlanGateReason } from "../services/issue-plan-policy.ts";
+import {
+  getIssueExecutionPlanGateReason,
+  issueIsInRoutineExecutionLane,
+} from "../services/issue-plan-policy.ts";
 
 describe("issue-plan-policy", () => {
   it("treats execution before proposal as missing_plan_approval even if a plan was approved later", () => {
@@ -57,5 +60,20 @@ describe("issue-plan-policy", () => {
     );
 
     expect(reason).toBeNull();
+  });
+
+  it("treats descendant issues under a routine_execution ancestor as part of the routine lane", () => {
+    expect(
+      issueIsInRoutineExecutionLane(
+        {
+          originKind: "manual",
+          inRoutineExecutionLane: null,
+        },
+        [
+          { originKind: "manual" },
+          { originKind: "routine_execution" },
+        ],
+      ),
+    ).toBe(true);
   });
 });

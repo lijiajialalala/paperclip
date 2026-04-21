@@ -177,6 +177,15 @@ type IssueDoneGuardRunRow = {
   errorCode: string | null;
   error: string | null;
 };
+type IssueDoneTransitionBlocker = {
+  message: string;
+  details: Record<string, unknown> & {
+    code:
+      | "issue_done_blocked_by_status_truth"
+      | "issue_done_blocked_by_qa_writeback"
+      | "issue_done_blocked_by_platform_unblock";
+  };
+};
 
 function sameRunLock(checkoutRunId: string | null, actorRunId: string | null) {
   if (actorRunId) return checkoutRunId === actorRunId;
@@ -814,6 +823,54 @@ export function issueService(db: Db) {
   const qaIssueState = qaIssueStateService(db);
   const platformUnblock = platformUnblockService(db);
   const approvalsSvc = approvalService(db);
+
+  async function getIssueDoneTransitionBlocker(issueId: string): Promise<IssueDoneTransitionBlocker | null> {
+    const statusSummary = await statusTruth.getIssueStatusTruthSummary(issueId);
+    if (statusSummary?.canClose === false) {
+      return {
+        message: "Issue cannot be marked done because status truth indicates it is not closable",
+        details: {
+          code: "issue_done_blocked_by_status_truth",
+          effectiveStatus: statusSummary.effectiveStatus,
+          persistedStatus: statusSummary.persistedStatus,
+          authoritativeStatus: statusSummary.authoritativeStatus,
+          consistency: statusSummary.consistency,
+          driftCode: statusSummary.driftCode,
+        },
+      };
+    }
+
+    const qaSummary = await qaIssueState.getIssueQaSummary(issueId);
+    if (qaSummary?.canCloseUpstream === false) {
+      return {
+        message: "Issue cannot be marked done because QA writeback still blocks close-out",
+        details: {
+          code: "issue_done_blocked_by_qa_writeback",
+          latestRunId: qaSummary.latestRunId,
+          verdict: qaSummary.verdict,
+          alertType: qaSummary.alertType,
+          canCloseUpstream: qaSummary.canCloseUpstream,
+        },
+      };
+    }
+
+    const platformSummary = await platformUnblock.getIssuePlatformUnblockSummary(issueId);
+    if (platformSummary?.blocksCloseOut === true) {
+      return {
+        message: "Issue cannot be marked done because a platform unblock is still active",
+        details: {
+          code: "issue_done_blocked_by_platform_unblock",
+          primaryCategory: platformSummary.primaryCategory,
+          authoritativeSignalSource: platformSummary.authoritativeSignalSource,
+          authoritativeRunId: platformSummary.authoritativeRunId,
+          blocksCloseOut: platformSummary.blocksCloseOut,
+          canRetryEngineering: platformSummary.canRetryEngineering,
+        },
+      };
+    }
+
+    return null;
+  }
 
   async function getLiveWorkPlanApprovalForReview(
     issueId: string,
@@ -1789,39 +1846,9 @@ export function issueService(db: Db) {
       }
 
       if (input.actorType !== "board") {
-        const statusSummary = await statusTruth.getIssueStatusTruthSummary(input.issueId);
-        if (statusSummary?.canClose === false) {
-          throw unprocessable("Issue cannot be marked done because status truth indicates it is not closable", {
-            code: "issue_done_blocked_by_status_truth",
-            effectiveStatus: statusSummary.effectiveStatus,
-            persistedStatus: statusSummary.persistedStatus,
-            authoritativeStatus: statusSummary.authoritativeStatus,
-            consistency: statusSummary.consistency,
-            driftCode: statusSummary.driftCode,
-          });
-        }
-
-        const qaSummary = await qaIssueState.getIssueQaSummary(input.issueId);
-        if (qaSummary?.canCloseUpstream === false) {
-          throw unprocessable("Issue cannot be marked done because QA writeback still blocks close-out", {
-            code: "issue_done_blocked_by_qa_writeback",
-            latestRunId: qaSummary.latestRunId,
-            verdict: qaSummary.verdict,
-            alertType: qaSummary.alertType,
-            canCloseUpstream: qaSummary.canCloseUpstream,
-          });
-        }
-
-        const platformSummary = await platformUnblock.getIssuePlatformUnblockSummary(input.issueId);
-        if (platformSummary?.blocksCloseOut === true) {
-          throw unprocessable("Issue cannot be marked done because a platform unblock is still active", {
-            code: "issue_done_blocked_by_platform_unblock",
-            primaryCategory: platformSummary.primaryCategory,
-            authoritativeSignalSource: platformSummary.authoritativeSignalSource,
-            authoritativeRunId: platformSummary.authoritativeRunId,
-            blocksCloseOut: platformSummary.blocksCloseOut,
-            canRetryEngineering: platformSummary.canRetryEngineering,
-          });
+        const blocker = await getIssueDoneTransitionBlocker(input.issueId);
+        if (blocker) {
+          throw unprocessable(blocker.message, blocker.details);
         }
       }
     },
@@ -3015,6 +3042,7 @@ export function issueService(db: Db) {
         id: string; identifier: string | null; title: string; description: string | null;
         status: string; priority: string;
         assigneeAgentId: string | null; projectId: string | null; goalId: string | null;
+        originKind: string | null; originId: string | null;
       }> = [];
       const visited = new Set<string>([issueId]);
       const start = await db.select().from(issues).where(eq(issues.id, issueId)).then(r => r[0] ?? null);
@@ -3026,6 +3054,7 @@ export function issueService(db: Db) {
           status: issues.status, priority: issues.priority,
           assigneeAgentId: issues.assigneeAgentId, projectId: issues.projectId,
           goalId: issues.goalId, parentId: issues.parentId,
+          originKind: issues.originKind, originId: issues.originId,
         }).from(issues).where(eq(issues.id, currentId)).then(r => r[0] ?? null);
         if (!parent) break;
         raw.push({
@@ -3033,6 +3062,7 @@ export function issueService(db: Db) {
           status: parent.status, priority: parent.priority,
           assigneeAgentId: parent.assigneeAgentId ?? null,
           projectId: parent.projectId ?? null, goalId: parent.goalId ?? null,
+          originKind: parent.originKind ?? null, originId: parent.originId ?? null,
         });
         currentId = parent.parentId ?? null;
       }

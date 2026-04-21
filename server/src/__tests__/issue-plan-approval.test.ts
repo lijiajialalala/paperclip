@@ -504,6 +504,37 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
     expect(mockIssueSvc.checkout).toHaveBeenCalled();
   });
 
+  it("allows checkout for a child issue inside a routine_execution ancestor lane without a work plan", async () => {
+    const issue = makeIssue({
+      assigneeAgentId: AGENT_ASSIGNEE,
+      parentId: PARENT_ID,
+      originKind: "manual",
+      status: "todo",
+      planProposedAt: null,
+      planApprovedAt: null,
+    });
+    mockIssueSvc.getById.mockResolvedValue(issue);
+    mockIssueSvc.getAncestors.mockResolvedValue([
+      makeIssue({
+        id: PARENT_ID,
+        originKind: "routine_execution",
+        originId: "routine-1",
+      }),
+    ]);
+    mockIssueSvc.checkout.mockResolvedValue(makeIssue({
+      ...issue,
+      status: "in_progress",
+      checkoutRunId: "run-1",
+    }));
+
+    const res = await request(makeApp(agentActor(AGENT_ASSIGNEE)))
+      .post(`/api/issues/${ISSUE_ID}/checkout`)
+      .send({ agentId: AGENT_ASSIGNEE, expectedStatuses: ["todo"] });
+
+    expect(res.status).toBe(200);
+    expect(mockIssueSvc.checkout).toHaveBeenCalled();
+  });
+
   it("blocks child issue document writes until the plan is approved", async () => {
     const issue = makeIssue({
       assigneeAgentId: AGENT_ASSIGNEE,
