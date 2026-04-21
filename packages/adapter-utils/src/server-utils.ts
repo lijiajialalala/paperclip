@@ -17,9 +17,15 @@ export interface RunProcessResult {
   completionReason?: string | null;
 }
 
+export interface TerminalResultCleanupOptions {
+  hasTerminalResult: (output: { stdout: string; stderr: string }) => boolean;
+  graceMs?: number;
+}
+
 interface RunningProcess {
   child: ChildProcess;
   graceSec: number;
+  processGroupId: number | null;
 }
 
 interface SpawnTarget {
@@ -30,14 +36,41 @@ interface SpawnTarget {
 type ChildProcessWithEvents = ChildProcess & {
   on(event: "error", listener: (err: Error) => void): ChildProcess;
   on(
+    event: "exit",
+    listener: (code: number | null, signal: NodeJS.Signals | null) => void,
+  ): ChildProcess;
+  on(
     event: "close",
     listener: (code: number | null, signal: NodeJS.Signals | null) => void,
   ): ChildProcess;
 };
 
+function resolveProcessGroupId(child: ChildProcess) {
+  if (process.platform === "win32") return null;
+  return typeof child.pid === "number" && child.pid > 0 ? child.pid : null;
+}
+
+function signalRunningProcess(
+  running: Pick<RunningProcess, "child" | "processGroupId">,
+  signal: NodeJS.Signals,
+) {
+  if (process.platform !== "win32" && running.processGroupId && running.processGroupId > 0) {
+    try {
+      process.kill(-running.processGroupId, signal);
+      return;
+    } catch {
+      // Fall back to the direct child signal if group signaling fails.
+    }
+  }
+  if (!running.child.killed) {
+    running.child.kill(signal);
+  }
+}
+
 export const runningProcesses = new Map<string, RunningProcess>();
 export const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
 export const MAX_EXCERPT_BYTES = 32 * 1024;
+const TERMINAL_RESULT_SCAN_OVERLAP_CHARS = 64 * 1024;
 const SENSITIVE_ENV_KEY = /(key|token|secret|password|passwd|authorization|cookie)/i;
 const PAPERCLIP_SKILL_ROOT_RELATIVE_CANDIDATES = [
   "../../skills",
@@ -1117,7 +1150,8 @@ export async function runChildProcess(
     onLog: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
     detectCompletionReason?: (stream: "stdout" | "stderr", chunk: string) => string | null;
     onLogError?: (err: unknown, runId: string, message: string) => void;
-    onSpawn?: (meta: { pid: number; startedAt: string }) => Promise<void>;
+    onSpawn?: (meta: { pid: number; processGroupId?: number | null; startedAt: string }) => Promise<void>;
+    terminalResultCleanup?: TerminalResultCleanupOptions;
     stdin?: string;
   },
 ): Promise<RunProcessResult> {
@@ -1156,6 +1190,7 @@ export async function runChildProcess(
           stdio: [opts.stdin != null ? "pipe" : "ignore", "pipe", "pipe"],
         }) as ChildProcessWithEvents;
         const startedAt = new Date().toISOString();
+        const processGroupId = resolveProcessGroupId(child);
 
         if (opts.stdin != null && child.stdin) {
           child.stdin.write(opts.stdin);
@@ -1163,19 +1198,25 @@ export async function runChildProcess(
         }
 
         if (typeof child.pid === "number" && child.pid > 0 && opts.onSpawn) {
-          void opts.onSpawn({ pid: child.pid, startedAt }).catch((err) => {
+          void opts.onSpawn({ pid: child.pid, processGroupId, startedAt }).catch((err) => {
             onLogError(err, runId, "failed to record child process metadata");
           });
         }
 
-        runningProcesses.set(runId, { child, graceSec: opts.graceSec });
+        runningProcesses.set(runId, { child, graceSec: opts.graceSec, processGroupId });
 
         let timedOut = false;
         let stdout = "";
         let stderr = "";
         let logChain: Promise<void> = Promise.resolve();
         let completionReason: string | null = null;
+        let childExited = false;
         let closed = false;
+        let terminalResultSeen = false;
+        let terminalCleanupStarted = false;
+        let terminalCleanupTimer: NodeJS.Timeout | null = null;
+        let terminalResultStdoutScanOffset = 0;
+        let terminalResultStderrScanOffset = 0;
         let forceKillTimer: NodeJS.Timeout | null = null;
         let timeout: NodeJS.Timeout | null = null;
 
@@ -1183,6 +1224,13 @@ export async function runChildProcess(
           if (forceKillTimer) {
             clearTimeout(forceKillTimer);
             forceKillTimer = null;
+          }
+        };
+
+        const clearTerminalCleanupTimer = () => {
+          if (terminalCleanupTimer) {
+            clearTimeout(terminalCleanupTimer);
+            terminalCleanupTimer = null;
           }
         };
 
@@ -1195,8 +1243,10 @@ export async function runChildProcess(
             timeout = null;
           }
 
+          clearTerminalCleanupTimer();
+
           try {
-            child.kill("SIGTERM");
+            signalRunningProcess({ child, processGroupId }, "SIGTERM");
           } catch {
             return;
           }
@@ -1205,11 +1255,41 @@ export async function runChildProcess(
           forceKillTimer = setTimeout(() => {
             if (closed) return;
             try {
-              child.kill("SIGKILL");
+              signalRunningProcess({ child, processGroupId }, "SIGKILL");
             } catch {
               // Ignore late cleanup failures once the child is already gone.
             }
           }, Math.max(1, opts.graceSec) * 1000);
+        };
+
+        const maybeArmTerminalResultCleanup = () => {
+          const terminalCleanup = opts.terminalResultCleanup;
+          if (!terminalCleanup || terminalCleanupStarted || timedOut || closed) return;
+          if (!terminalResultSeen) {
+            const stdoutStart = Math.max(0, terminalResultStdoutScanOffset - TERMINAL_RESULT_SCAN_OVERLAP_CHARS);
+            const stderrStart = Math.max(0, terminalResultStderrScanOffset - TERMINAL_RESULT_SCAN_OVERLAP_CHARS);
+            const scanOutput = {
+              stdout: stdout.slice(stdoutStart),
+              stderr: stderr.slice(stderrStart),
+            };
+            terminalResultStdoutScanOffset = stdout.length;
+            terminalResultStderrScanOffset = stderr.length;
+            if (scanOutput.stdout.length === 0 && scanOutput.stderr.length === 0) return;
+            try {
+              terminalResultSeen = terminalCleanup.hasTerminalResult(scanOutput);
+            } catch (err) {
+              onLogError(err, runId, "failed to inspect terminal adapter output");
+            }
+          }
+          if (!terminalResultSeen || !childExited || terminalCleanupTimer) return;
+
+          const graceMs = Math.max(0, terminalCleanup.graceMs ?? 5_000);
+          terminalCleanupTimer = setTimeout(() => {
+            terminalCleanupTimer = null;
+            if (terminalCleanupStarted || timedOut || closed) return;
+            terminalCleanupStarted = true;
+            requestTermination();
+          }, graceMs);
         };
 
         if (opts.timeoutSec > 0) {
@@ -1222,9 +1302,13 @@ export async function runChildProcess(
         child.stdout?.on("data", (chunk: unknown) => {
           const text = String(chunk);
           stdout = appendWithCap(stdout, text);
+          maybeArmTerminalResultCleanup();
           logChain = logChain
             .then(() => opts.onLog("stdout", text))
-            .catch((err) => onLogError(err, runId, "failed to append stdout log chunk"));
+            .catch((err) => onLogError(err, runId, "failed to append stdout log chunk"))
+            .finally(() => {
+              maybeArmTerminalResultCleanup();
+            });
           const detectedReason = opts.detectCompletionReason?.("stdout", text);
           if (detectedReason) requestTermination(detectedReason);
         });
@@ -1232,15 +1316,20 @@ export async function runChildProcess(
         child.stderr?.on("data", (chunk: unknown) => {
           const text = String(chunk);
           stderr = appendWithCap(stderr, text);
+          maybeArmTerminalResultCleanup();
           logChain = logChain
             .then(() => opts.onLog("stderr", text))
-            .catch((err) => onLogError(err, runId, "failed to append stderr log chunk"));
+            .catch((err) => onLogError(err, runId, "failed to append stderr log chunk"))
+            .finally(() => {
+              maybeArmTerminalResultCleanup();
+            });
           const detectedReason = opts.detectCompletionReason?.("stderr", text);
           if (detectedReason) requestTermination(detectedReason);
         });
 
         child.on("error", (err: Error) => {
           if (timeout) clearTimeout(timeout);
+          clearTerminalCleanupTimer();
           clearForceKillTimer();
           runningProcesses.delete(runId);
           const errno = (err as NodeJS.ErrnoException).code;
@@ -1252,9 +1341,15 @@ export async function runChildProcess(
           reject(new Error(msg));
         });
 
+        child.on("exit", () => {
+          childExited = true;
+          maybeArmTerminalResultCleanup();
+        });
+
         child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
           closed = true;
           if (timeout) clearTimeout(timeout);
+          clearTerminalCleanupTimer();
           clearForceKillTimer();
           runningProcesses.delete(runId);
           void logChain.finally(() => {
