@@ -71,6 +71,7 @@ import {
   runBelongsToDifferentServerBoot,
   writeHeartbeatServerBootMarker,
 } from "./runtime-interruption.js";
+import { getIssueExecutionPlanGateReason, type IssueExecutionPlanGateReason } from "./issue-plan-policy.js";
 
 const MAX_LIVE_LOG_CHUNK_BYTES = 8 * 1024;
 const HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT = 1;
@@ -94,6 +95,11 @@ const SESSIONED_LOCAL_ADAPTERS = new Set([
   "opencode_local",
   "pi_local",
 ]);
+type QueuedRunIssueExecutionGate = {
+  issueId: string;
+  planGate: IssueExecutionPlanGateReason | null;
+  priority: string | null;
+};
 const ACTIVE_HEARTBEAT_RUN_STATUS_SET = new Set(["queued", "running"]);
 const HEARTBEAT_ACTIONABLE_ISSUE_STATUSES = ["todo", "in_progress", "blocked"] as const;
 const SESSIONED_LOCAL_TIMEOUT_FLOOR_SEC = 15 * 60;
@@ -2464,6 +2470,86 @@ export function heartbeatService(db: Db) {
     };
   }
 
+  function issueRunPriorityRank(priority: string | null | undefined) {
+    switch (priority) {
+      case "critical":
+        return 0;
+      case "high":
+        return 1;
+      case "medium":
+        return 2;
+      case "low":
+        return 3;
+      default:
+        return 4;
+    }
+  }
+
+  async function getIssueExecutionGate(
+    companyId: string,
+    issueId: string,
+  ): Promise<QueuedRunIssueExecutionGate | null> {
+    const issue = await db
+      .select({
+        id: issues.id,
+        priority: issues.priority,
+        parentId: issues.parentId,
+        originKind: issues.originKind,
+        assigneeAgentId: issues.assigneeAgentId,
+        planProposedAt: issues.planProposedAt,
+        planApprovedAt: issues.planApprovedAt,
+        status: issues.status,
+      })
+      .from(issues)
+      .where(and(eq(issues.id, issueId), eq(issues.companyId, companyId)))
+      .then((rows) => rows[0] ?? null);
+    if (!issue) return null;
+    return {
+      issueId: issue.id,
+      planGate: getIssueExecutionPlanGateReason(issue),
+      priority: issue.priority,
+    };
+  }
+
+  async function listQueuedRunIssueExecutionGates(
+    companyId: string,
+    queuedRuns: Array<typeof heartbeatRuns.$inferSelect>,
+  ) {
+    const issueIds = [...new Set(
+      queuedRuns
+        .map((run) => readNonEmptyString(parseObject(run.contextSnapshot).issueId))
+        .filter((issueId): issueId is string => Boolean(issueId)),
+    )];
+    if (issueIds.length === 0) {
+      return new Map<string, QueuedRunIssueExecutionGate>();
+    }
+
+    const rows = await db
+      .select({
+        id: issues.id,
+        priority: issues.priority,
+        parentId: issues.parentId,
+        originKind: issues.originKind,
+        assigneeAgentId: issues.assigneeAgentId,
+        planProposedAt: issues.planProposedAt,
+        planApprovedAt: issues.planApprovedAt,
+        status: issues.status,
+      })
+      .from(issues)
+      .where(and(eq(issues.companyId, companyId), inArray(issues.id, issueIds)));
+
+    return new Map(
+      rows.map((issue) => [
+        issue.id,
+        {
+          issueId: issue.id,
+          planGate: getIssueExecutionPlanGateReason(issue),
+          priority: issue.priority,
+        } satisfies QueuedRunIssueExecutionGate,
+      ]),
+    );
+  }
+
   async function countRunningRunsForAgent(agentId: string) {
     const [{ count }] = await db
       .select({ count: sql<number>`count(*)` })
@@ -2492,6 +2578,18 @@ export function heartbeatService(db: Db) {
     if (budgetBlock) {
       await cancelRunInternal(run.id, budgetBlock.reason);
       return null;
+    }
+
+    const issueId = readNonEmptyString(context.issueId);
+    if (issueId) {
+      const executionGate = await getIssueExecutionGate(run.companyId, issueId);
+      if (executionGate?.planGate) {
+        logger.debug(
+          { runId: run.id, issueId, planGate: executionGate.planGate },
+          "claimQueuedRun: leaving run queued because issue execution is still gated",
+        );
+        return null;
+      }
     }
 
     const claimedAt = new Date();
@@ -2883,11 +2981,28 @@ export function heartbeatService(db: Db) {
         .where(and(eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.status, "queued")))
         .orderBy(asc(heartbeatRuns.createdAt));
       if (queuedRuns.length === 0) return [];
-      const readyQueuedRuns = selectReadyQueuedRunsForStart(queuedRuns, new Date(), availableSlots);
+      const readyQueuedRuns = selectReadyQueuedRunsForStart(queuedRuns, new Date());
       if (readyQueuedRuns.length === 0) return [];
+      const issueExecutionGates = await listQueuedRunIssueExecutionGates(agent.companyId, readyQueuedRuns);
+      const prioritizedRuns = [...readyQueuedRuns].sort((left, right) => {
+        const leftIssueId = readNonEmptyString(parseObject(left.contextSnapshot).issueId);
+        const rightIssueId = readNonEmptyString(parseObject(right.contextSnapshot).issueId);
+        const leftGate = leftIssueId ? issueExecutionGates.get(leftIssueId)?.planGate ?? null : null;
+        const rightGate = rightIssueId ? issueExecutionGates.get(rightIssueId)?.planGate ?? null : null;
+        if (Boolean(leftGate) !== Boolean(rightGate)) {
+          return leftGate ? 1 : -1;
+        }
+        const leftPriorityRank = issueRunPriorityRank(leftIssueId ? issueExecutionGates.get(leftIssueId)?.priority : null);
+        const rightPriorityRank = issueRunPriorityRank(rightIssueId ? issueExecutionGates.get(rightIssueId)?.priority : null);
+        if (leftPriorityRank !== rightPriorityRank) {
+          return leftPriorityRank - rightPriorityRank;
+        }
+        return left.createdAt.getTime() - right.createdAt.getTime();
+      });
 
       const claimedRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
-      for (const queuedRun of readyQueuedRuns) {
+      for (const queuedRun of prioritizedRuns) {
+        if (claimedRuns.length >= availableSlots) break;
         const claimed = await claimQueuedRun(queuedRun);
         if (claimed) claimedRuns.push(claimed);
       }
