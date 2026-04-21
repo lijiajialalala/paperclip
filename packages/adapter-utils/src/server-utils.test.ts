@@ -1,11 +1,14 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ensurePaperclipSkillSymlink,
   readInstalledSkillTargets,
   renderPaperclipWakePrompt,
+  runningProcesses,
+  runChildProcess,
 } from "./server-utils.js";
 
 function makeSymlinkPermissionError(): NodeJS.ErrnoException {
@@ -15,6 +18,137 @@ function makeSymlinkPermissionError(): NodeJS.ErrnoException {
     syscall: "symlink",
   });
 }
+
+function isPidAlive(pid: number) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForPidExit(pid: number, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!isPidAlive(pid)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return !isPidAlive(pid);
+}
+
+async function waitForTextMatch(read: () => string, pattern: RegExp, timeoutMs = 1_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = read();
+    const match = value.match(pattern);
+    if (match) return match;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return read().match(pattern);
+}
+
+describe("runChildProcess", () => {
+  it.skipIf(process.platform === "win32")("cleans up a lingering process group after terminal output and child exit", async () => {
+    let spawnedMeta: { pid: number; processGroupId?: number | null; startedAt: string } | null = null;
+    const result = await runChildProcess(
+      randomUUID(),
+      process.execPath,
+      [
+        "-e",
+        [
+          "const { spawn } = require('node:child_process');",
+          "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: ['ignore', 'inherit', 'ignore'] });",
+          "process.stdout.write(`descendant:${child.pid}\\n`);",
+          "process.stdout.write(`${JSON.stringify({ type: 'result', result: 'done' })}\\n`);",
+          "setTimeout(() => process.exit(0), 25);",
+        ].join(" "),
+      ],
+      {
+        cwd: process.cwd(),
+        env: {},
+        timeoutSec: 0,
+        graceSec: 1,
+        onLog: async () => {},
+        onSpawn: async (meta) => {
+          spawnedMeta = meta;
+        },
+        terminalResultCleanup: {
+          graceMs: 100,
+          hasTerminalResult: ({ stdout }) => stdout.includes('"type":"result"'),
+        },
+      },
+    );
+
+    const descendantPid = Number.parseInt(result.stdout.match(/descendant:(\d+)/)?.[1] ?? "", 10);
+    expect(result.timedOut).toBe(false);
+    expect(result.exitCode).toBe(0);
+    expect(spawnedMeta?.processGroupId).toBe(spawnedMeta?.pid ?? null);
+    expect(Number.isInteger(descendantPid) && descendantPid > 0).toBe(true);
+    expect(await waitForPidExit(descendantPid, 2_000)).toBe(true);
+  });
+
+  it.skipIf(process.platform === "win32")("does not clean up noisy runs that have no terminal output", async () => {
+    const runId = randomUUID();
+    let observed = "";
+    const resultPromise = runChildProcess(
+      runId,
+      process.execPath,
+      [
+        "-e",
+        [
+          "const { spawn } = require('node:child_process');",
+          "const child = spawn(process.execPath, ['-e', \"setInterval(() => process.stdout.write('noise\\\\n'), 50)\"], { stdio: ['ignore', 'inherit', 'ignore'] });",
+          "process.stdout.write(`descendant:${child.pid}\\n`);",
+          "setTimeout(() => process.exit(0), 25);",
+        ].join(" "),
+      ],
+      {
+        cwd: process.cwd(),
+        env: {},
+        timeoutSec: 0,
+        graceSec: 1,
+        onLog: async (_stream, chunk) => {
+          observed += chunk;
+        },
+        terminalResultCleanup: {
+          graceMs: 50,
+          hasTerminalResult: ({ stdout }) => stdout.includes('"type":"result"'),
+        },
+      },
+    );
+
+    const pidMatch = await waitForTextMatch(() => observed, /descendant:(\d+)/);
+    const descendantPid = Number.parseInt(pidMatch?.[1] ?? "", 10);
+    expect(Number.isInteger(descendantPid) && descendantPid > 0).toBe(true);
+
+    const race = await Promise.race([
+      resultPromise.then(() => "settled" as const),
+      new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 300)),
+    ]);
+    expect(race).toBe("pending");
+    expect(isPidAlive(descendantPid)).toBe(true);
+
+    const running = runningProcesses.get(runId);
+    try {
+      if (running?.processGroupId) {
+        process.kill(-running.processGroupId, "SIGKILL");
+      } else {
+        running?.child.kill("SIGKILL");
+      }
+      await resultPromise;
+    } finally {
+      runningProcesses.delete(runId);
+      if (isPidAlive(descendantPid)) {
+        try {
+          process.kill(descendantPid, "SIGKILL");
+        } catch {
+          // Ignore cleanup races.
+        }
+      }
+    }
+  });
+});
 
 describe("ensurePaperclipSkillSymlink", () => {
   const tempRoots = new Set<string>();
