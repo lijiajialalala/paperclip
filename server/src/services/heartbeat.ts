@@ -32,7 +32,13 @@ import { companySkillService } from "./company-skills.js";
 import { budgetService, type BudgetEnforcementScope } from "./budgets.js";
 import { secretService } from "./secrets.js";
 import { resolveDefaultAgentWorkspaceDir, resolveManagedProjectWorkspaceDir } from "../home-paths.js";
-import { buildHeartbeatRunIssueComment, summarizeHeartbeatRunResultJson } from "./heartbeat-run-summary.js";
+import {
+  buildHeartbeatRunIssueComment,
+  HEARTBEAT_RUN_RESULT_SUMMARY_MAX_CHARS,
+  summarizeHeartbeatRunContextSnapshot,
+  summarizeHeartbeatRunListResultJson,
+  summarizeHeartbeatRunResultJson,
+} from "./heartbeat-run-summary.js";
 import { qaWritebackService } from "./qa-writeback.js";
 import {
   buildWorkspaceReadyComment,
@@ -473,7 +479,6 @@ const heartbeatRunListColumns = {
   exitCode: heartbeatRuns.exitCode,
   signal: heartbeatRuns.signal,
   usageJson: heartbeatRuns.usageJson,
-  resultJson: heartbeatRuns.resultJson,
   sessionIdBefore: heartbeatRuns.sessionIdBefore,
   sessionIdAfter: heartbeatRuns.sessionIdAfter,
   logStore: heartbeatRuns.logStore,
@@ -489,9 +494,48 @@ const heartbeatRunListColumns = {
   processStartedAt: heartbeatRuns.processStartedAt,
   retryOfRunId: heartbeatRuns.retryOfRunId,
   processLossRetryCount: heartbeatRuns.processLossRetryCount,
-  contextSnapshot: heartbeatRuns.contextSnapshot,
   createdAt: heartbeatRuns.createdAt,
   updatedAt: heartbeatRuns.updatedAt,
+} as const;
+
+const heartbeatRunListContextColumns = {
+  contextIssueId: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'issueId'`.as("contextIssueId"),
+  contextTaskId: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'taskId'`.as("contextTaskId"),
+  contextTaskKey: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'taskKey'`.as("contextTaskKey"),
+  contextCommentId: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'commentId'`.as("contextCommentId"),
+  contextWakeCommentId: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'wakeCommentId'`.as("contextWakeCommentId"),
+  contextWakeReason: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'wakeReason'`.as("contextWakeReason"),
+  contextWakeSource: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'wakeSource'`.as("contextWakeSource"),
+  contextWakeTriggerDetail: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'wakeTriggerDetail'`.as("contextWakeTriggerDetail"),
+} as const;
+
+const heartbeatRunListResultColumns = {
+  resultSummary: sql<string | null>`left(${heartbeatRuns.resultJson} ->> 'summary', ${HEARTBEAT_RUN_RESULT_SUMMARY_MAX_CHARS})`.as("resultSummary"),
+  resultResult: sql<string | null>`left(${heartbeatRuns.resultJson} ->> 'result', ${HEARTBEAT_RUN_RESULT_SUMMARY_MAX_CHARS})`.as("resultResult"),
+  resultMessage: sql<string | null>`left(${heartbeatRuns.resultJson} ->> 'message', ${HEARTBEAT_RUN_RESULT_SUMMARY_MAX_CHARS})`.as("resultMessage"),
+  resultError: sql<string | null>`left(${heartbeatRuns.resultJson} ->> 'error', ${HEARTBEAT_RUN_RESULT_SUMMARY_MAX_CHARS})`.as("resultError"),
+  resultTotalCostUsd: sql<string | null>`${heartbeatRuns.resultJson} ->> 'total_cost_usd'`.as("resultTotalCostUsd"),
+  resultCostUsd: sql<string | null>`${heartbeatRuns.resultJson} ->> 'cost_usd'`.as("resultCostUsd"),
+  resultCostUsdCamel: sql<string | null>`${heartbeatRuns.resultJson} ->> 'costUsd'`.as("resultCostUsdCamel"),
+} as const;
+
+const heartbeatRunLogAccessColumns = {
+  id: heartbeatRuns.id,
+  companyId: heartbeatRuns.companyId,
+  logStore: heartbeatRuns.logStore,
+  logRef: heartbeatRuns.logRef,
+} as const;
+
+const heartbeatRunIssueSummaryColumns = {
+  id: heartbeatRuns.id,
+  status: heartbeatRuns.status,
+  invocationSource: heartbeatRuns.invocationSource,
+  triggerDetail: heartbeatRuns.triggerDetail,
+  startedAt: heartbeatRuns.startedAt,
+  finishedAt: heartbeatRuns.finishedAt,
+  createdAt: heartbeatRuns.createdAt,
+  agentId: heartbeatRuns.agentId,
+  issueId: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'issueId'`.as("issueId"),
 } as const;
 
 function appendExcerpt(prev: string, chunk: string) {
@@ -1460,6 +1504,14 @@ export function heartbeatService(db: Db) {
   async function getRun(runId: string) {
     return db
       .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0] ?? null);
+  }
+
+  async function getRunLogAccess(runId: string) {
+    return db
+      .select(heartbeatRunLogAccessColumns)
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, runId))
       .then((rows) => rows[0] ?? null);
@@ -5056,7 +5108,11 @@ export function heartbeatService(db: Db) {
   return {
     list: async (companyId: string, agentId?: string, limit?: number) => {
       const query = db
-        .select(heartbeatRunListColumns)
+        .select({
+          ...heartbeatRunListColumns,
+          ...heartbeatRunListContextColumns,
+          ...heartbeatRunListResultColumns,
+        })
         .from(heartbeatRuns)
         .where(
           agentId
@@ -5066,13 +5122,54 @@ export function heartbeatService(db: Db) {
         .orderBy(desc(heartbeatRuns.createdAt));
 
       const rows = limit ? await query.limit(limit) : await query;
-      return rows.map((row) => ({
-        ...row,
-        resultJson: summarizeHeartbeatRunResultJson(row.resultJson),
-      }));
+      return rows.map((row) => {
+        const {
+          contextIssueId,
+          contextTaskId,
+          contextTaskKey,
+          contextCommentId,
+          contextWakeCommentId,
+          contextWakeReason,
+          contextWakeSource,
+          contextWakeTriggerDetail,
+          resultSummary,
+          resultResult,
+          resultMessage,
+          resultError,
+          resultTotalCostUsd,
+          resultCostUsd,
+          resultCostUsdCamel,
+          ...rest
+        } = row;
+
+        return {
+          ...rest,
+          contextSnapshot: summarizeHeartbeatRunContextSnapshot({
+            issueId: contextIssueId,
+            taskId: contextTaskId,
+            taskKey: contextTaskKey,
+            commentId: contextCommentId,
+            wakeCommentId: contextWakeCommentId,
+            wakeReason: contextWakeReason,
+            wakeSource: contextWakeSource,
+            wakeTriggerDetail: contextWakeTriggerDetail,
+          }),
+          resultJson: summarizeHeartbeatRunListResultJson({
+            summary: resultSummary,
+            result: resultResult,
+            message: resultMessage,
+            error: resultError,
+            totalCostUsd: resultTotalCostUsd,
+            costUsd: resultCostUsd,
+            costUsdCamel: resultCostUsdCamel,
+          }),
+        };
+      });
     },
 
     getRun,
+
+    getRunLogAccess,
 
     getRuntimeState: async (agentId: string) => {
       const state = await getRuntimeState(agentId);
@@ -5147,8 +5244,17 @@ export function heartbeatService(db: Db) {
         .orderBy(asc(heartbeatRunEvents.seq))
         .limit(Math.max(1, Math.min(limit, 1000))),
 
-    readLog: async (runId: string, opts?: { offset?: number; limitBytes?: number }) => {
-      const run = await getRun(runId);
+    readLog: async (
+      runOrLookup: string | {
+        id: string;
+        companyId: string;
+        logStore: string | null;
+        logRef: string | null;
+      },
+      opts?: { offset?: number; limitBytes?: number },
+    ) => {
+      const run = typeof runOrLookup === "string" ? await getRunLogAccess(runOrLookup) : runOrLookup;
+      const runId = typeof runOrLookup === "string" ? runOrLookup : runOrLookup.id;
       if (!run) throw notFound("Heartbeat run not found");
       if (!run.logStore || !run.logRef) throw notFound("Run log not found");
 
@@ -5237,9 +5343,33 @@ export function heartbeatService(db: Db) {
 
     cancelBudgetScopeWork,
 
+    getRunIssueSummary: async (runId: string) => {
+      const [run] = await db
+        .select(heartbeatRunIssueSummaryColumns)
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, runId))
+        .limit(1);
+      return run ?? null;
+    },
+
     getActiveRunForAgent: async (agentId: string) => {
       const [run] = await db
         .select()
+        .from(heartbeatRuns)
+        .where(
+          and(
+            eq(heartbeatRuns.agentId, agentId),
+            eq(heartbeatRuns.status, "running"),
+          ),
+        )
+        .orderBy(desc(heartbeatRuns.startedAt))
+        .limit(1);
+      return run ?? null;
+    },
+
+    getActiveRunIssueSummaryForAgent: async (agentId: string) => {
+      const [run] = await db
+        .select(heartbeatRunIssueSummaryColumns)
         .from(heartbeatRuns)
         .where(
           and(

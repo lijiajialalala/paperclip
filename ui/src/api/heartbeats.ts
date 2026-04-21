@@ -6,8 +6,16 @@ import type {
 } from "@paperclipai/shared";
 import { api } from "./client";
 
-export interface ActiveRunForIssue extends HeartbeatRun {
+export interface ActiveRunForIssue {
+  id: string;
+  status: HeartbeatRun["status"];
+  invocationSource: HeartbeatRun["invocationSource"];
+  triggerDetail: HeartbeatRun["triggerDetail"];
+  startedAt: HeartbeatRun["startedAt"] | string;
+  finishedAt: HeartbeatRun["finishedAt"] | string;
+  createdAt: HeartbeatRun["createdAt"] | string;
   agentId: string;
+  issueId: string | null;
   agentName: string;
   adapterType: string;
 }
