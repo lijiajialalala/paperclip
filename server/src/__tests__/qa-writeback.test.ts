@@ -481,6 +481,89 @@ describeEmbeddedPostgres("qaWritebackService", () => {
     );
   });
 
+  it("does not raise missing_plan_approval for a child issue inside a routine_execution ancestor lane", async () => {
+    const { companyId, qaAgentId, issueId } = await seedFixture();
+    const createdAt = new Date("2026-04-08T00:31:00.000Z");
+    const agent = await getAgent(qaAgentId);
+    const parentIssueId = randomUUID();
+    const parentAssigneeAgentId = randomUUID();
+    const heartbeat = {
+      wakeup: vi.fn(async () => undefined),
+    };
+
+    await seedAgent({
+      companyId,
+      agentId: parentAssigneeAgentId,
+      name: "Tech Lead",
+      role: "tech_lead",
+    });
+
+    await db.insert(issues).values({
+      id: parentIssueId,
+      companyId,
+      issueNumber: 41,
+      identifier: "CMPA-41",
+      title: "Routine parent lane",
+      status: "in_progress",
+      priority: "high",
+      assigneeAgentId: parentAssigneeAgentId,
+      originKind: "routine_execution",
+      originId: "routine-1",
+    });
+
+    await db
+      .update(issues)
+      .set({
+        parentId: parentIssueId,
+        originKind: "manual",
+        status: "in_progress",
+        planProposedAt: null,
+        planApprovedAt: null,
+      })
+      .where(eq(issues.id, issueId));
+
+    await db.insert(heartbeatRuns).values({
+      id: "fefefefe-fefe-4efe-8efe-fefefefefefe",
+      companyId,
+      agentId: qaAgentId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "succeeded",
+      contextSnapshot: { issueId },
+      resultJson: {
+        verdict: "pass",
+        summary: "Verdict: pass\nRoutine lane child validated.",
+      },
+      startedAt: new Date(createdAt.getTime() - 60_000),
+      finishedAt: createdAt,
+      createdAt,
+      updatedAt: createdAt,
+    });
+
+    const run = await getRun("fefefefe-fefe-4efe-8efe-fefefefefefe");
+    const settlement = await (qaWritebackService as any)(db, { heartbeat }).settleTerminalQaRun({
+      run,
+      runAgent: agent,
+      issueId,
+    });
+
+    const updatedIssue = await getIssue(issueId);
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+
+    expect(settlement.issueWriteback.status).toBe("platform_written");
+    expect(settlement.issueWriteback.alertType).toBeNull();
+    expect(settlement.issueWriteback.canCloseUpstream).toBe(true);
+    expect(updatedIssue.status).toBe("done");
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.body).toContain("Verdict: pass");
+    expect(heartbeat.wakeup).toHaveBeenCalledWith(
+      parentAssigneeAgentId,
+      expect.objectContaining({
+        reason: "child_issue_completed",
+      }),
+    );
+  });
+
   it("is idempotent: calling settleTerminalQaRun twice does not write extra comments", async () => {
     // Fix #3: concurrent / retry invocations must not produce duplicate verdict comments.
     const { companyId, qaAgentId, issueId } = await seedFixture();

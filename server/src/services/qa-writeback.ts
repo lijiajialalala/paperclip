@@ -8,7 +8,10 @@ import {
   resolveParentIssueCloseoutWakeReason,
   type IssueParentCloseoutWakeDeps,
 } from "./issue-parent-closeout-wakeup.js";
-import { getIssueExecutionPlanGateReason } from "./issue-plan-policy.js";
+import {
+  getIssueExecutionPlanGateReason,
+  issueIsInRoutineExecutionLane,
+} from "./issue-plan-policy.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { getTelemetryClient } from "../telemetry.js";
 import { redactCurrentUserText } from "../log-redaction.js";
@@ -162,6 +165,32 @@ function canCloseUpstreamForVerdict(verdict: QaVerdict | null): boolean | null {
   if (verdict === "pass") return true;
   if (verdict === "fail" || verdict === "inconclusive") return false;
   return null;
+}
+
+async function loadIssueRoutineExecutionLane(
+  db: Db,
+  issue: Pick<IssueRow, "parentId" | "originKind">,
+) {
+  if (issue.originKind === "routine_execution") return true;
+
+  let currentId = issue.parentId ?? null;
+  const visited = new Set<string>();
+  while (currentId && !visited.has(currentId) && visited.size < 50) {
+    visited.add(currentId);
+    const parent = await db
+      .select({
+        parentId: issues.parentId,
+        originKind: issues.originKind,
+      })
+      .from(issues)
+      .where(eq(issues.id, currentId))
+      .then((rows) => rows[0] ?? null);
+    if (!parent) break;
+    if (issueIsInRoutineExecutionLane(parent)) return true;
+    currentId = parent.parentId ?? null;
+  }
+
+  return false;
 }
 
 function readQaIssueWritebackValue(value: unknown): QaIssueWriteback | null {
@@ -518,7 +547,11 @@ export function qaWritebackService(db: Db, deps: QaWritebackServiceDeps = {}) {
         const details = asRecord(entry.details);
         return readNonEmptyString(details?.status) === desiredStatus;
       });
-      const executionPlanGateReason = getIssueExecutionPlanGateReason(issue, {
+      const inRoutineExecutionLane = await loadIssueRoutineExecutionLane(db, issue);
+      const executionPlanGateReason = getIssueExecutionPlanGateReason({
+        ...issue,
+        inRoutineExecutionLane,
+      }, {
         executionStartedAt: input.run.startedAt,
       });
 

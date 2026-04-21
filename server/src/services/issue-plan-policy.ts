@@ -5,6 +5,7 @@ export type IssuePlanPolicyRecord = {
   planProposedAt?: Date | string | null;
   planApprovedAt?: Date | string | null;
   status?: string | null;
+  inRoutineExecutionLane?: boolean | null;
 };
 
 export type IssueExecutionPlanGateReason =
@@ -20,8 +21,17 @@ function readDate(value: Date | string | null | undefined): Date | null {
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
+export function issueIsInRoutineExecutionLane(
+  issue: Pick<IssuePlanPolicyRecord, "originKind" | "inRoutineExecutionLane">,
+  ancestors: Array<Pick<IssuePlanPolicyRecord, "originKind">> = [],
+) {
+  if (issue.inRoutineExecutionLane === true) return true;
+  if (issue.originKind === "routine_execution") return true;
+  return ancestors.some((ancestor) => ancestor.originKind === "routine_execution");
+}
+
 export function issueRequiresApprovedPlan(issue: IssuePlanPolicyRecord): boolean {
-  if (issue.originKind === "routine_execution") return false;
+  if (issueIsInRoutineExecutionLane(issue)) return false;
   return Boolean(issue.parentId && issue.assigneeAgentId);
 }
 

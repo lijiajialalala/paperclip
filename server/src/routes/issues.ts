@@ -73,6 +73,7 @@ import {
 import {
   describeIssueExecutionPlanGateError,
   getIssueExecutionPlanGateReason,
+  issueIsInRoutineExecutionLane,
 } from "../services/issue-plan-policy.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
@@ -580,6 +581,8 @@ export function issueRoutes(
     req: Request,
     res: Response,
     issue: {
+      id?: string;
+      originKind?: string | null;
       parentId?: string | null;
       assigneeAgentId?: string | null;
       planProposedAt?: Date | null;
@@ -589,7 +592,11 @@ export function issueRoutes(
     action: string,
   ) {
     if (req.actor.type !== "agent") return true;
-    const gateReason = getIssueExecutionPlanGateReason(issue);
+    const ancestors = issue.id ? await svc.getAncestors(issue.id) : [];
+    const gateReason = getIssueExecutionPlanGateReason({
+      ...issue,
+      inRoutineExecutionLane: issueIsInRoutineExecutionLane(issue, ancestors),
+    });
     if (!gateReason) return true;
 
     res.status(409).json({
