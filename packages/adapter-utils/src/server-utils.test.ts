@@ -50,6 +50,7 @@ async function waitForTextMatch(read: () => string, pattern: RegExp, timeoutMs =
 
 describe("runChildProcess", () => {
   it.skipIf(process.platform === "win32")("cleans up a lingering process group after terminal output and child exit", async () => {
+    let spawnedMeta: { pid: number; processGroupId?: number | null; startedAt: string } | null = null;
     const result = await runChildProcess(
       randomUUID(),
       process.execPath,
@@ -69,6 +70,9 @@ describe("runChildProcess", () => {
         timeoutSec: 0,
         graceSec: 1,
         onLog: async () => {},
+        onSpawn: async (meta) => {
+          spawnedMeta = meta;
+        },
         terminalResultCleanup: {
           graceMs: 100,
           hasTerminalResult: ({ stdout }) => stdout.includes('"type":"result"'),
@@ -79,6 +83,7 @@ describe("runChildProcess", () => {
     const descendantPid = Number.parseInt(result.stdout.match(/descendant:(\d+)/)?.[1] ?? "", 10);
     expect(result.timedOut).toBe(false);
     expect(result.exitCode).toBe(0);
+    expect(spawnedMeta?.processGroupId).toBe(spawnedMeta?.pid ?? null);
     expect(Number.isInteger(descendantPid) && descendantPid > 0).toBe(true);
     expect(await waitForPidExit(descendantPid, 2_000)).toBe(true);
   });

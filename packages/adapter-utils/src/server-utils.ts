@@ -50,6 +50,12 @@ function resolveProcessGroupId(child: ChildProcess) {
   return typeof child.pid === "number" && child.pid > 0 ? child.pid : null;
 }
 
+function shouldSpawnDetachedProcessGroup(input: {
+  terminalResultCleanup?: TerminalResultCleanupOptions;
+}) {
+  return process.platform !== "win32" && Boolean(input.terminalResultCleanup);
+}
+
 function signalRunningProcess(
   running: Pick<RunningProcess, "child" | "processGroupId">,
   signal: NodeJS.Signals,
@@ -1183,14 +1189,18 @@ export async function runChildProcess(
     const mergedEnv = ensurePathInEnv(rawMerged);
     void resolveSpawnTarget(command, args, opts.cwd, mergedEnv)
       .then((target) => {
+        const spawnDetachedProcessGroup = shouldSpawnDetachedProcessGroup({
+          terminalResultCleanup: opts.terminalResultCleanup,
+        });
         const child = spawn(target.command, target.args, {
           cwd: opts.cwd,
           env: mergedEnv,
+          detached: spawnDetachedProcessGroup,
           shell: false,
           stdio: [opts.stdin != null ? "pipe" : "ignore", "pipe", "pipe"],
         }) as ChildProcessWithEvents;
         const startedAt = new Date().toISOString();
-        const processGroupId = resolveProcessGroupId(child);
+        const processGroupId = spawnDetachedProcessGroup ? resolveProcessGroupId(child) : null;
 
         if (opts.stdin != null && child.stdin) {
           child.stdin.write(opts.stdin);
