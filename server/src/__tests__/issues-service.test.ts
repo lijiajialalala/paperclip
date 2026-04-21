@@ -32,7 +32,7 @@ import {
 import { instanceSettingsService } from "../services/instance-settings.ts";
 import { issueApprovalService } from "../services/issue-approvals.ts";
 import { issueStatusTruthService } from "../services/issue-status-truth.ts";
-import { issueService } from "../services/issues.ts";
+import { getIssueCreateDisposition, issueService } from "../services/issues.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -2142,6 +2142,356 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
 
     expect(created.parentId).toBeNull();
     expect(created.taskRootIssueId).toBe(created.id);
+  });
+
+  it("reuses an active agent-created child issue when the same stage identity is retried", async () => {
+    const companyId = randomUUID();
+    const managerAgentId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const parentIssueId = randomUUID();
+    const existingChildIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      issueCounter: 2,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values([
+      {
+        id: managerAgentId,
+        companyId,
+        name: "ResearchLead",
+        role: "manager",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: assigneeAgentId,
+        companyId,
+        name: "Reviewer",
+        role: "reviewer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+
+    await db.insert(issues).values([
+      {
+        id: parentIssueId,
+        companyId,
+        title: "Research parent",
+        status: "in_progress",
+        priority: "high",
+        issueNumber: 1,
+        identifier: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}-1`,
+      },
+      {
+        id: existingChildIssueId,
+        companyId,
+        parentId: parentIssueId,
+        title: "研究审查官｜AI 视频切入口正式报告终审（45-review-verdict）",
+        status: "todo",
+        priority: "high",
+        assigneeAgentId,
+        createdByAgentId: managerAgentId,
+        originKind: "research_stage",
+        originId: "45-review-verdict",
+        issueNumber: 2,
+        identifier: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}-2`,
+      },
+    ]);
+
+    const reused = await svc.create(companyId, {
+      parentId: parentIssueId,
+      title: "研究审查官｜AI 视频切入口最终审查（45-review-verdict）",
+      status: "todo",
+      priority: "high",
+      assigneeAgentId,
+      createdByAgentId: managerAgentId,
+      originKind: "research_stage",
+      originId: "45-review-verdict",
+    });
+
+    expect(reused.id).toBe(existingChildIssueId);
+    expect(getIssueCreateDisposition(reused)).toBe("reused");
+
+    const childIssues = await db
+      .select({ id: issues.id })
+      .from(issues)
+      .where(eq(issues.parentId, parentIssueId));
+    expect(childIssues).toEqual([{ id: existingChildIssueId }]);
+  });
+
+  it("does not reuse agent child issues without a stable stage identity", async () => {
+    const companyId = randomUUID();
+    const managerAgentId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const parentIssueId = randomUUID();
+    const existingChildIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      issueCounter: 2,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values([
+      {
+        id: managerAgentId,
+        companyId,
+        name: "ResearchLead",
+        role: "research_lead",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: assigneeAgentId,
+        companyId,
+        name: "EvidenceAuditor",
+        role: "auditor",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+
+    await db.insert(issues).values([
+      {
+        id: parentIssueId,
+        companyId,
+        title: "Research parent",
+        status: "in_progress",
+        priority: "high",
+        issueNumber: 1,
+        identifier: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}-1`,
+      },
+      {
+        id: existingChildIssueId,
+        companyId,
+        parentId: parentIssueId,
+        title: "Evidence review",
+        status: "todo",
+        priority: "high",
+        assigneeAgentId,
+        createdByAgentId: managerAgentId,
+        issueNumber: 2,
+        identifier: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}-2`,
+      },
+    ]);
+
+    const created = await svc.create(companyId, {
+      parentId: parentIssueId,
+      title: "Evidence review",
+      status: "todo",
+      priority: "high",
+      assigneeAgentId,
+      createdByAgentId: managerAgentId,
+    });
+
+    expect(created.id).not.toBe(existingChildIssueId);
+    expect(getIssueCreateDisposition(created)).toBe("created");
+
+    const childIssues = await db
+      .select({ id: issues.id })
+      .from(issues)
+      .where(eq(issues.parentId, parentIssueId));
+    expect(childIssues).toHaveLength(2);
+  });
+
+  it("reclaims a terminal execution lock during checkout instead of throwing a conflict", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    const staleRunId = randomUUID();
+    const freshRunId = randomUUID();
+    const prefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: prefix,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "ResearchReviewer",
+      role: "reviewer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.insert(heartbeatRuns).values([
+      {
+        id: staleRunId,
+        companyId,
+        agentId,
+        invocationSource: "assignment",
+        triggerDetail: "system",
+        status: "failed",
+        contextSnapshot: { issueId },
+        errorCode: "process_lost",
+        error: "lost process",
+        startedAt: new Date("2026-04-21T11:00:00.000Z"),
+        finishedAt: new Date("2026-04-21T11:01:00.000Z"),
+        createdAt: new Date("2026-04-21T11:00:00.000Z"),
+        updatedAt: new Date("2026-04-21T11:01:00.000Z"),
+      },
+      {
+        id: freshRunId,
+        companyId,
+        agentId,
+        invocationSource: "assignment",
+        triggerDetail: "system",
+        status: "running",
+        contextSnapshot: { issueId },
+        startedAt: new Date("2026-04-21T11:05:00.000Z"),
+        createdAt: new Date("2026-04-21T11:05:00.000Z"),
+        updatedAt: new Date("2026-04-21T11:05:00.000Z"),
+      },
+    ]);
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Review final verdict",
+      status: "todo",
+      priority: "high",
+      assigneeAgentId: agentId,
+      executionRunId: staleRunId,
+      executionLockedAt: new Date("2026-04-21T11:00:00.000Z"),
+      issueNumber: 3,
+      identifier: `${prefix}-3`,
+    });
+
+    const checkedOut = await svc.checkout(issueId, agentId, ["todo"], freshRunId);
+
+    expect(checkedOut.status).toBe("in_progress");
+    expect(checkedOut.checkoutRunId).toBe(freshRunId);
+    expect(checkedOut.executionRunId).toBe(freshRunId);
+
+    const persisted = await db
+      .select({
+        status: issues.status,
+        checkoutRunId: issues.checkoutRunId,
+        executionRunId: issues.executionRunId,
+      })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0]!);
+
+    expect(persisted).toEqual({
+      status: "in_progress",
+      checkoutRunId: freshRunId,
+      executionRunId: freshRunId,
+    });
+  });
+
+  it("does not reclaim a stale execution lock from a different assignee agent", async () => {
+    const companyId = randomUUID();
+    const assignedAgentId = randomUUID();
+    const otherAgentId = randomUUID();
+    const issueId = randomUUID();
+    const staleRunId = randomUUID();
+    const freshRunId = randomUUID();
+    const prefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: prefix,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values([
+      {
+        id: assignedAgentId,
+        companyId,
+        name: "AssignedReviewer",
+        role: "reviewer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: otherAgentId,
+        companyId,
+        name: "OtherReviewer",
+        role: "reviewer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+
+    await db.insert(heartbeatRuns).values([
+      {
+        id: staleRunId,
+        companyId,
+        agentId: assignedAgentId,
+        invocationSource: "assignment",
+        triggerDetail: "system",
+        status: "failed",
+        contextSnapshot: { issueId },
+        errorCode: "process_lost",
+        error: "lost process",
+        startedAt: new Date("2026-04-21T11:00:00.000Z"),
+        finishedAt: new Date("2026-04-21T11:01:00.000Z"),
+        createdAt: new Date("2026-04-21T11:00:00.000Z"),
+        updatedAt: new Date("2026-04-21T11:01:00.000Z"),
+      },
+      {
+        id: freshRunId,
+        companyId,
+        agentId: otherAgentId,
+        invocationSource: "assignment",
+        triggerDetail: "system",
+        status: "running",
+        contextSnapshot: { issueId },
+        startedAt: new Date("2026-04-21T11:05:00.000Z"),
+        createdAt: new Date("2026-04-21T11:05:00.000Z"),
+        updatedAt: new Date("2026-04-21T11:05:00.000Z"),
+      },
+    ]);
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Review final verdict",
+      status: "todo",
+      priority: "high",
+      assigneeAgentId: assignedAgentId,
+      executionRunId: staleRunId,
+      executionLockedAt: new Date("2026-04-21T11:00:00.000Z"),
+      issueNumber: 3,
+      identifier: `${prefix}-3`,
+    });
+
+    await expect(svc.checkout(issueId, otherAgentId, ["todo"], freshRunId)).rejects.toThrow("Issue checkout conflict");
   });
 
   describe("assertCanTransitionIssueToDone", () => {

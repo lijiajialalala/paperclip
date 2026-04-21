@@ -48,6 +48,8 @@ export const createIssueSchema = z.object({
   priority: z.enum(ISSUE_PRIORITIES).optional().default("medium"),
   assigneeAgentId: z.string().uuid().optional().nullable(),
   assigneeUserId: z.string().optional().nullable(),
+  originKind: z.string().trim().min(1).max(64).optional().nullable(),
+  originId: z.string().trim().min(1).max(255).optional().nullable(),
   requestDepth: z.number().int().nonnegative().optional().default(0),
   billingCode: z.string().optional().nullable(),
   assigneeAdapterOverrides: issueAssigneeAdapterOverridesSchema.optional().nullable(),

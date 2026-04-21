@@ -41,6 +41,7 @@ import {
   executionWorkspaceService,
   feedbackService,
   goalService,
+  getIssueCreateDisposition,
   heartbeatService,
   instanceSettingsService,
   issueApprovalService,
@@ -2012,9 +2013,14 @@ export function issueRoutes(
     const actor = getActorInfo(req);
     const issue = await svc.create(companyId, {
       ...req.body,
+      originRunId:
+        req.actor.type === "agent"
+          ? actor.runId
+          : null,
       createdByAgentId: actor.agentId,
       createdByUserId: actor.actorType === "user" ? actor.actorId : null,
     });
+    const createDisposition = getIssueCreateDisposition(issue);
 
     await logActivity(db, {
       companyId,
@@ -2022,23 +2028,27 @@ export function issueRoutes(
       actorId: actor.actorId,
       agentId: actor.agentId,
       runId: actor.runId,
-      action: "issue.created",
+      action: createDisposition === "reused" ? "issue.updated" : "issue.created",
       entityType: "issue",
       entityId: issue.id,
-      details: { title: issue.title, identifier: issue.identifier },
+      details: {
+        title: issue.title,
+        identifier: issue.identifier,
+        createDisposition,
+      },
     });
 
     void queueIssueAssignmentWakeup({
       heartbeat,
       issue,
       reason: "issue_assigned",
-      mutation: "create",
+      mutation: createDisposition === "reused" ? "update" : "create",
       contextSource: "issue.create",
       requestedByActorType: actor.actorType,
       requestedByActorId: actor.actorId,
     });
 
-    res.status(201).json(issue);
+    res.status(createDisposition === "reused" ? 200 : 201).json(issue);
   });
 
   router.patch("/issues/:id", validate(updateIssueRouteSchema), async (req, res) => {
