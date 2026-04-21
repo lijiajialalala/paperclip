@@ -101,6 +101,29 @@ async function waitForRunStatus(
   throw new Error(`Timed out waiting for run ${runId} to enter one of: ${statuses.join(", ")}`);
 }
 
+async function waitForAgentStatus(
+  db: ReturnType<typeof createDb>,
+  agentId: string,
+  statuses: Array<"idle" | "running" | "paused" | "terminated" | "pending_approval">,
+  timeoutMs = 10_000,
+  intervalMs = 50,
+) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const agent = await db
+      .select()
+      .from(agents)
+      .where(eq(agents.id, agentId))
+      .then((rows) => rows[0] ?? null);
+    if (agent && statuses.includes(agent.status)) {
+      return agent;
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+
+  throw new Error(`Timed out waiting for agent ${agentId} to enter one of: ${statuses.join(", ")}`);
+}
+
 describeEmbeddedPostgres("heartbeat plan-gate-aware scheduling", () => {
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
@@ -229,6 +252,7 @@ describeEmbeddedPostgres("heartbeat plan-gate-aware scheduling", () => {
     expect(finalizedReadyRun.status).toBe("succeeded");
     expect(stillQueuedGateRun?.status).toBe("queued");
     expect(schedulingAdapterExecute).toHaveBeenCalledTimes(1);
+    await waitForAgentStatus(db, agentId, ["idle"]);
 
     const wakeup = await db
       .select()
@@ -284,6 +308,7 @@ describeEmbeddedPostgres("heartbeat plan-gate-aware scheduling", () => {
 
     expect(finalizedRun.status).toBe("succeeded");
     expect(schedulingAdapterExecute).toHaveBeenCalledTimes(1);
+    await waitForAgentStatus(db, agentId, ["idle"]);
 
     const persistedRuns = await db.select().from(heartbeatRuns);
     expect(persistedRuns).toHaveLength(1);
