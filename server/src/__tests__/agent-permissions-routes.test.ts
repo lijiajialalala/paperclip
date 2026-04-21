@@ -367,15 +367,62 @@ describe("agent permission routes", () => {
     const res = await request(app).get("/api/agents/me/inbox-lite");
 
     expect(res.status).toBe(200);
+    expect(mockIssueService.list).toHaveBeenCalledWith(companyId, {
+      assigneeAgentId: agentId,
+      status: "todo,in_progress,blocked",
+      includeRoutineExecutions: true,
+    });
     expect(mockStatusTruth.getIssueStatusTruthSummaries).toHaveBeenCalledWith(["issue-1"]);
     expect(res.body).toEqual([
       expect.objectContaining({
         id: "issue-1",
         status: "blocked",
+        executionReady: true,
+        planGate: null,
         statusTruthSummary: expect.objectContaining({
           effectiveStatus: "blocked",
           consistency: "drifted",
         }),
+      }),
+    ]);
+  });
+
+  it("surfaces plan-gate readiness in inbox-lite", async () => {
+    mockIssueService.list.mockResolvedValueOnce([
+      {
+        id: "issue-2",
+        identifier: "PAP-911",
+        title: "Write implementation plan",
+        status: "todo",
+        priority: "medium",
+        projectId: null,
+        goalId: null,
+        parentId: "parent-1",
+        assigneeAgentId: agentId,
+        planProposedAt: null,
+        planApprovedAt: null,
+        updatedAt: new Date("2026-03-19T00:00:00.000Z"),
+        activeRun: null,
+      },
+    ]);
+    mockStatusTruth.getIssueStatusTruthSummaries.mockResolvedValueOnce(new Map());
+
+    const app = createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      runId: "run-1",
+      source: "agent_key",
+    });
+
+    const res = await request(app).get("/api/agents/me/inbox-lite");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([
+      expect.objectContaining({
+        id: "issue-2",
+        executionReady: false,
+        planGate: "missing_plan_approval",
       }),
     ]);
   });

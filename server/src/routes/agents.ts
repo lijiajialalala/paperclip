@@ -73,6 +73,7 @@ import { getTelemetryClient } from "../telemetry.js";
 import { platformUnblockService } from "../services/platform-unblock.js";
 import { qaIssueStateService } from "../services/qa-issue-state.js";
 import { applyEffectiveStatus, issueStatusTruthService } from "../services/issue-status-truth.js";
+import { getIssueExecutionPlanGateReason } from "../services/issue-plan-policy.js";
 
 export function agentRoutes(db: Db) {
   const DEFAULT_INSTRUCTIONS_PATH_KEYS: Record<string, string> = {
@@ -1160,12 +1161,14 @@ export function agentRoutes(db: Db) {
     const rows = await issuesSvc.list(req.actor.companyId, {
       assigneeAgentId: req.actor.agentId,
       status: "todo,in_progress,blocked",
+      includeRoutineExecutions: true,
     });
     const statusSummaries = await statusTruth.getIssueStatusTruthSummaries(rows.map((issue) => issue.id));
 
     res.json(
       rows.map((issue) => {
         const serialized = applyEffectiveStatus(issue, statusSummaries.get(issue.id) ?? null);
+        const planGate = getIssueExecutionPlanGateReason(serialized);
         return {
           id: serialized.id,
           identifier: serialized.identifier,
@@ -1178,6 +1181,8 @@ export function agentRoutes(db: Db) {
           parentId: serialized.parentId,
           updatedAt: serialized.updatedAt,
           activeRun: serialized.activeRun,
+          executionReady: !planGate,
+          planGate,
         };
       }),
     );
