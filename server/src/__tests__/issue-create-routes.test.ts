@@ -1,6 +1,7 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { IssueOriginKind } from "@paperclipai/shared";
 import { issueRoutes } from "../routes/issues.js";
 import { errorHandler } from "../middleware/index.js";
 
@@ -29,6 +30,7 @@ const mockAgentService = vi.hoisted(() => ({
 const mockLogActivity = vi.hoisted(() => vi.fn(async () => undefined));
 const mockGetIssueCreateDisposition = vi.hoisted(() => vi.fn(() => "created" as "created" | "reused"));
 const mockQueueIssueAssignmentWakeup = vi.hoisted(() => vi.fn());
+const researchStageOriginKind: IssueOriginKind = "research_stage";
 
 vi.mock("../services/index.js", () => ({
   accessService: () => mockAccessService,
@@ -124,6 +126,41 @@ describe("issue create routes", () => {
         mutation: "create",
       }),
     );
+  });
+
+  it("passes custom stage lineage through generic issue creation", async () => {
+    const res = await request(createApp())
+      .post("/api/companies/company-1/issues")
+      .send({
+        title: "AI 视频研究主线",
+        originKind: researchStageOriginKind,
+        originId: "45-review-verdict",
+      });
+
+    expect(res.status).toBe(201);
+    expect(mockIssueService.create).toHaveBeenCalledWith(
+      "company-1",
+      expect.objectContaining({
+        originKind: researchStageOriginKind,
+        originId: "45-review-verdict",
+      }),
+    );
+  });
+
+  it("rejects reserved runtime lineage on generic issue creation", async () => {
+    const res = await request(createApp())
+      .post("/api/companies/company-1/issues")
+      .send({
+        title: "AI 视频研究主线",
+        originKind: "routine_execution",
+        originId: "routine-123",
+      });
+
+    expect(res.status).toBe(422);
+    expect(res.body).toEqual({
+      error: "Reserved issue lineage cannot be set through generic issue creation",
+    });
+    expect(mockIssueService.create).not.toHaveBeenCalled();
   });
 
   it("treats reused issues as updates instead of fresh creates", async () => {

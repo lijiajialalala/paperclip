@@ -88,6 +88,7 @@ export {
   type IssueStatus,
   type IssueWritableStatus,
   type IssuePriority,
+  type ReservedIssueOriginKind,
   type IssueOriginKind,
   type GoalLevel,
   type GoalStatus,

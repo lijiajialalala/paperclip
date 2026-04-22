@@ -1,11 +1,13 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { IssueOriginKind } from "@paperclipai/shared";
 import { issueRoutes } from "../routes/issues.js";
 import { errorHandler } from "../middleware/index.js";
 
 const issueId = "11111111-1111-4111-8111-111111111111";
 const companyId = "company-1";
+const researchStageOriginKind: IssueOriginKind = "research_stage";
 
 const mockIssueService = vi.hoisted(() => ({
   getById: vi.fn(),
@@ -153,7 +155,7 @@ function makeIssue() {
     assigneeUserId: null,
     createdByUserId: "local-board",
     createdByAgentId: "agent-manager",
-    originKind: "research_stage",
+    originKind: researchStageOriginKind,
     originId: "45-review-verdict",
     updatedAt: new Date("2026-04-22T00:00:00.000Z"),
     executionRunId: null,

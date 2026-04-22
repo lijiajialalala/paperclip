@@ -19,6 +19,7 @@ import {
   linkIssueApprovalSchema,
   issueDocumentKeySchema,
   restoreIssueDocumentRevisionSchema,
+  ISSUE_ORIGIN_KINDS,
   updateIssueWorkProductSchema,
   upsertIssueDocumentSchema,
   updateIssueSchema,
@@ -2008,6 +2009,12 @@ export function issueRoutes(
         return;
       }
       if (!(await assertAgentExecutionPlanAllowed(req, res, parentIssue, "creating child issues"))) return;
+    }
+    if (req.body.originKind === ISSUE_ORIGIN_KINDS[1]) {
+      res.status(422).json({
+        error: "Reserved issue lineage cannot be set through generic issue creation",
+      });
+      return;
     }
 
     const actor = getActorInfo(req);
