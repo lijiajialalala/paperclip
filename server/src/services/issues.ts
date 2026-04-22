@@ -1317,7 +1317,7 @@ async function findReusableAgentChildIssue(input: {
     ? eq(issues.assigneeUserId, input.assigneeUserId)
     : isNull(issues.assigneeUserId);
 
-  const existing = await dbOrTx
+  const matches = await dbOrTx
     .select()
     .from(issues)
     .where(and(
@@ -1332,10 +1332,22 @@ async function findReusableAgentChildIssue(input: {
       eq(issues.originId, normalizedOriginId),
     ))
     .orderBy(desc(issues.updatedAt), desc(issues.createdAt), desc(issues.issueNumber))
-    .limit(1)
-    .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
+    .limit(2)
+    .then((rows: Array<typeof issues.$inferSelect>) => rows);
 
-  if (!existing) return null;
+  if (matches.length === 0) return null;
+  if (matches.length > 1) {
+    throw conflict("Multiple live child issues match the same reusable stage identity", {
+      parentId: input.parentId,
+      createdByAgentId: input.createdByAgentId,
+      assigneeAgentId: input.assigneeAgentId ?? null,
+      assigneeUserId: input.assigneeUserId ?? null,
+      originKind: normalizedOriginKind,
+      originId: normalizedOriginId,
+      issueIds: matches.map((issue: typeof issues.$inferSelect) => issue.id),
+    });
+  }
+  const [existing] = matches;
   const [enriched] = await withIssueLabels(dbOrTx, [existing]);
   return enriched;
 }
@@ -2153,9 +2165,17 @@ async function adoptStaleCheckoutRun(input: {
         .then((rows) => rows[0] ?? null);
       if (!existing) return null;
 
+      const nextOriginKind = data.originKind === undefined ? existing.originKind : data.originKind;
+      const nextOriginId = data.originId === undefined ? existing.originId : data.originId;
+      if (nextOriginKind !== existing.originKind || nextOriginId !== existing.originId) {
+        throw unprocessable("Issue lineage cannot be changed through generic updates");
+      }
+
       const {
         labelIds: nextLabelIds,
         taskRootIssueId: _ignoredTaskRootIssueId,
+        originKind: _ignoredOriginKind,
+        originId: _ignoredOriginId,
         ...issueData
       } = data as Partial<typeof issues.$inferInsert> & { labelIds?: string[] };
       const isolatedWorkspacesEnabled = (await instanceSettings.getExperimental()).enableIsolatedWorkspaces;

@@ -2314,6 +2314,132 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     expect(childIssues).toHaveLength(2);
   });
 
+  it("fails closed when multiple live child issues share the same reusable stage identity", async () => {
+    const companyId = randomUUID();
+    const managerAgentId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const parentIssueId = randomUUID();
+    const firstChildIssueId = randomUUID();
+    const secondChildIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      issueCounter: 3,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values([
+      {
+        id: managerAgentId,
+        companyId,
+        name: "ResearchLead",
+        role: "research_lead",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: assigneeAgentId,
+        companyId,
+        name: "EvidenceAuditor",
+        role: "auditor",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+
+    await db.insert(issues).values([
+      {
+        id: parentIssueId,
+        companyId,
+        title: "Research parent",
+        status: "in_progress",
+        priority: "high",
+        issueNumber: 1,
+        identifier: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}-1`,
+      },
+      {
+        id: firstChildIssueId,
+        companyId,
+        parentId: parentIssueId,
+        title: "Research verdict review A",
+        status: "todo",
+        priority: "high",
+        assigneeAgentId,
+        createdByAgentId: managerAgentId,
+        originKind: "research_stage",
+        originId: "45-review-verdict",
+        issueNumber: 2,
+        identifier: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}-2`,
+      },
+      {
+        id: secondChildIssueId,
+        companyId,
+        parentId: parentIssueId,
+        title: "Research verdict review B",
+        status: "blocked",
+        priority: "high",
+        assigneeAgentId,
+        createdByAgentId: managerAgentId,
+        originKind: "research_stage",
+        originId: "45-review-verdict",
+        issueNumber: 3,
+        identifier: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}-3`,
+      },
+    ]);
+
+    await expect(
+      svc.create(companyId, {
+        parentId: parentIssueId,
+        title: "Research verdict review retry",
+        status: "todo",
+        priority: "high",
+        assigneeAgentId,
+        createdByAgentId: managerAgentId,
+        originKind: "research_stage",
+        originId: "45-review-verdict",
+      }),
+    ).rejects.toThrow(/multiple live child issues match the same reusable stage identity/i);
+  });
+
+  it("rejects generic issue updates that try to rewrite lineage metadata", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Research child",
+      status: "todo",
+      priority: "medium",
+      originKind: "research_stage",
+      originId: "45-review-verdict",
+      issueNumber: 1,
+      identifier: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}-1`,
+    });
+
+    await expect(
+      svc.update(issueId, {
+        originKind: "routine_execution",
+        originId: "routine-123",
+      }),
+    ).rejects.toThrow(/lineage cannot be changed through generic updates/i);
+  });
+
   it("reclaims a terminal execution lock during checkout instead of throwing a conflict", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
