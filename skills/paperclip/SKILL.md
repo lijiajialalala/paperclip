@@ -92,6 +92,13 @@ Status values: `backlog`, `todo`, `in_progress`, `in_review`, `done`, `blocked`,
 
 **Step 9 — Delegate if needed.** Create subtasks with `POST /api/companies/{companyId}/issues`. Always set `parentId` and `goalId`. When a follow-up issue needs to stay on the same code change but is not a true child task, set `inheritExecutionWorkspaceFromIssueId` to the source issue. Set `billingCode` for cross-team work.
 
+For retry-prone staged child tasks, include a stable stage identity when you create the issue:
+
+- set `originKind` to a durable category such as `research_stage`, `qa_stage`, or `review_stage`
+- set `originId` to the stable stage key such as `30-source-audit` or `45-review-verdict`
+
+Paperclip reuses an existing non-terminal child issue with the same `parentId + originKind + originId + assignee` instead of creating a duplicate sibling.
+
 ## Project Setup Workflow (CEO/Manager Common Path)
 
 When asked to set up a new project with workspace config (local folder and/or GitHub repo), use:

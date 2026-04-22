@@ -48,6 +48,8 @@ export const createIssueSchema = z.object({
   priority: z.enum(ISSUE_PRIORITIES).optional().default("medium"),
   assigneeAgentId: z.string().uuid().optional().nullable(),
   assigneeUserId: z.string().optional().nullable(),
+  originKind: z.string().trim().min(1).max(64).optional().nullable(),
+  originId: z.string().trim().min(1).max(255).optional().nullable(),
   requestDepth: z.number().int().nonnegative().optional().default(0),
   billingCode: z.string().optional().nullable(),
   assigneeAdapterOverrides: issueAssigneeAdapterOverridesSchema.optional().nullable(),
@@ -59,6 +61,13 @@ export const createIssueSchema = z.object({
 
 export type CreateIssue = z.infer<typeof createIssueSchema>;
 
+const updateIssueFieldsSchema = createIssueSchema
+  .omit({
+    originKind: true,
+    originId: true,
+  })
+  .partial();
+
 export const createIssueLabelSchema = z.object({
   name: z.string().trim().min(1).max(48),
   color: z.string().regex(/^#(?:[0-9a-fA-F]{6})$/, "Color must be a 6-digit hex value"),
@@ -66,7 +75,7 @@ export const createIssueLabelSchema = z.object({
 
 export type CreateIssueLabel = z.infer<typeof createIssueLabelSchema>;
 
-export const updateIssueSchema = createIssueSchema.partial().extend({
+export const updateIssueSchema = updateIssueFieldsSchema.extend({
   comment: z.string().min(1).optional(),
   reopen: z.boolean().optional(),
   interrupt: z.boolean().optional(),

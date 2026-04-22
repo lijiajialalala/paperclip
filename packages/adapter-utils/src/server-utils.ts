@@ -307,6 +307,7 @@ type PaperclipWakeIssue = {
   title: string | null;
   status: string | null;
   priority: string | null;
+  workspaceCwd: string | null;
   taskRootIssueId: string | null;
   taskRootDir: string | null;
   deliverableRoot: string | null;
@@ -342,6 +343,7 @@ function normalizePaperclipWakeIssue(value: unknown): PaperclipWakeIssue | null 
   const title = asString(issue.title, "").trim() || null;
   const status = asString(issue.status, "").trim() || null;
   const priority = asString(issue.priority, "").trim() || null;
+  const workspaceCwd = asString(issue.workspaceCwd, "").trim() || null;
   const taskRootIssueId = asString(issue.taskRootIssueId, "").trim() || null;
   const taskRootDir = asString(issue.taskRootDir, "").trim() || null;
   const deliverableRoot = asString(issue.deliverableRoot, "").trim() || null;
@@ -352,6 +354,7 @@ function normalizePaperclipWakeIssue(value: unknown): PaperclipWakeIssue | null 
     title,
     status,
     priority,
+    workspaceCwd,
     taskRootIssueId,
     taskRootDir,
     deliverableRoot,
@@ -492,6 +495,9 @@ export function renderPaperclipWakePrompt(
   if (normalized.issue?.priority) {
     lines.push(`- issue priority: ${normalized.issue.priority}`);
   }
+  if (normalized.issue?.workspaceCwd) {
+    lines.push(`- working directory: ${normalized.issue.workspaceCwd}`);
+  }
   if (normalized.issue?.taskRootIssueId) {
     lines.push(`- task root issue: ${normalized.issue.taskRootIssueId}`);
   }
@@ -500,6 +506,12 @@ export function renderPaperclipWakePrompt(
   }
   if (normalized.issue?.deliverableRoot) {
     lines.push(`- deliverable root: ${normalized.issue.deliverableRoot}`);
+  }
+  if (normalized.issue?.workspaceCwd && normalized.issue?.taskRootDir) {
+    lines.push(
+      "- use the working directory for project files such as docs/, src/, package.json, and tests.",
+      "- use the task root only for task-scoped artifacts under .paperclip/tasks/.",
+    );
   }
   if (normalized.missingCount > 0) {
     lines.push(`- omitted comments: ${normalized.missingCount}`);

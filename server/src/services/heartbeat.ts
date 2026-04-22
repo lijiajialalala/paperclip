@@ -1158,13 +1158,14 @@ async function buildPaperclipWakePayload(input: {
   db: Db;
   companyId: string;
   contextSnapshot: Record<string, unknown>;
-  issueSummary?:
+      issueSummary?:
     | {
         id: string;
         identifier: string | null;
         title: string;
         status: string;
         priority: string;
+        workspaceCwd?: string | null;
         taskRootIssueId?: string | null;
         taskRootDir?: string | null;
         deliverableRoot?: string | null;
@@ -1174,6 +1175,8 @@ async function buildPaperclipWakePayload(input: {
   type PaperclipWakeIssueSummary = NonNullable<typeof input.issueSummary>;
   const commentIds = extractWakeCommentIds(input.contextSnapshot);
   const issueId = readNonEmptyString(input.contextSnapshot.issueId);
+  const wakeWorkspace = parseObject(input.contextSnapshot.paperclipWorkspace);
+  const wakeWorkspaceCwd = readNonEmptyString(wakeWorkspace.cwd);
   const issueSummary: PaperclipWakeIssueSummary | null =
     input.issueSummary ??
     (issueId
@@ -1184,6 +1187,7 @@ async function buildPaperclipWakePayload(input: {
             title: issues.title,
             status: issues.status,
             priority: issues.priority,
+            workspaceCwd: sql<string | null>`${wakeWorkspaceCwd ?? null}`,
             taskRootIssueId: issues.taskRootIssueId,
           })
           .from(issues)
@@ -1232,6 +1236,7 @@ export function buildPaperclipWakePayloadFromCommentRows(input: {
         title: string;
         status: string;
         priority: string;
+        workspaceCwd?: string | null;
         taskRootIssueId?: string | null;
         taskRootDir?: string | null;
         deliverableRoot?: string | null;
@@ -1306,6 +1311,7 @@ export function buildPaperclipWakePayloadFromCommentRows(input: {
           title: input.issueSummary.title,
           status: input.issueSummary.status,
           priority: input.issueSummary.priority,
+          workspaceCwd: input.issueSummary.workspaceCwd ?? null,
           taskRootIssueId: input.issueSummary.taskRootIssueId ?? null,
           taskRootDir: input.issueSummary.taskRootDir ?? null,
           deliverableRoot: input.issueSummary.deliverableRoot ?? null,
@@ -3520,6 +3526,7 @@ export function heartbeatService(db: Db) {
             ...paperclipWakePayload,
             issue: {
               ...paperclipWakePayload.issue,
+              workspaceCwd: executionWorkspace.cwd,
               taskRootIssueId: paperclipTaskContext?.rootIssueId ?? paperclipWakePayload.issue.taskRootIssueId ?? null,
               taskRootDir: paperclipTaskContext?.rootDir ?? paperclipWakePayload.issue.taskRootDir ?? null,
               deliverableRoot:

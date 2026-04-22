@@ -83,7 +83,11 @@ describe("runChildProcess", () => {
     const descendantPid = Number.parseInt(result.stdout.match(/descendant:(\d+)/)?.[1] ?? "", 10);
     expect(result.timedOut).toBe(false);
     expect(result.exitCode).toBe(0);
-    expect(spawnedMeta?.processGroupId).toBe(spawnedMeta?.pid ?? null);
+    if (!spawnedMeta) {
+      throw new Error("Expected spawned process metadata");
+    }
+    const meta: { pid: number; processGroupId?: number | null; startedAt: string } = spawnedMeta;
+    expect(meta.processGroupId).toBe(meta.pid);
     expect(Number.isInteger(descendantPid) && descendantPid > 0).toBe(true);
     expect(await waitForPidExit(descendantPid, 2_000)).toBe(true);
   });
@@ -256,6 +260,7 @@ describe("renderPaperclipWakePrompt", () => {
         title: "Prepare research report",
         status: "todo",
         priority: "medium",
+        workspaceCwd: "/workspace/project",
         taskRootIssueId: "task-root-1",
         taskRootDir: "/workspace/.paperclip/tasks/task-root-1",
         deliverableRoot: "/workspace/.paperclip/tasks/task-root-1/deliverables",
@@ -285,8 +290,10 @@ describe("renderPaperclipWakePrompt", () => {
     });
 
     expect(prompt).toContain("task root issue: task-root-1");
+    expect(prompt).toContain("working directory: /workspace/project");
     expect(prompt).toContain("task root dir: /workspace/.paperclip/tasks/task-root-1");
     expect(prompt).toContain("deliverable root: /workspace/.paperclip/tasks/task-root-1/deliverables");
+    expect(prompt).toContain("use the working directory for project files");
   });
 
   it("renders issue-scoped guidance even when an assignment wake has no inline comments", () => {
