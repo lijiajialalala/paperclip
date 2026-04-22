@@ -171,6 +171,15 @@ type IssueReplyNeededRecipientsInput = {
   assigneeUserId: string | null;
   createdByUserId: string | null;
 };
+type ReusableAgentChildIssueIdentity = {
+  companyId: string;
+  parentId: string;
+  createdByAgentId: string;
+  assigneeAgentId: string | null;
+  assigneeUserId: string | null;
+  originKind: string;
+  originId: string;
+};
 type ProjectGoalReader = Pick<Db, "select">;
 type DbReader = Pick<Db, "select">;
 type IssueCreateInput = Omit<typeof issues.$inferInsert, "companyId"> & {
@@ -1293,6 +1302,44 @@ async function isTerminalOrMissingHeartbeatRun(runId: string) {
   return TERMINAL_HEARTBEAT_RUN_STATUSES.has(run.status);
 }
 
+function buildReusableAgentChildIssueIdentity(input: {
+  companyId: string;
+  parentId: string | null;
+  assigneeAgentId: string | null | undefined;
+  assigneeUserId: string | null | undefined;
+  createdByAgentId: string | null | undefined;
+  originKind: string | null | undefined;
+  originId: string | null | undefined;
+}): ReusableAgentChildIssueIdentity | null {
+  if (!input.createdByAgentId || !input.parentId) return null;
+  const normalizedOriginKind = typeof input.originKind === "string" ? input.originKind.trim() : "";
+  const normalizedOriginId = typeof input.originId === "string" ? input.originId.trim() : "";
+  if (normalizedOriginKind.length === 0 || normalizedOriginId.length === 0) return null;
+  return {
+    companyId: input.companyId,
+    parentId: input.parentId,
+    createdByAgentId: input.createdByAgentId,
+    assigneeAgentId: input.assigneeAgentId ?? null,
+    assigneeUserId: input.assigneeUserId ?? null,
+    originKind: normalizedOriginKind,
+    originId: normalizedOriginId,
+  };
+}
+
+async function lockReusableAgentChildIssueIdentity(dbOrTx: Db | any, identity: ReusableAgentChildIssueIdentity) {
+  const lockKey = [
+    "issue-reusable-stage",
+    identity.companyId,
+    identity.parentId,
+    identity.createdByAgentId,
+    identity.assigneeAgentId ?? "",
+    identity.assigneeUserId ?? "",
+    identity.originKind,
+    identity.originId,
+  ].join(":");
+  await dbOrTx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`);
+}
+
 async function findReusableAgentChildIssue(input: {
   companyId: string;
   parentId: string | null;
@@ -1304,32 +1351,30 @@ async function findReusableAgentChildIssue(input: {
   originId: string | null | undefined;
   dbOrTx?: Db | any;
 }) {
-  if (!input.createdByAgentId || !input.parentId) return null;
+  const identity = buildReusableAgentChildIssueIdentity(input);
+  if (!identity) return null;
   const dbOrTx = input.dbOrTx ?? db;
-  const normalizedOriginKind = typeof input.originKind === "string" ? input.originKind.trim() : "";
-  const normalizedOriginId = typeof input.originId === "string" ? input.originId.trim() : "";
-  if (normalizedOriginKind.length === 0 || normalizedOriginId.length === 0) return null;
 
-  const assigneeAgentCondition = input.assigneeAgentId
-    ? eq(issues.assigneeAgentId, input.assigneeAgentId)
+  const assigneeAgentCondition = identity.assigneeAgentId
+    ? eq(issues.assigneeAgentId, identity.assigneeAgentId)
     : isNull(issues.assigneeAgentId);
-  const assigneeUserCondition = input.assigneeUserId
-    ? eq(issues.assigneeUserId, input.assigneeUserId)
+  const assigneeUserCondition = identity.assigneeUserId
+    ? eq(issues.assigneeUserId, identity.assigneeUserId)
     : isNull(issues.assigneeUserId);
 
   const matches = await dbOrTx
     .select()
     .from(issues)
     .where(and(
-      eq(issues.companyId, input.companyId),
-      eq(issues.parentId, input.parentId),
-      eq(issues.createdByAgentId, input.createdByAgentId),
+      eq(issues.companyId, identity.companyId),
+      eq(issues.parentId, identity.parentId),
+      eq(issues.createdByAgentId, identity.createdByAgentId),
       assigneeAgentCondition,
       assigneeUserCondition,
       inArray(issues.status, ["backlog", "todo", "in_progress", "in_review", "blocked"]),
       isNull(issues.hiddenAt),
-      eq(issues.originKind, normalizedOriginKind),
-      eq(issues.originId, normalizedOriginId),
+      eq(issues.originKind, identity.originKind),
+      eq(issues.originId, identity.originId),
     ))
     .orderBy(desc(issues.updatedAt), desc(issues.createdAt), desc(issues.issueNumber))
     .limit(2)
@@ -1338,12 +1383,12 @@ async function findReusableAgentChildIssue(input: {
   if (matches.length === 0) return null;
   if (matches.length > 1) {
     throw conflict("Multiple live child issues match the same reusable stage identity", {
-      parentId: input.parentId,
-      createdByAgentId: input.createdByAgentId,
-      assigneeAgentId: input.assigneeAgentId ?? null,
-      assigneeUserId: input.assigneeUserId ?? null,
-      originKind: normalizedOriginKind,
-      originId: normalizedOriginId,
+      parentId: identity.parentId,
+      createdByAgentId: identity.createdByAgentId,
+      assigneeAgentId: identity.assigneeAgentId,
+      assigneeUserId: identity.assigneeUserId,
+      originKind: identity.originKind,
+      originId: identity.originId,
       issueIds: matches.map((issue: typeof issues.$inferSelect) => issue.id),
     });
   }
@@ -1999,6 +2044,19 @@ async function adoptStaleCheckoutRun(input: {
         throw unprocessable("in_progress issues require an assignee");
       }
       return db.transaction(async (tx) => {
+        const reusableIdentity = buildReusableAgentChildIssueIdentity({
+          companyId,
+          parentId: issueData.parentId ?? null,
+          assigneeAgentId: issueData.assigneeAgentId,
+          assigneeUserId: issueData.assigneeUserId,
+          createdByAgentId: issueData.createdByAgentId,
+          originKind: issueData.originKind,
+          originId: issueData.originId,
+        });
+        if (reusableIdentity) {
+          // Serialize identical child-stage creates so concurrent retries cannot fork the live stage.
+          await lockReusableAgentChildIssueIdentity(tx, reusableIdentity);
+        }
         const reusable = await findReusableAgentChildIssue({
           companyId,
           parentId: issueData.parentId ?? null,

@@ -2231,6 +2231,122 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     expect(childIssues).toEqual([{ id: existingChildIssueId }]);
   });
 
+  it("serializes concurrent reusable stage retries onto one live child issue", async () => {
+    const companyId = randomUUID();
+    const managerAgentId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const parentIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      issueCounter: 1,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values([
+      {
+        id: managerAgentId,
+        companyId,
+        name: "ResearchLead",
+        role: "manager",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: assigneeAgentId,
+        companyId,
+        name: "Reviewer",
+        role: "reviewer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+
+    await db.insert(issues).values({
+      id: parentIssueId,
+      companyId,
+      title: "Research parent",
+      status: "in_progress",
+      priority: "high",
+      issueNumber: 1,
+      identifier: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}-1`,
+    });
+
+    let releaseCompanyLock: (() => void) | null = null;
+    const companyLockTxn = db.transaction(async (tx) => {
+      await tx.execute(
+        sql`select ${companies.id} from ${companies} where ${companies.id} = ${companyId} for update`,
+      );
+      await new Promise<void>((resolve) => {
+        releaseCompanyLock = resolve;
+      });
+    });
+
+    const waitForCompanyLock = async () => {
+      const deadline = Date.now() + 2_000;
+      while (!releaseCompanyLock) {
+        if (Date.now() > deadline) {
+          throw new Error("timed out waiting for company counter lock");
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    };
+
+    await waitForCompanyLock();
+
+    const firstCreate = svc.create(companyId, {
+      parentId: parentIssueId,
+      title: "Research verdict review retry A",
+      status: "todo",
+      priority: "high",
+      assigneeAgentId,
+      createdByAgentId: managerAgentId,
+      originKind: "research_stage",
+      originId: "45-review-verdict",
+    });
+    const secondCreate = svc.create(companyId, {
+      parentId: parentIssueId,
+      title: "Research verdict review retry B",
+      status: "todo",
+      priority: "high",
+      assigneeAgentId,
+      createdByAgentId: managerAgentId,
+      originKind: "research_stage",
+      originId: "45-review-verdict",
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    releaseCompanyLock?.();
+    await companyLockTxn;
+
+    const [first, second] = await Promise.all([firstCreate, secondCreate]);
+    expect(first.id).toBe(second.id);
+    expect([
+      getIssueCreateDisposition(first),
+      getIssueCreateDisposition(second),
+    ].sort()).toEqual(["created", "reused"]);
+
+    const childIssues = await db
+      .select({ id: issues.id })
+      .from(issues)
+      .where(and(
+        eq(issues.parentId, parentIssueId),
+        eq(issues.createdByAgentId, managerAgentId),
+        eq(issues.assigneeAgentId, assigneeAgentId),
+        eq(issues.originKind, "research_stage"),
+        eq(issues.originId, "45-review-verdict"),
+      ));
+    expect(childIssues).toHaveLength(1);
+  });
+
   it("does not reuse agent child issues without a stable stage identity", async () => {
     const companyId = randomUUID();
     const managerAgentId = randomUUID();
