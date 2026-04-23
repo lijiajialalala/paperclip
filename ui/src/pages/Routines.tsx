@@ -15,9 +15,15 @@ import { queryKeys } from "../lib/queryKeys";
 import { groupBy } from "../lib/groupBy";
 import { createIssueDetailLocationState } from "../lib/issueDetailBreadcrumb";
 import { getRecentAssigneeIds, sortAgentsByRecency, trackRecentAssignee } from "../lib/recent-assignees";
+import {
+  applyRoutineExecutionWorkspacePatch,
+  createRoutineExecutionWorkspaceDraft,
+  defaultProjectWorkspaceIdForProject,
+} from "../lib/routineExecutionWorkspace";
 import { ToggleSwitch } from "@/components/ui/toggle-switch";
 import { EmptyState } from "../components/EmptyState";
 import { IssuesList } from "../components/IssuesList";
+import { IssueWorkspaceCard } from "../components/IssueWorkspaceCard";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { PageTabBar } from "../components/PageTabBar";
 import { AgentIcon } from "../components/AgentIconPicker";
@@ -298,6 +304,9 @@ export function Routines() {
     concurrencyPolicy: string;
     catchUpPolicy: string;
     variables: RoutineVariable[];
+    executionWorkspaceId: string | null;
+    executionWorkspacePreference: string | null;
+    executionWorkspaceSettings: RoutineListItem["executionWorkspaceSettings"];
   }>({
     title: "",
     description: "",
@@ -309,6 +318,7 @@ export function Routines() {
     concurrencyPolicy: "coalesce_if_active",
     catchUpPolicy: "skip_missed",
     variables: [],
+    ...createRoutineExecutionWorkspaceDraft(),
   });
   const routineViewStateKey = selectedCompanyId
     ? `paperclip:routines-view:${selectedCompanyId}`
@@ -377,6 +387,7 @@ export function Routines() {
           concurrencyPolicy: "coalesce_if_active",
           catchUpPolicy: "skip_missed",
           variables: [],
+          ...createRoutineExecutionWorkspaceDraft(),
         });
       setComposerOpen(false);
       setAdvancedOpen(false);
@@ -506,6 +517,8 @@ export function Routines() {
   const runDialogProject = runDialogRoutine?.projectId ? projectById.get(runDialogRoutine.projectId) ?? null : null;
   const currentAssignee = draft.assigneeAgentId ? agentById.get(draft.assigneeAgentId) ?? null : null;
   const currentProject = draft.projectId ? projectById.get(draft.projectId) ?? null : null;
+  const workspaceDefaultsEnabled = experimentalSettings?.enableIsolatedWorkspaces === true
+    && Boolean(currentProject?.executionWorkspacePolicy?.enabled);
   const dispatchModeDescription = draft.dispatchMode === "fixed_parallel_lanes"
     ? "负责人默认按固定 lane 并行派工；恢复链条时也会优先续跑各 lane。"
     : "负责人按事件驱动逐跳推进；恢复链条时优先唤醒当前最合理的下一跳。";
@@ -765,7 +778,12 @@ export function Routines() {
                     noneLabel="No project"
                     searchPlaceholder="Search projects..."
                     emptyMessage="No projects found."
-                    onChange={(projectId) => setDraft((current) => ({ ...current, projectId }))}
+                    onChange={(projectId) =>
+                      setDraft((current) => ({
+                        ...current,
+                        projectId,
+                        ...(projectId === current.projectId ? {} : createRoutineExecutionWorkspaceDraft()),
+                      }))}
                     onConfirm={() => descriptionEditorRef.current?.focus()}
                     renderTriggerValue={(option) =>
                       option && currentProject ? (
@@ -894,6 +912,29 @@ export function Routines() {
                       </Select>
                       <p className="text-xs text-muted-foreground">{catchUpPolicyDescriptions[draft.catchUpPolicy]}</p>
                     </div>
+                    {workspaceDefaultsEnabled && currentProject ? (
+                      <div className="space-y-2 md:col-span-2">
+                        <p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
+                          Default execution workspace
+                        </p>
+                        <IssueWorkspaceCard
+                          issue={{
+                            companyId: selectedCompanyId,
+                            projectId: currentProject.id,
+                            projectWorkspaceId: defaultProjectWorkspaceIdForProject(currentProject),
+                            executionWorkspaceId: draft.executionWorkspaceId,
+                            executionWorkspacePreference: draft.executionWorkspacePreference,
+                            executionWorkspaceSettings: draft.executionWorkspaceSettings,
+                            currentExecutionWorkspace: null,
+                          }}
+                          project={currentProject}
+                          onUpdate={(data) => setDraft((current) => applyRoutineExecutionWorkspacePatch(current, data))}
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          Used when a routine run does not supply a one-off workspace override.
+                        </p>
+                      </div>
+                    ) : null}
                   </div>
                 </CollapsibleContent>
               </Collapsible>

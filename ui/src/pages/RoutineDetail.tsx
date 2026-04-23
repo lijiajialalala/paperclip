@@ -27,8 +27,16 @@ import { useToast } from "../context/ToastContext";
 import { queryKeys } from "../lib/queryKeys";
 import { buildRoutineTriggerPatch } from "../lib/routine-trigger-patch";
 import { timeAgo } from "../lib/timeAgo";
+import {
+  applyRoutineExecutionWorkspacePatch,
+  createRoutineExecutionWorkspaceDraft,
+  defaultProjectWorkspaceIdForProject,
+  routineExecutionWorkspaceEquals,
+  type RoutineExecutionWorkspaceDraft,
+} from "../lib/routineExecutionWorkspace";
 import { ToggleSwitch } from "@/components/ui/toggle-switch";
 import { EmptyState } from "../components/EmptyState";
+import { IssueWorkspaceCard } from "../components/IssueWorkspaceCard";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { AgentIcon } from "../components/AgentIconPicker";
 import { InlineEntitySelector, type InlineEntityOption } from "../components/InlineEntitySelector";
@@ -274,6 +282,9 @@ export function RoutineDetail() {
     concurrencyPolicy: string;
     catchUpPolicy: string;
     variables: RoutineVariable[];
+    executionWorkspaceId: string | null;
+    executionWorkspacePreference: string | null;
+    executionWorkspaceSettings: RoutineExecutionWorkspaceDraft["executionWorkspaceSettings"];
   }>({
     title: "",
     description: "",
@@ -285,6 +296,7 @@ export function RoutineDetail() {
     concurrencyPolicy: "coalesce_if_active",
     catchUpPolicy: "skip_missed",
     variables: [],
+    ...createRoutineExecutionWorkspaceDraft(),
   });
   const activeTab = useMemo(() => getRoutineTabFromSearch(location.search), [location.search]);
 
@@ -353,6 +365,9 @@ export function RoutineDetail() {
             concurrencyPolicy: routine.concurrencyPolicy,
             catchUpPolicy: routine.catchUpPolicy,
             variables: routine.variables,
+            executionWorkspaceId: routine.executionWorkspaceId,
+            executionWorkspacePreference: routine.executionWorkspacePreference,
+            executionWorkspaceSettings: routine.executionWorkspaceSettings,
           }
         : null,
     [routine],
@@ -369,6 +384,7 @@ export function RoutineDetail() {
       editDraft.priority !== routineDefaults.priority ||
       editDraft.concurrencyPolicy !== routineDefaults.concurrencyPolicy ||
       editDraft.catchUpPolicy !== routineDefaults.catchUpPolicy ||
+      !routineExecutionWorkspaceEquals(editDraft, routineDefaults) ||
       JSON.stringify(editDraft.variables) !== JSON.stringify(routineDefaults.variables)
     );
   }, [editDraft, routineDefaults]);
@@ -643,6 +659,8 @@ export function RoutineDetail() {
   );
   const currentAssignee = editDraft.assigneeAgentId ? agentById.get(editDraft.assigneeAgentId) ?? null : null;
   const currentProject = editDraft.projectId ? projectById.get(editDraft.projectId) ?? null : null;
+  const workspaceDefaultsEnabled = experimentalSettings?.enableIsolatedWorkspaces === true
+    && Boolean(currentProject?.executionWorkspacePolicy?.enabled);
 
   if (!selectedCompanyId) {
     return <EmptyState icon={Repeat} message="Select a company to view routines." />;
@@ -823,7 +841,12 @@ export function RoutineDetail() {
             noneLabel="No project"
             searchPlaceholder="Search projects..."
             emptyMessage="No projects found."
-            onChange={(projectId) => setEditDraft((current) => ({ ...current, projectId }))}
+            onChange={(projectId) =>
+              setEditDraft((current) => ({
+                ...current,
+                projectId,
+                ...(projectId === current.projectId ? {} : createRoutineExecutionWorkspaceDraft()),
+              }))}
             onConfirm={() => descriptionEditorRef.current?.focus()}
             renderTriggerValue={(option) =>
               option && currentProject ? (
@@ -976,6 +999,29 @@ export function RoutineDetail() {
               </Select>
               <p className="text-xs text-muted-foreground">{catchUpPolicyDescriptions[editDraft.catchUpPolicy]}</p>
             </div>
+            {workspaceDefaultsEnabled && currentProject ? (
+              <div className="space-y-2 md:col-span-2">
+                <p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
+                  Default execution workspace
+                </p>
+                <IssueWorkspaceCard
+                  issue={{
+                    companyId: selectedCompanyId,
+                    projectId: currentProject.id,
+                    projectWorkspaceId: defaultProjectWorkspaceIdForProject(currentProject),
+                    executionWorkspaceId: editDraft.executionWorkspaceId,
+                    executionWorkspacePreference: editDraft.executionWorkspacePreference,
+                    executionWorkspaceSettings: editDraft.executionWorkspaceSettings,
+                    currentExecutionWorkspace: null,
+                  }}
+                  project={currentProject}
+                  onUpdate={(data) => setEditDraft((current) => applyRoutineExecutionWorkspacePatch(current, data))}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Used when a routine run does not supply a one-off workspace override.
+                </p>
+              </div>
+            ) : null}
           </div>
         </CollapsibleContent>
       </Collapsible>
