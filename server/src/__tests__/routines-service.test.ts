@@ -553,6 +553,240 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     });
   });
 
+  it("persists routine default execution workspace selections and uses them when runs omit overrides", async () => {
+    const { companyId, agentId, projectId, svc } = await seedFixture();
+    const projectWorkspaceId = randomUUID();
+    const executionWorkspaceId = randomUUID();
+
+    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: true });
+    await db
+      .update(projects)
+      .set({
+        executionWorkspacePolicy: {
+          enabled: true,
+          defaultMode: "shared_workspace",
+          defaultProjectWorkspaceId: projectWorkspaceId,
+        },
+      })
+      .where(eq(projects.id, projectId));
+    await db.insert(projectWorkspaces).values({
+      id: projectWorkspaceId,
+      companyId,
+      projectId,
+      name: "Primary workspace",
+      isPrimary: true,
+      sharedWorkspaceKey: "routine-default-primary",
+    });
+    await db.insert(executionWorkspaces).values({
+      id: executionWorkspaceId,
+      companyId,
+      projectId,
+      projectWorkspaceId,
+      mode: "isolated_workspace",
+      strategyType: "git_worktree",
+      name: "Quality baseline worktree",
+      status: "active",
+      providerType: "git_worktree",
+    });
+
+    const workspaceAwareRoutine = await svc.create(
+      companyId,
+      {
+        projectId,
+        goalId: null,
+        parentIssueId: null,
+        title: "workspace-aware routine",
+        description: "Use the quality baseline workspace",
+        assigneeAgentId: agentId,
+        priority: "medium",
+        status: "active",
+        concurrencyPolicy: "coalesce_if_active",
+        catchUpPolicy: "skip_missed",
+        executionWorkspaceId,
+        executionWorkspacePreference: "reuse_existing",
+        executionWorkspaceSettings: { mode: "isolated_workspace" },
+      },
+      {},
+    );
+
+    expect(workspaceAwareRoutine.executionWorkspaceId).toBe(executionWorkspaceId);
+    expect(workspaceAwareRoutine.executionWorkspacePreference).toBe("reuse_existing");
+    expect(workspaceAwareRoutine.executionWorkspaceSettings).toEqual({ mode: "isolated_workspace" });
+
+    const run = await svc.runRoutine(workspaceAwareRoutine.id, { source: "manual" });
+
+    const storedIssue = await db
+      .select({
+        projectWorkspaceId: issues.projectWorkspaceId,
+        executionWorkspaceId: issues.executionWorkspaceId,
+        executionWorkspacePreference: issues.executionWorkspacePreference,
+        executionWorkspaceSettings: issues.executionWorkspaceSettings,
+      })
+      .from(issues)
+      .where(eq(issues.id, run.linkedIssueId!))
+      .then((rows) => rows[0] ?? null);
+
+    expect(storedIssue).toEqual({
+      projectWorkspaceId,
+      executionWorkspaceId,
+      executionWorkspacePreference: "reuse_existing",
+      executionWorkspaceSettings: { mode: "isolated_workspace" },
+    });
+  });
+
+  it("lets manual routine runs override stored default execution workspace selections", async () => {
+    const { companyId, agentId, projectId, svc } = await seedFixture();
+    const projectWorkspaceId = randomUUID();
+    const defaultExecutionWorkspaceId = randomUUID();
+    const overrideExecutionWorkspaceId = randomUUID();
+
+    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: true });
+    await db
+      .update(projects)
+      .set({
+        executionWorkspacePolicy: {
+          enabled: true,
+          defaultMode: "shared_workspace",
+          defaultProjectWorkspaceId: projectWorkspaceId,
+        },
+      })
+      .where(eq(projects.id, projectId));
+    await db.insert(projectWorkspaces).values({
+      id: projectWorkspaceId,
+      companyId,
+      projectId,
+      name: "Primary workspace",
+      isPrimary: true,
+      sharedWorkspaceKey: "routine-override-primary",
+    });
+    await db.insert(executionWorkspaces).values([
+      {
+        id: defaultExecutionWorkspaceId,
+        companyId,
+        projectId,
+        projectWorkspaceId,
+        mode: "shared_workspace",
+        strategyType: "project_primary",
+        name: "Routine default workspace",
+        status: "active",
+        providerType: "project_primary",
+      },
+      {
+        id: overrideExecutionWorkspaceId,
+        companyId,
+        projectId,
+        projectWorkspaceId,
+        mode: "isolated_workspace",
+        strategyType: "git_worktree",
+        name: "One-off override workspace",
+        status: "active",
+        providerType: "git_worktree",
+      },
+    ]);
+
+    const workspaceAwareRoutine = await svc.create(
+      companyId,
+      {
+        projectId,
+        goalId: null,
+        parentIssueId: null,
+        title: "workspace-aware routine",
+        description: "Use the default workspace unless overridden",
+        assigneeAgentId: agentId,
+        priority: "medium",
+        status: "active",
+        concurrencyPolicy: "coalesce_if_active",
+        catchUpPolicy: "skip_missed",
+        executionWorkspaceId: defaultExecutionWorkspaceId,
+        executionWorkspacePreference: "shared_workspace",
+        executionWorkspaceSettings: { mode: "shared_workspace" },
+      },
+      {},
+    );
+
+    const run = await svc.runRoutine(workspaceAwareRoutine.id, {
+      source: "manual",
+      executionWorkspaceId: overrideExecutionWorkspaceId,
+      executionWorkspacePreference: "reuse_existing",
+      executionWorkspaceSettings: { mode: "isolated_workspace" },
+    });
+
+    const storedIssue = await db
+      .select({
+        executionWorkspaceId: issues.executionWorkspaceId,
+        executionWorkspacePreference: issues.executionWorkspacePreference,
+        executionWorkspaceSettings: issues.executionWorkspaceSettings,
+      })
+      .from(issues)
+      .where(eq(issues.id, run.linkedIssueId!))
+      .then((rows) => rows[0] ?? null);
+
+    expect(storedIssue).toEqual({
+      executionWorkspaceId: overrideExecutionWorkspaceId,
+      executionWorkspacePreference: "reuse_existing",
+      executionWorkspaceSettings: { mode: "isolated_workspace" },
+    });
+  });
+
+  it("rejects retargeting a routine to a project that does not own its stored execution workspace", async () => {
+    const { companyId, agentId, projectId, svc } = await seedFixture();
+    const otherProjectId = randomUUID();
+    const projectWorkspaceId = randomUUID();
+    const executionWorkspaceId = randomUUID();
+
+    await db.insert(projects).values({
+      id: otherProjectId,
+      companyId,
+      name: "Other project",
+      status: "in_progress",
+    });
+    await db.insert(projectWorkspaces).values({
+      id: projectWorkspaceId,
+      companyId,
+      projectId,
+      name: "Primary workspace",
+      isPrimary: true,
+      sharedWorkspaceKey: "routine-project-guard",
+    });
+    await db.insert(executionWorkspaces).values({
+      id: executionWorkspaceId,
+      companyId,
+      projectId,
+      projectWorkspaceId,
+      mode: "isolated_workspace",
+      strategyType: "git_worktree",
+      name: "Pinned baseline workspace",
+      status: "active",
+      providerType: "git_worktree",
+    });
+
+    const workspaceAwareRoutine = await svc.create(
+      companyId,
+      {
+        projectId,
+        goalId: null,
+        parentIssueId: null,
+        title: "workspace-aware routine",
+        description: "Stay pinned to the baseline workspace",
+        assigneeAgentId: agentId,
+        priority: "medium",
+        status: "active",
+        concurrencyPolicy: "coalesce_if_active",
+        catchUpPolicy: "skip_missed",
+        executionWorkspaceId,
+      },
+      {},
+    );
+
+    await expect(
+      svc.update(
+        workspaceAwareRoutine.id,
+        { projectId: otherProjectId },
+        {},
+      ),
+    ).rejects.toThrow(/Execution workspace must belong to the selected project/i);
+  });
+
   it("blocks schedule triggers when required variables do not have defaults", async () => {
     const { companyId, agentId, projectId, svc } = await seedFixture();
     const variableRoutine = await svc.create(

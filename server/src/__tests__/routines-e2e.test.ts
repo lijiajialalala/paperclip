@@ -332,7 +332,7 @@ describeEmbeddedPostgres("routine routes end-to-end", () => {
     expect(issue?.description).toBe("Review paperclip for high bugs");
   }, routineRoutesE2eTestTimeoutMs);
 
-  it("persists execution workspace selections from manual routine runs", async () => {
+  it("persists routine default execution workspace selections and applies them to runs without overrides", async () => {
     const { companyId, agentId, projectId, userId } = await seedFixture();
     const projectWorkspaceId = randomUUID();
     const executionWorkspaceId = randomUUID();
@@ -383,18 +383,19 @@ describeEmbeddedPostgres("routine routes end-to-end", () => {
         projectId,
         title: "Workspace-aware routine",
         assigneeAgentId: agentId,
-      });
-
-    expect(createRes.status).toBe(201);
-
-    const runRes = await request(app)
-      .post(`/api/routines/${createRes.body.id}/run`)
-      .send({
-        source: "manual",
         executionWorkspaceId,
         executionWorkspacePreference: "reuse_existing",
         executionWorkspaceSettings: { mode: "isolated_workspace" },
       });
+
+    expect(createRes.status).toBe(201);
+    expect(createRes.body.executionWorkspaceId).toBe(executionWorkspaceId);
+    expect(createRes.body.executionWorkspacePreference).toBe("reuse_existing");
+    expect(createRes.body.executionWorkspaceSettings).toEqual({ mode: "isolated_workspace" });
+
+    const runRes = await request(app)
+      .post(`/api/routines/${createRes.body.id}/run`)
+      .send({ source: "manual" });
 
     expect(runRes.status).toBe(202);
 
@@ -414,5 +415,74 @@ describeEmbeddedPostgres("routine routes end-to-end", () => {
       executionWorkspacePreference: "reuse_existing",
       executionWorkspaceSettings: { mode: "isolated_workspace" },
     });
+  }, routineRoutesE2eTestTimeoutMs);
+
+  it("allows patching a routine's stored execution workspace defaults", async () => {
+    const { companyId, agentId, projectId, userId } = await seedFixture();
+    const projectWorkspaceId = randomUUID();
+    const executionWorkspaceId = randomUUID();
+    const app = await createApp({
+      type: "board",
+      userId,
+      source: "session",
+      isInstanceAdmin: false,
+      companyIds: [companyId],
+    });
+
+    await db.insert(projectWorkspaces).values({
+      id: projectWorkspaceId,
+      companyId,
+      projectId,
+      name: "Primary workspace",
+      isPrimary: true,
+      sharedWorkspaceKey: "routine-update-primary",
+    });
+    await db.insert(executionWorkspaces).values({
+      id: executionWorkspaceId,
+      companyId,
+      projectId,
+      projectWorkspaceId,
+      mode: "isolated_workspace",
+      strategyType: "git_worktree",
+      name: "Updated routine worktree",
+      status: "active",
+      providerType: "git_worktree",
+    });
+    await db
+      .update(projects)
+      .set({
+        executionWorkspacePolicy: {
+          enabled: true,
+          defaultMode: "shared_workspace",
+          defaultProjectWorkspaceId: projectWorkspaceId,
+        },
+      })
+      .where(eq(projects.id, projectId));
+    await db.insert(instanceSettings).values({
+      experimental: { enableIsolatedWorkspaces: true },
+    });
+
+    const createRes = await request(app)
+      .post(`/api/companies/${companyId}/routines`)
+      .send({
+        projectId,
+        title: "Workspace-aware routine",
+        assigneeAgentId: agentId,
+      });
+
+    expect(createRes.status).toBe(201);
+
+    const patchRes = await request(app)
+      .patch(`/api/routines/${createRes.body.id}`)
+      .send({
+        executionWorkspaceId,
+        executionWorkspacePreference: "reuse_existing",
+        executionWorkspaceSettings: { mode: "isolated_workspace" },
+      });
+
+    expect(patchRes.status).toBe(200);
+    expect(patchRes.body.executionWorkspaceId).toBe(executionWorkspaceId);
+    expect(patchRes.body.executionWorkspacePreference).toBe("reuse_existing");
+    expect(patchRes.body.executionWorkspaceSettings).toEqual({ mode: "isolated_workspace" });
   }, routineRoutesE2eTestTimeoutMs);
 });

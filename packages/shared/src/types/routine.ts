@@ -4,6 +4,7 @@ import type {
   RoutineRunIssueMode,
   RoutineVariableType,
 } from "../constants.js";
+import type { IssueExecutionWorkspaceSettings } from "./workspace-runtime.js";
 
 export interface RoutineProjectSummary {
   id: string;
@@ -56,6 +57,9 @@ export interface Routine {
   status: string;
   concurrencyPolicy: string;
   catchUpPolicy: string;
+  executionWorkspaceId: string | null;
+  executionWorkspacePreference: string | null;
+  executionWorkspaceSettings: IssueExecutionWorkspaceSettings | null;
   variables: RoutineVariable[];
   createdByAgentId: string | null;
   createdByUserId: string | null;
