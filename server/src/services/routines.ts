@@ -4,6 +4,7 @@ import type { Db } from "@paperclipai/db";
 import {
   agents,
   companySecrets,
+  executionWorkspaces,
   goals,
   heartbeatRuns,
   issues,
@@ -150,6 +151,10 @@ function normalizeWebhookTimestampMs(rawTimestamp: string) {
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function cloneRecord(value: unknown): Record<string, unknown> | null {
+  return isPlainRecord(value) ? { ...value } : null;
 }
 
 function readNonEmptyString(value: unknown) {
@@ -306,6 +311,7 @@ function deriveRoutineRunIssueMode(parentIssueId: string | null | undefined): Ro
 function hydrateRoutineRow(row: typeof routines.$inferSelect): Routine {
   return {
     ...row,
+    executionWorkspaceSettings: cloneRecord(row.executionWorkspaceSettings) as Routine["executionWorkspaceSettings"],
     dispatchMode: (row.dispatchMode ?? "event_driven") as RoutineDispatchMode,
     runIssueMode: deriveRoutineRunIssueMode(row.parentIssueId),
   };
@@ -348,6 +354,27 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
   const issueSvc = issueService(db);
   const secretsSvc = secretService(db);
   const heartbeat = deps.heartbeat ?? heartbeatService(db);
+
+  async function assertValidExecutionWorkspace(
+    companyId: string,
+    projectId: string,
+    executionWorkspaceId: string,
+  ) {
+    const workspace = await db
+      .select({
+        id: executionWorkspaces.id,
+        companyId: executionWorkspaces.companyId,
+        projectId: executionWorkspaces.projectId,
+      })
+      .from(executionWorkspaces)
+      .where(eq(executionWorkspaces.id, executionWorkspaceId))
+      .then((rows) => rows[0] ?? null);
+    if (!workspace) throw notFound("Execution workspace not found");
+    if (workspace.companyId !== companyId) throw unprocessable("Execution workspace must belong to same company");
+    if (workspace.projectId !== projectId) {
+      throw unprocessable("Execution workspace must belong to the selected project");
+    }
+  }
 
   async function getRoutineById(id: string) {
     return db
@@ -730,6 +757,15 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
     const resolvedVariables = resolveRoutineVariableValues(input.routine.variables ?? [], input);
     const description = interpolateRoutineTemplate(input.routine.description, resolvedVariables);
     const triggerPayload = mergeRoutineRunPayload(input.payload, resolvedVariables);
+    const executionWorkspaceId = input.executionWorkspaceId !== undefined
+      ? input.executionWorkspaceId ?? null
+      : input.routine.executionWorkspaceId ?? null;
+    const executionWorkspacePreference = input.executionWorkspacePreference !== undefined
+      ? input.executionWorkspacePreference ?? null
+      : input.routine.executionWorkspacePreference ?? null;
+    const executionWorkspaceSettings = input.executionWorkspaceSettings !== undefined
+      ? cloneRecord(input.executionWorkspaceSettings)
+      : cloneRecord(input.routine.executionWorkspaceSettings);
     const run = await db.transaction(async (tx) => {
       const txDb = tx as unknown as Db;
       await tx.execute(
@@ -810,9 +846,9 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
             originKind: "routine_execution",
             originId: input.routine.id,
             originRunId: createdRun.id,
-            executionWorkspaceId: input.executionWorkspaceId ?? null,
-            executionWorkspacePreference: input.executionWorkspacePreference ?? null,
-            executionWorkspaceSettings: input.executionWorkspaceSettings ?? null,
+            executionWorkspaceId,
+            executionWorkspacePreference,
+            executionWorkspaceSettings,
           });
         } catch (error) {
           const isOpenExecutionConflict =
@@ -1069,6 +1105,9 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
         sanitizeRoutineVariableInputs(input.variables),
       );
       assertRoutineVariableDefinitions(variables);
+      if (input.executionWorkspaceId) {
+        await assertValidExecutionWorkspace(companyId, input.projectId, input.executionWorkspaceId);
+      }
       const [created] = await db
         .insert(routines)
         .values({
@@ -1085,6 +1124,9 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
           status: input.status,
           concurrencyPolicy: input.concurrencyPolicy,
           catchUpPolicy: input.catchUpPolicy,
+          executionWorkspaceId: input.executionWorkspaceId ?? null,
+          executionWorkspacePreference: input.executionWorkspacePreference ?? null,
+          executionWorkspaceSettings: cloneRecord(input.executionWorkspaceSettings),
           variables,
           createdByAgentId: actor.agentId ?? null,
           createdByUserId: actor.userId ?? null,
@@ -1101,6 +1143,15 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
       const nextProjectId = patch.projectId ?? existing.projectId;
       const nextAssigneeAgentId = patch.assigneeAgentId ?? existing.assigneeAgentId;
       const nextDescription = patch.description === undefined ? existing.description : patch.description;
+      const nextExecutionWorkspaceId = patch.executionWorkspaceId !== undefined
+        ? patch.executionWorkspaceId ?? null
+        : existing.executionWorkspaceId;
+      const nextExecutionWorkspacePreference = patch.executionWorkspacePreference !== undefined
+        ? patch.executionWorkspacePreference ?? null
+        : existing.executionWorkspacePreference;
+      const nextExecutionWorkspaceSettings = patch.executionWorkspaceSettings !== undefined
+        ? cloneRecord(patch.executionWorkspaceSettings)
+        : cloneRecord(existing.executionWorkspaceSettings);
       const nextVariables = syncRoutineVariablesWithTemplate(
         nextDescription,
         patch.variables === undefined ? existing.variables : sanitizeRoutineVariableInputs(patch.variables),
@@ -1110,6 +1161,9 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
       if (patch.assigneeAgentId) await assertAssignableAgent(existing.companyId, nextAssigneeAgentId);
       if (patch.goalId) await assertGoal(existing.companyId, patch.goalId);
       if (parentIssueId) await assertParentIssue(existing.companyId, parentIssueId);
+      if (nextExecutionWorkspaceId) {
+        await assertValidExecutionWorkspace(existing.companyId, nextProjectId, nextExecutionWorkspaceId);
+      }
       assertRoutineVariableDefinitions(nextVariables);
       const enabledScheduleTriggers = await db
         .select({ id: routineTriggers.id })
@@ -1144,6 +1198,9 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
           status: patch.status ?? existing.status,
           concurrencyPolicy: patch.concurrencyPolicy ?? existing.concurrencyPolicy,
           catchUpPolicy: patch.catchUpPolicy ?? existing.catchUpPolicy,
+          executionWorkspaceId: nextExecutionWorkspaceId,
+          executionWorkspacePreference: nextExecutionWorkspacePreference,
+          executionWorkspaceSettings: nextExecutionWorkspaceSettings,
           variables: nextVariables,
           updatedByAgentId: actor.agentId ?? null,
           updatedByUserId: actor.userId ?? null,
@@ -1318,10 +1375,10 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
         payload: input.payload as Record<string, unknown> | null | undefined,
         variables: input.variables as Record<string, unknown> | null | undefined,
         idempotencyKey: input.idempotencyKey,
-        executionWorkspaceId: input.executionWorkspaceId ?? null,
-        executionWorkspacePreference: input.executionWorkspacePreference ?? null,
+        executionWorkspaceId: input.executionWorkspaceId,
+        executionWorkspacePreference: input.executionWorkspacePreference,
         executionWorkspaceSettings:
-          (input.executionWorkspaceSettings as Record<string, unknown> | null | undefined) ?? null,
+          input.executionWorkspaceSettings as Record<string, unknown> | null | undefined,
       });
     },
 

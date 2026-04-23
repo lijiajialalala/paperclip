@@ -12,6 +12,7 @@ import {
 import { agents } from "./agents.js";
 import { companies } from "./companies.js";
 import { companySecrets } from "./company_secrets.js";
+import { executionWorkspaces } from "./execution_workspaces.js";
 import { issues } from "./issues.js";
 import { projects } from "./projects.js";
 import { goals } from "./goals.js";
@@ -34,6 +35,9 @@ export const routines = pgTable(
     concurrencyPolicy: text("concurrency_policy").notNull().default("coalesce_if_active"),
     catchUpPolicy: text("catch_up_policy").notNull().default("skip_missed"),
     dispatchMode: text("dispatch_mode").notNull().default("event_driven"),
+    executionWorkspaceId: uuid("execution_workspace_id").references(() => executionWorkspaces.id, { onDelete: "set null" }),
+    executionWorkspacePreference: text("execution_workspace_preference"),
+    executionWorkspaceSettings: jsonb("execution_workspace_settings").$type<Record<string, unknown> | null>(),
     variables: jsonb("variables").$type<RoutineVariable[]>().notNull().default([]),
     createdByAgentId: uuid("created_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
     createdByUserId: text("created_by_user_id"),
@@ -48,6 +52,10 @@ export const routines = pgTable(
     companyStatusIdx: index("routines_company_status_idx").on(table.companyId, table.status),
     companyAssigneeIdx: index("routines_company_assignee_idx").on(table.companyId, table.assigneeAgentId),
     companyProjectIdx: index("routines_company_project_idx").on(table.companyId, table.projectId),
+    companyExecutionWorkspaceIdx: index("routines_company_execution_workspace_idx").on(
+      table.companyId,
+      table.executionWorkspaceId,
+    ),
   }),
 );
 
