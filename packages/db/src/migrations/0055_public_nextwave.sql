@@ -1,1 +1,0 @@
-ALTER TABLE "routines" ADD COLUMN "issue_blackboard_template" text;

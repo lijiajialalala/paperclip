@@ -1,6 +1,6 @@
 {
-  "id": "316c1073-2f95-4ed5-894e-de0d58244b7a",
-  "prevId": "2b14f297-7352-49ad-8936-48494fcf0773",
+  "id": "05f50c23-ce91-4ed3-815e-f623d6469951",
+  "prevId": "316c1073-2f95-4ed5-894e-de0d58244b7a",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -12073,6 +12073,12 @@
         "parent_issue_id": {
           "name": "parent_issue_id",
           "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "issue_blackboard_template": {
+          "name": "issue_blackboard_template",
+          "type": "text",
           "primaryKey": false,
           "notNull": false
         },
