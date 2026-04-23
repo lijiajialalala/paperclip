@@ -32,7 +32,7 @@ import {
   routineRuns,
   workspaceRuntimeServices,
 } from "@paperclipai/db";
-import { extractAgentMentionIds, extractProjectMentionIds, isUuidLike } from "@paperclipai/shared";
+import { ISSUE_ORIGIN_KINDS, extractAgentMentionIds, extractProjectMentionIds, isUuidLike } from "@paperclipai/shared";
 import { conflict, HttpError, notFound, unprocessable } from "../errors.js";
 import { logActivity } from "./activity-log.js";
 import { deriveHeartbeatRunBusinessVerdict } from "./heartbeat-run-verdict.js";
@@ -62,6 +62,7 @@ import {
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
 const ISSUE_CREATE_DISPOSITION = Symbol("issueCreateDisposition");
+const REUSABLE_STAGE_IDENTITY_UNIQUE_CONSTRAINT = "issues_open_reusable_stage_identity_uq";
 
 type IssueCreateDisposition = "created" | "reused";
 
@@ -82,6 +83,12 @@ export function getIssueCreateDisposition(issue: unknown): IssueCreateDispositio
     return "reused";
   }
   return "created";
+}
+
+function isUniqueConstraintViolation(error: unknown, constraint: string): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const candidate = error as { code?: string; constraint?: string; constraint_name?: string };
+  return candidate.code === "23505" && (candidate.constraint ?? candidate.constraint_name) === constraint;
 }
 
 function assertTransition(from: string, to: string) {
@@ -1314,7 +1321,13 @@ function buildReusableAgentChildIssueIdentity(input: {
   if (!input.createdByAgentId || !input.parentId) return null;
   const normalizedOriginKind = typeof input.originKind === "string" ? input.originKind.trim() : "";
   const normalizedOriginId = typeof input.originId === "string" ? input.originId.trim() : "";
-  if (normalizedOriginKind.length === 0 || normalizedOriginId.length === 0) return null;
+  if (
+    normalizedOriginKind.length === 0 ||
+    normalizedOriginId.length === 0 ||
+    normalizedOriginKind === ISSUE_ORIGIN_KINDS[1]
+  ) {
+    return null;
+  }
   return {
     companyId: input.companyId,
     parentId: input.parentId,
@@ -1343,7 +1356,6 @@ async function lockReusableAgentChildIssueIdentity(dbOrTx: Db | any, identity: R
 async function findReusableAgentChildIssue(input: {
   companyId: string;
   parentId: string | null;
-  title: string;
   assigneeAgentId: string | null | undefined;
   assigneeUserId: string | null | undefined;
   createdByAgentId: string | null | undefined;
@@ -1376,7 +1388,6 @@ async function findReusableAgentChildIssue(input: {
       eq(issues.originKind, identity.originKind),
       eq(issues.originId, identity.originId),
     ))
-    .orderBy(desc(issues.updatedAt), desc(issues.createdAt), desc(issues.issueNumber))
     .limit(2)
     .then((rows: Array<typeof issues.$inferSelect>) => rows);
 
@@ -2043,29 +2054,23 @@ async function adoptStaleCheckoutRun(input: {
       if (data.status === "in_progress" && !data.assigneeAgentId && !data.assigneeUserId) {
         throw unprocessable("in_progress issues require an assignee");
       }
+      const reusableLookup = {
+        companyId,
+        parentId: issueData.parentId ?? null,
+        assigneeAgentId: issueData.assigneeAgentId,
+        assigneeUserId: issueData.assigneeUserId,
+        createdByAgentId: issueData.createdByAgentId,
+        originKind: issueData.originKind,
+        originId: issueData.originId,
+      };
+      const reusableIdentity = buildReusableAgentChildIssueIdentity(reusableLookup);
       return db.transaction(async (tx) => {
-        const reusableIdentity = buildReusableAgentChildIssueIdentity({
-          companyId,
-          parentId: issueData.parentId ?? null,
-          assigneeAgentId: issueData.assigneeAgentId,
-          assigneeUserId: issueData.assigneeUserId,
-          createdByAgentId: issueData.createdByAgentId,
-          originKind: issueData.originKind,
-          originId: issueData.originId,
-        });
         if (reusableIdentity) {
           // Serialize identical child-stage creates so concurrent retries cannot fork the live stage.
           await lockReusableAgentChildIssueIdentity(tx, reusableIdentity);
         }
         const reusable = await findReusableAgentChildIssue({
-          companyId,
-          parentId: issueData.parentId ?? null,
-          title: issueData.title,
-          assigneeAgentId: issueData.assigneeAgentId,
-          assigneeUserId: issueData.assigneeUserId,
-          createdByAgentId: issueData.createdByAgentId,
-          originKind: issueData.originKind,
-          originId: issueData.originId,
+          ...reusableLookup,
           dbOrTx: tx,
         });
         if (reusable) return tagIssueCreateDisposition(reusable, "reused");
@@ -2212,6 +2217,14 @@ async function adoptStaleCheckoutRun(input: {
         await recomputeAncestorStatuses(tx, [issue.parentId]);
         const [enriched] = await withIssueLabels(tx, [issue]);
         return tagIssueCreateDisposition(enriched, "created");
+      }).catch(async (error) => {
+        if (!reusableIdentity || !isUniqueConstraintViolation(error, REUSABLE_STAGE_IDENTITY_UNIQUE_CONSTRAINT)) {
+          throw error;
+        }
+
+        const reusable = await findReusableAgentChildIssue(reusableLookup);
+        if (reusable) return tagIssueCreateDisposition(reusable, "reused");
+        throw error;
       });
     },
 

@@ -2430,19 +2430,18 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     expect(childIssues).toHaveLength(2);
   });
 
-  it("fails closed when multiple live child issues share the same reusable stage identity", async () => {
+  it("enforces one live reusable stage identity at the database layer", async () => {
     const companyId = randomUUID();
     const managerAgentId = randomUUID();
     const assigneeAgentId = randomUUID();
     const parentIssueId = randomUUID();
     const firstChildIssueId = randomUUID();
-    const secondChildIssueId = randomUUID();
 
     await db.insert(companies).values({
       id: companyId,
       name: "Paperclip",
       issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
-      issueCounter: 3,
+      issueCounter: 2,
       requireBoardApprovalForNewAgents: false,
     });
 
@@ -2495,8 +2494,11 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
         issueNumber: 2,
         identifier: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}-2`,
       },
-      {
-        id: secondChildIssueId,
+    ]);
+
+    await expect(
+      db.insert(issues).values({
+        id: randomUUID(),
         companyId,
         parentId: parentIssueId,
         title: "Research verdict review B",
@@ -2508,21 +2510,16 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
         originId: "45-review-verdict",
         issueNumber: 3,
         identifier: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}-3`,
-      },
-    ]);
-
-    await expect(
-      svc.create(companyId, {
-        parentId: parentIssueId,
-        title: "Research verdict review retry",
-        status: "todo",
-        priority: "high",
-        assigneeAgentId,
-        createdByAgentId: managerAgentId,
-        originKind: "research_stage",
-        originId: "45-review-verdict",
       }),
-    ).rejects.toThrow(/multiple live child issues match the same reusable stage identity/i);
+    ).rejects.toSatisfy((error: unknown) => (
+      !!error &&
+      typeof error === "object" &&
+      "code" in error &&
+      (error as { code?: string }).code === "23505" &&
+      "message" in error &&
+      typeof (error as { message?: string }).message === "string" &&
+      (error as { message: string }).message.includes("issues_open_reusable_stage_identity_uq")
+    ));
   });
 
   it("rejects generic issue updates that try to rewrite lineage metadata", async () => {

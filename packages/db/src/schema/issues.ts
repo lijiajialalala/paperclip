@@ -90,5 +90,25 @@ export const issues = pgTable(
           and ${table.executionRunId} is not null
           and ${table.status} in ('backlog', 'todo', 'in_progress', 'in_review', 'blocked')`,
       ),
+    openReusableStageIdentityIdx: uniqueIndex("issues_open_reusable_stage_identity_uq")
+      .on(
+        table.companyId,
+        table.parentId,
+        table.createdByAgentId,
+        sql`coalesce(${table.assigneeAgentId}::text, '')`,
+        sql`coalesce(${table.assigneeUserId}, '')`,
+        table.originKind,
+        table.originId,
+      )
+      .where(
+        sql`${table.parentId} is not null
+          and ${table.createdByAgentId} is not null
+          and ${table.originKind} <> 'routine_execution'
+          and ${table.originId} is not null
+          and btrim(${table.originKind}) <> ''
+          and btrim(${table.originId}) <> ''
+          and ${table.hiddenAt} is null
+          and ${table.status} in ('backlog', 'todo', 'in_progress', 'in_review', 'blocked')`,
+      ),
   }),
 );
