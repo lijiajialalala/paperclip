@@ -8,10 +8,13 @@ import {
   companySecrets,
   companySecretVersions,
   createDb,
+  documentRevisions,
+  documents,
   executionWorkspaces,
   heartbeatRuns,
   instanceSettings,
   issues,
+  issueDocuments,
   projectWorkspaces,
   projects,
   routineRuns,
@@ -23,6 +26,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { issueService } from "../services/issues.ts";
+import { issueBlackboardService } from "../services/issue-blackboard.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
 import { routineService } from "../services/routines.ts";
 
@@ -53,6 +57,9 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     await db.delete(companySecretVersions);
     await db.delete(companySecrets);
     await db.delete(heartbeatRuns);
+    await db.delete(documentRevisions);
+    await db.delete(issueDocuments);
+    await db.delete(documents);
     await db.delete(issues);
     await db.delete(executionWorkspaces);
     await db.delete(projectWorkspaces);
@@ -169,6 +176,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
         status: "active",
         concurrencyPolicy: "coalesce_if_active",
         catchUpPolicy: "skip_missed",
+        issueBlackboardTemplate: null,
       },
       {},
     );
@@ -489,6 +497,37 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
         priority: "high",
       },
     });
+  });
+
+  it("bootstraps the configured blackboard template onto execution issues", async () => {
+    const { companyId, agentId, projectId, svc } = await seedFixture();
+    const researchRoutine = await svc.create(
+      companyId,
+      {
+        projectId,
+        goalId: null,
+        parentIssueId: null,
+        issueBlackboardTemplate: "research_v1",
+        title: "AI video research",
+        description: "Produce the next market report",
+        assigneeAgentId: agentId,
+        priority: "medium",
+        status: "active",
+        concurrencyPolicy: "coalesce_if_active",
+        catchUpPolicy: "skip_missed",
+      },
+      {},
+    );
+
+    const run = await svc.runRoutine(researchRoutine.id, { source: "manual" });
+    const blackboard = await issueBlackboardService(db).getIssueBlackboard(run.linkedIssueId!);
+
+    expect(researchRoutine.issueBlackboardTemplate).toBe("research_v1");
+    expect(blackboard.manifest.status).toBe("ready");
+    expect(blackboard.manifest.content.template).toBe("research_v1");
+    expect(blackboard.entries.find((entry) => entry.key === "source-matrix")?.status).toBe("ready");
+    expect(blackboard.entries.find((entry) => entry.key === "final-report")?.status).toBe("missing");
+    expect(blackboard.entries.find((entry) => entry.key === "final-report")?.document?.key).toBe("final-report");
   });
 
   it("attaches the selected execution workspace to manually triggered routine issues", async () => {

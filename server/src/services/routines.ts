@@ -801,6 +801,7 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
             projectId: input.routine.projectId,
             goalId: input.routine.goalId,
             parentId: input.routine.parentIssueId,
+            blackboardTemplate: input.routine.issueBlackboardTemplate ?? null,
             title: input.routine.title,
             description,
             status: "todo",
@@ -1075,6 +1076,7 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
           projectId: input.projectId,
           goalId: input.goalId ?? null,
           parentIssueId,
+          issueBlackboardTemplate: input.issueBlackboardTemplate ?? null,
           dispatchMode: input.dispatchMode ?? "event_driven",
           title: input.title,
           description: input.description ?? null,
@@ -1130,6 +1132,10 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
           projectId: nextProjectId,
           goalId: patch.goalId === undefined ? existing.goalId : patch.goalId,
           parentIssueId,
+          issueBlackboardTemplate:
+            patch.issueBlackboardTemplate === undefined
+              ? existing.issueBlackboardTemplate
+              : patch.issueBlackboardTemplate,
           dispatchMode: patch.dispatchMode ?? existing.dispatchMode,
           title: patch.title ?? existing.title,
           description: nextDescription,

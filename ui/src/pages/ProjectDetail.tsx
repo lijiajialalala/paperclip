@@ -14,6 +14,7 @@ import { usePanel } from "../context/PanelContext";
 import { useCompany } from "../context/CompanyContext";
 import { useToast } from "../context/ToastContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
+import { useDialog } from "../context/DialogContext";
 import { queryKeys } from "../lib/queryKeys";
 import { ProjectProperties, type ProjectConfigFieldKey, type ProjectFieldSaveState } from "../components/ProjectProperties";
 import { CopyText } from "../components/CopyText";
@@ -24,6 +25,7 @@ import { ExecutionWorkspaceCloseDialog } from "../components/ExecutionWorkspaceC
 import { IssuesList } from "../components/IssuesList";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { PageTabBar } from "../components/PageTabBar";
+import { buildResearchIssueDefaults } from "../lib/new-issue-defaults";
 import { buildProjectWorkspaceSummaries } from "../lib/project-workspaces-tab";
 import { projectRouteRef, projectWorkspaceUrl } from "../lib/utils";
 import { timeAgo } from "../lib/timeAgo";
@@ -31,7 +33,7 @@ import { Button } from "@/components/ui/button";
 import { Tabs } from "@/components/ui/tabs";
 import { PluginLauncherOutlet } from "@/plugins/launchers";
 import { PluginSlotMount, PluginSlotOutlet, usePluginSlots } from "@/plugins/slots";
-import { Copy, FolderOpen, GitBranch, Loader2, Play, Square } from "lucide-react";
+import { Copy, FolderOpen, GitBranch, Loader2, Play, Plus, Square } from "lucide-react";
 import { IssuesQuicklook } from "../components/IssuesQuicklook";
 
 /* ── Top-level tab types ── */
@@ -449,6 +451,7 @@ export function ProjectDetail() {
   const { closePanel } = usePanel();
   const { setBreadcrumbs } = useBreadcrumbs();
   const { pushToast } = useToast();
+  const { openNewIssue } = useDialog();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const location = useLocation();
@@ -846,6 +849,23 @@ export function ProjectDetail() {
         className="flex flex-wrap gap-2"
         itemClassName="inline-flex"
       />
+
+      <div className="flex flex-wrap gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() =>
+            openNewIssue(
+              buildResearchIssueDefaults({
+                projectId: project.id,
+              }),
+            )
+          }
+        >
+          <Plus className="h-3.5 w-3.5 mr-1" />
+          New Research Issue
+        </Button>
+      </div>
 
       <Tabs value={activeTab ?? "list"} onValueChange={(value) => handleTabChange(value as ProjectTab)}>
         <PageTabBar

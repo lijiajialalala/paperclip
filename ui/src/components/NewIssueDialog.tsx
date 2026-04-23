@@ -4,7 +4,7 @@ import { pickTextColorForSolidBg } from "@/lib/color-contrast";
 import { useDialog } from "../context/DialogContext";
 import { useCompany } from "../context/CompanyContext";
 import { executionWorkspacesApi } from "../api/execution-workspaces";
-import { issuesApi } from "../api/issues";
+import { issuesApi, type CreateIssueRequest } from "../api/issues";
 import { instanceSettingsApi } from "../api/instanceSettings";
 import { projectsApi } from "../api/projects";
 import { agentsApi } from "../api/agents";
@@ -19,6 +19,11 @@ import {
   currentUserAssigneeOption,
   parseAssigneeValue,
 } from "../lib/assignees";
+import {
+  coerceIssueBlackboardTemplate,
+  resolveIssueBlackboardTemplate,
+  type IssueBlackboardTemplateSelection,
+} from "../lib/issue-blackboard-template";
 import {
   Dialog,
   DialogContent,
@@ -54,7 +59,14 @@ import { issueStatusText, issueStatusTextDefault, priorityColor, priorityColorDe
 import { MarkdownEditor, type MarkdownEditorRef, type MentionOption } from "./MarkdownEditor";
 import { AgentIcon } from "./AgentIconPicker";
 import { InlineEntitySelector, type InlineEntityOption } from "./InlineEntitySelector";
-import { ISSUE_WRITABLE_STATUSES } from "@paperclipai/shared/constants";
+import {
+  type ExecutionWorkspaceMode,
+  ISSUE_BLACKBOARD_TEMPLATES,
+  ISSUE_PRIORITIES,
+  ISSUE_WRITABLE_STATUSES,
+  type IssuePriority,
+  type IssueWritableStatus,
+} from "@paperclipai/shared";
 
 const DRAFT_KEY = "paperclip:issue-draft";
 const DEBOUNCE_MS = 800;
@@ -75,6 +87,7 @@ interface IssueDraft {
   executionWorkspaceMode?: string;
   selectedExecutionWorkspaceId?: string;
   useIsolatedExecutionWorkspace?: boolean;
+  blackboardTemplate?: IssueBlackboardTemplateSelection;
 }
 
 type StagedIssueFile = {
@@ -88,9 +101,37 @@ type StagedIssueFile = {
 const ISSUE_OVERRIDE_ADAPTER_TYPES = new Set(["claude_local", "codex_local", "opencode_local"]);
 const STAGED_FILE_ACCEPT = "image/*,application/pdf,text/plain,text/markdown,application/json,text/csv,text/html,.md,.markdown";
 const writableIssueStatusSet = new Set<string>(ISSUE_WRITABLE_STATUSES);
+const issuePrioritySet = new Set<string>(ISSUE_PRIORITIES);
+const executionWorkspaceModeSet = new Set<ExecutionWorkspaceMode>([
+  "inherit",
+  "shared_workspace",
+  "isolated_workspace",
+  "operator_branch",
+  "reuse_existing",
+  "agent_default",
+]);
 
-function coerceWritableIssueStatus(status: string | null | undefined, fallback = "todo") {
-  return status && writableIssueStatusSet.has(status) ? status : fallback;
+function coerceWritableIssueStatus(
+  status: string | null | undefined,
+  fallback: IssueWritableStatus = "todo",
+): IssueWritableStatus {
+  return status && writableIssueStatusSet.has(status) ? (status as IssueWritableStatus) : fallback;
+}
+
+function coerceIssuePriority(
+  priority: string | null | undefined,
+  fallback: IssuePriority | "" = "",
+): IssuePriority | "" {
+  return priority && issuePrioritySet.has(priority) ? (priority as IssuePriority) : fallback;
+}
+
+function coerceExecutionWorkspaceMode(
+  mode: string | null | undefined,
+  fallback: ExecutionWorkspaceMode = "shared_workspace",
+): ExecutionWorkspaceMode {
+  return mode && executionWorkspaceModeSet.has(mode as ExecutionWorkspaceMode)
+    ? (mode as ExecutionWorkspaceMode)
+    : fallback;
 }
 
 const ISSUE_THINKING_EFFORT_OPTIONS = {
@@ -232,19 +273,27 @@ const statuses = [
   { value: "done", label: "Done", color: issueStatusText.done ?? issueStatusTextDefault },
   { value: "blocked", label: "Blocked", color: issueStatusText.blocked ?? issueStatusTextDefault },
   { value: "cancelled", label: "Cancelled", color: issueStatusText.cancelled ?? issueStatusTextDefault },
-];
+] satisfies Array<{ value: IssueWritableStatus; label: string; color: string }>;
 
 const priorities = [
   { value: "critical", label: "Critical", icon: AlertTriangle, color: priorityColor.critical ?? priorityColorDefault },
   { value: "high", label: "High", icon: ArrowUp, color: priorityColor.high ?? priorityColorDefault },
   { value: "medium", label: "Medium", icon: Minus, color: priorityColor.medium ?? priorityColorDefault },
   { value: "low", label: "Low", icon: ArrowDown, color: priorityColor.low ?? priorityColorDefault },
-];
+] satisfies Array<{ value: IssuePriority; label: string; icon: typeof AlertTriangle; color: string }>;
 
 const EXECUTION_WORKSPACE_MODES = [
   { value: "shared_workspace", label: "Project default" },
   { value: "isolated_workspace", label: "New isolated workspace" },
   { value: "reuse_existing", label: "Reuse existing workspace" },
+] satisfies ReadonlyArray<{ value: ExecutionWorkspaceMode; label: string }>;
+
+const ISSUE_BLACKBOARD_TEMPLATE_OPTIONS = [
+  { value: "", label: "None" },
+  ...ISSUE_BLACKBOARD_TEMPLATES.map((template) => ({
+    value: template,
+    label: template === "research_v1" ? "Research v1" : template,
+  })),
 ] as const;
 
 function defaultProjectWorkspaceIdForProject(project: { workspaces?: Array<{ id: string; isPrimary: boolean }>; executionWorkspacePolicy?: { defaultProjectWorkspaceId?: string | null } | null } | null | undefined) {
@@ -255,7 +304,9 @@ function defaultProjectWorkspaceIdForProject(project: { workspaces?: Array<{ id:
     ?? "";
 }
 
-function defaultExecutionWorkspaceModeForProject(project: { executionWorkspacePolicy?: { enabled?: boolean; defaultMode?: string | null } | null } | null | undefined) {
+function defaultExecutionWorkspaceModeForProject(
+  project: { executionWorkspacePolicy?: { enabled?: boolean; defaultMode?: string | null } | null } | null | undefined,
+): ExecutionWorkspaceMode {
   const defaultMode = project?.executionWorkspacePolicy?.enabled ? project.executionWorkspacePolicy.defaultMode : null;
   if (
     defaultMode === "isolated_workspace" ||
@@ -267,7 +318,7 @@ function defaultExecutionWorkspaceModeForProject(project: { executionWorkspacePo
   return "shared_workspace";
 }
 
-function issueExecutionWorkspaceModeForExistingWorkspace(mode: string | null | undefined) {
+function issueExecutionWorkspaceModeForExistingWorkspace(mode: string | null | undefined): ExecutionWorkspaceMode {
   if (mode === "isolated_workspace" || mode === "operator_branch" || mode === "shared_workspace") {
     return mode;
   }
@@ -284,8 +335,8 @@ export function NewIssueDialog() {
   const { pushToast } = useToast();
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
-  const [status, setStatus] = useState("todo");
-  const [priority, setPriority] = useState("");
+  const [status, setStatus] = useState<IssueWritableStatus>("todo");
+  const [priority, setPriority] = useState<IssuePriority | "">("");
   const [assigneeValue, setAssigneeValue] = useState("");
   const [projectId, setProjectId] = useState("");
   const [projectWorkspaceId, setProjectWorkspaceId] = useState("");
@@ -293,8 +344,9 @@ export function NewIssueDialog() {
   const [assigneeModelOverride, setAssigneeModelOverride] = useState("");
   const [assigneeThinkingEffort, setAssigneeThinkingEffort] = useState("");
   const [assigneeChrome, setAssigneeChrome] = useState(false);
-  const [executionWorkspaceMode, setExecutionWorkspaceMode] = useState<string>("shared_workspace");
+  const [executionWorkspaceMode, setExecutionWorkspaceMode] = useState<ExecutionWorkspaceMode>("shared_workspace");
   const [selectedExecutionWorkspaceId, setSelectedExecutionWorkspaceId] = useState("");
+  const [blackboardTemplate, setBlackboardTemplate] = useState<IssueBlackboardTemplateSelection>("");
   const [expanded, setExpanded] = useState(false);
   const [dialogCompanyId, setDialogCompanyId] = useState<string | null>(null);
   const [stagedFiles, setStagedFiles] = useState<StagedIssueFile[]>([]);
@@ -409,7 +461,7 @@ export function NewIssueDialog() {
       companyId,
       stagedFiles: pendingStagedFiles,
       ...data
-    }: { companyId: string; stagedFiles: StagedIssueFile[] } & Record<string, unknown>) => {
+    }: { companyId: string; stagedFiles: StagedIssueFile[] } & CreateIssueRequest) => {
       const issue = await issuesApi.create(companyId, data);
       const failures: string[] = [];
 
@@ -492,6 +544,7 @@ export function NewIssueDialog() {
       assigneeChrome,
       executionWorkspaceMode,
       selectedExecutionWorkspaceId,
+      blackboardTemplate,
     });
   }, [
     title,
@@ -506,6 +559,7 @@ export function NewIssueDialog() {
     assigneeChrome,
     executionWorkspaceMode,
     selectedExecutionWorkspaceId,
+    blackboardTemplate,
     newIssueOpen,
     scheduleSave,
   ]);
@@ -517,11 +571,16 @@ export function NewIssueDialog() {
     executionWorkspaceDefaultProjectId.current = null;
 
     const draft = loadDraft();
+    const resolvedBlackboardTemplate = resolveIssueBlackboardTemplate({
+      defaultTemplate: newIssueDefaults.blackboardTemplate,
+      draftTemplate: draft?.blackboardTemplate,
+    });
+    setBlackboardTemplate(resolvedBlackboardTemplate);
     if (newIssueDefaults.title) {
       setTitle(newIssueDefaults.title);
       setDescription(newIssueDefaults.description ?? "");
       setStatus(coerceWritableIssueStatus(newIssueDefaults.status));
-      setPriority(newIssueDefaults.priority ?? "");
+      setPriority(coerceIssuePriority(newIssueDefaults.priority));
       const defaultProjectId = newIssueDefaults.projectId ?? "";
       const defaultProject = orderedProjects.find((project) => project.id === defaultProjectId);
       setProjectId(defaultProjectId);
@@ -539,7 +598,7 @@ export function NewIssueDialog() {
       setTitle(draft.title);
       setDescription(draft.description);
       setStatus(coerceWritableIssueStatus(draft.status));
-      setPriority(draft.priority);
+      setPriority(coerceIssuePriority(draft.priority));
       setAssigneeValue(
         newIssueDefaults.assigneeAgentId || newIssueDefaults.assigneeUserId
           ? assigneeValueFromSelection(newIssueDefaults)
@@ -551,8 +610,10 @@ export function NewIssueDialog() {
       setAssigneeThinkingEffort(draft.assigneeThinkingEffort ?? "");
       setAssigneeChrome(draft.assigneeChrome ?? false);
       setExecutionWorkspaceMode(
-        draft.executionWorkspaceMode
-          ?? (draft.useIsolatedExecutionWorkspace ? "isolated_workspace" : defaultExecutionWorkspaceModeForProject(restoredProject)),
+        coerceExecutionWorkspaceMode(
+          draft.executionWorkspaceMode,
+          draft.useIsolatedExecutionWorkspace ? "isolated_workspace" : defaultExecutionWorkspaceModeForProject(restoredProject),
+        ),
       );
       setSelectedExecutionWorkspaceId(draft.selectedExecutionWorkspaceId ?? "");
       executionWorkspaceDefaultProjectId.current = restoredProjectId || null;
@@ -560,7 +621,7 @@ export function NewIssueDialog() {
       const defaultProjectId = newIssueDefaults.projectId ?? "";
       const defaultProject = orderedProjects.find((project) => project.id === defaultProjectId);
       setStatus(coerceWritableIssueStatus(newIssueDefaults.status));
-      setPriority(newIssueDefaults.priority ?? "");
+      setPriority(coerceIssuePriority(newIssueDefaults.priority));
       setProjectId(defaultProjectId);
       setProjectWorkspaceId(defaultProjectWorkspaceIdForProject(defaultProject));
       setAssigneeValue(assigneeValueFromSelection(newIssueDefaults));
@@ -614,6 +675,7 @@ export function NewIssueDialog() {
     setAssigneeChrome(false);
     setExecutionWorkspaceMode("shared_workspace");
     setSelectedExecutionWorkspaceId("");
+    setBlackboardTemplate("");
     setExpanded(false);
     setDialogCompanyId(null);
     setStagedFiles([]);
@@ -681,6 +743,7 @@ export function NewIssueDialog() {
         ? { executionWorkspaceId: selectedExecutionWorkspaceId }
         : {}),
       ...(executionWorkspaceSettings ? { executionWorkspaceSettings } : {}),
+      ...(blackboardTemplate ? { blackboardTemplate } : {}),
     });
   }
 
@@ -1137,8 +1200,9 @@ export function NewIssueDialog() {
                 className="w-full rounded border border-border bg-transparent px-2 py-1.5 text-xs outline-none"
                 value={executionWorkspaceMode}
                 onChange={(e) => {
-                  setExecutionWorkspaceMode(e.target.value);
-                  if (e.target.value !== "reuse_existing") {
+                  const nextMode = coerceExecutionWorkspaceMode(e.target.value);
+                  setExecutionWorkspaceMode(nextMode);
+                  if (nextMode !== "reuse_existing") {
                     setSelectedExecutionWorkspaceId("");
                   }
                 }}
@@ -1171,6 +1235,31 @@ export function NewIssueDialog() {
             </div>
           </div>
         )}
+
+        <div className="px-4 py-3 shrink-0 space-y-2">
+          <div className="space-y-1.5">
+            <div className="text-xs font-medium">Task workspace template</div>
+            <div className="text-[11px] text-muted-foreground">
+              Optionally bootstrap a structured shared workspace when the issue is created.
+            </div>
+            <select
+              className="w-full rounded border border-border bg-transparent px-2 py-1.5 text-xs outline-none"
+              value={blackboardTemplate}
+              onChange={(e) => setBlackboardTemplate(coerceIssueBlackboardTemplate(e.target.value))}
+            >
+              {ISSUE_BLACKBOARD_TEMPLATE_OPTIONS.map((option) => (
+                <option key={option.value || "none"} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+            {blackboardTemplate === "research_v1" ? (
+              <div className="text-[11px] text-muted-foreground">
+                Creates a research blackboard with brief, source matrix, skeleton, evidence ledger, and final report slots.
+              </div>
+            ) : null}
+          </div>
+        </div>
 
         {supportsAssigneeOverrides && (
           <div className="px-4 pb-2 shrink-0">

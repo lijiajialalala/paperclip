@@ -239,7 +239,65 @@ export interface IssueRuntimeState {
   humanWait: IssueHumanWaitRuntimeState;
 }
 
-export type DocumentFormat = "markdown";
+export type DocumentFormat = "markdown" | "json";
+
+export type IssueBlackboardTemplate = "research_v1";
+
+export type IssueBlackboardEntryKey =
+  | "original-request"
+  | "brief"
+  | "clarification-log"
+  | "source-matrix"
+  | "skeleton"
+  | "evidence-ledger"
+  | "open-questions"
+  | "challenge-memo"
+  | "audit-memo"
+  | "final-report"
+  | "action-memo";
+
+export type IssueBlackboardKey = "blackboard-manifest" | IssueBlackboardEntryKey;
+
+export interface IssueBlackboardManifestEntry {
+  key: IssueBlackboardEntryKey;
+  title: string;
+  format: DocumentFormat;
+  required: boolean;
+  description?: string | null;
+}
+
+export interface IssueBlackboardManifest {
+  kind: "issue_blackboard";
+  version: 1;
+  template: IssueBlackboardTemplate;
+  entries: IssueBlackboardManifestEntry[];
+}
+
+export interface IssueBlackboardManifestState {
+  status: "ready" | "missing" | "invalid";
+  key: "blackboard-manifest";
+  content: IssueBlackboardManifest;
+  document: IssueDocument | null;
+  errors?: string[];
+}
+
+export interface IssueBlackboardEntryState {
+  key: IssueBlackboardEntryKey;
+  title: string;
+  format: DocumentFormat;
+  required: boolean;
+  status: "ready" | "missing" | "invalid";
+  content: unknown | null;
+  document: IssueDocument | null;
+  errors?: string[];
+}
+
+export interface IssueBlackboardState {
+  manifest: IssueBlackboardManifestState;
+  entries: IssueBlackboardEntryState[];
+  missingKeys: IssueBlackboardEntryKey[];
+  isComplete: boolean;
+}
 
 export interface IssueDocumentSummary {
   id: string;

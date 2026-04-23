@@ -217,6 +217,7 @@ describe("company portability", () => {
       projectId: input.projectId,
       goalId: null,
       parentIssueId: null,
+      issueBlackboardTemplate: input.issueBlackboardTemplate ?? null,
       title: input.title,
       description: input.description ?? null,
       assigneeAgentId: input.assigneeAgentId,
@@ -1195,6 +1196,7 @@ describe("company portability", () => {
         projectId: "project-1",
         goalId: null,
         parentIssueId: null,
+        issueBlackboardTemplate: "research_v1",
         title: "Monday Review",
         description: "Review pipeline health",
         assigneeAgentId: "agent-1",
@@ -1280,6 +1282,7 @@ describe("company portability", () => {
     expect(extension).toContain("routines:");
     expect(extension).toContain("monday-review:");
     expect(extension).toContain('cronExpression: "0 9 * * 1"');
+    expect(extension).toContain('issueBlackboardTemplate: "research_v1"');
     expect(extension).toContain('signingMode: "hmac_sha256"');
     expect(extension).not.toContain("secretId");
     expect(extension).not.toContain("publicId");
@@ -1292,6 +1295,7 @@ describe("company portability", () => {
         routine: expect.objectContaining({
           concurrencyPolicy: "always_enqueue",
           catchUpPolicy: "enqueue_missed_with_cap",
+          issueBlackboardTemplate: "research_v1",
           triggers: expect.arrayContaining([
             expect.objectContaining({ kind: "schedule", cronExpression: "0 9 * * 1", timezone: "America/Chicago" }),
             expect.objectContaining({ kind: "webhook", enabled: false, signingMode: "hmac_sha256", replayWindowSec: 120 }),
@@ -1299,6 +1303,166 @@ describe("company portability", () => {
         }),
       }),
     ]);
+  });
+
+  it("round-trips routine issue blackboard templates through export and import", async () => {
+    const portability = companyPortabilityService({} as any);
+
+    projectSvc.list.mockResolvedValue([
+      {
+        id: "project-1",
+        name: "Launch",
+        urlKey: "launch",
+        description: "Ship it",
+        leadAgentId: "agent-1",
+        targetDate: null,
+        color: null,
+        status: "planned",
+        executionWorkspacePolicy: null,
+        archivedAt: null,
+      },
+    ]);
+    routineSvc.list.mockResolvedValue([
+      {
+        id: "routine-1",
+        companyId: "company-1",
+        projectId: "project-1",
+        goalId: null,
+        parentIssueId: null,
+        issueBlackboardTemplate: "research_v1",
+        title: "Monday Review",
+        description: "Review pipeline health",
+        assigneeAgentId: "agent-1",
+        priority: "high",
+        status: "paused",
+        concurrencyPolicy: "always_enqueue",
+        catchUpPolicy: "enqueue_missed_with_cap",
+        createdByAgentId: null,
+        createdByUserId: null,
+        updatedByAgentId: null,
+        updatedByUserId: null,
+        lastTriggeredAt: null,
+        lastEnqueuedAt: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        triggers: [
+          {
+            id: "trigger-1",
+            companyId: "company-1",
+            routineId: "routine-1",
+            kind: "schedule",
+            label: "Weekly cadence",
+            enabled: true,
+            cronExpression: "0 9 * * 1",
+            timezone: "America/Chicago",
+            nextRunAt: null,
+            lastFiredAt: null,
+            publicId: "public-1",
+            secretId: "secret-1",
+            signingMode: null,
+            replayWindowSec: null,
+            lastRotatedAt: null,
+            lastResult: null,
+            createdByAgentId: null,
+            createdByUserId: null,
+            updatedByAgentId: null,
+            updatedByUserId: null,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          },
+        ],
+        lastRun: null,
+        activeIssue: null,
+      },
+    ]);
+
+    const exported = await portability.exportBundle("company-1", {
+      include: {
+        company: true,
+        agents: true,
+        projects: true,
+        issues: true,
+        skills: false,
+      },
+    });
+
+    companySvc.create.mockResolvedValue({
+      id: "company-imported",
+      name: "Imported Paperclip",
+    });
+    accessSvc.ensureMembership.mockResolvedValue(undefined);
+    agentSvc.create.mockResolvedValue({
+      id: "agent-created",
+      name: "ClaudeCoder",
+    });
+    projectSvc.create.mockResolvedValue({
+      id: "project-created",
+      name: "Launch",
+      urlKey: "launch",
+    });
+    agentSvc.list.mockResolvedValue([]);
+    projectSvc.list.mockResolvedValue([]);
+
+    const preview = await portability.previewImport({
+      source: {
+        type: "inline",
+        rootPath: exported.rootPath,
+        files: exported.files,
+      },
+      include: {
+        company: true,
+        agents: true,
+        projects: true,
+        issues: true,
+        skills: false,
+      },
+      target: {
+        mode: "new_company",
+        newCompanyName: "Imported Paperclip",
+      },
+      agents: "all",
+      collisionStrategy: "rename",
+    });
+
+    expect(preview.errors).toEqual([]);
+    expect(preview.manifest.issues).toEqual([
+      expect.objectContaining({
+        slug: "monday-review",
+        recurring: true,
+        routine: expect.objectContaining({
+          issueBlackboardTemplate: "research_v1",
+        }),
+      }),
+    ]);
+
+    await portability.importBundle({
+      source: {
+        type: "inline",
+        rootPath: exported.rootPath,
+        files: exported.files,
+      },
+      include: {
+        company: true,
+        agents: true,
+        projects: true,
+        issues: true,
+        skills: false,
+      },
+      target: {
+        mode: "new_company",
+        newCompanyName: "Imported Paperclip",
+      },
+      agents: "all",
+      collisionStrategy: "rename",
+    }, "user-1");
+
+    expect(routineSvc.create).toHaveBeenCalledWith("company-imported", expect.objectContaining({
+      projectId: "project-created",
+      title: "Monday Review",
+      assigneeAgentId: "agent-created",
+      issueBlackboardTemplate: "research_v1",
+    }), expect.any(Object));
+    expect(issueSvc.create).not.toHaveBeenCalled();
   });
 
   it("imports recurring task packages as routines instead of one-time issues", async () => {
@@ -1362,6 +1526,7 @@ describe("company portability", () => {
         '    priority: "high"',
         '    concurrencyPolicy: "always_enqueue"',
         '    catchUpPolicy: "enqueue_missed_with_cap"',
+        '    issueBlackboardTemplate: "research_v1"',
         "    triggers:",
         "      - kind: schedule",
         '        cronExpression: "0 9 * * 1"',
@@ -1406,6 +1571,7 @@ describe("company portability", () => {
       status: "paused",
       concurrencyPolicy: "always_enqueue",
       catchUpPolicy: "enqueue_missed_with_cap",
+      issueBlackboardTemplate: "research_v1",
     }), expect.any(Object));
     expect(routineSvc.createTrigger).toHaveBeenCalledTimes(2);
     expect(routineSvc.createTrigger).toHaveBeenCalledWith("routine-created", expect.objectContaining({
@@ -1523,6 +1689,54 @@ describe("company portability", () => {
 
     expect(preview.errors).toContain("Recurring task monday-review must declare a project to import as a routine.");
     expect(preview.errors).toContain("Recurring task monday-review must declare an assignee to import as a routine.");
+  });
+
+  it("flags recurring task imports that use unsupported issue blackboard templates", async () => {
+    const portability = companyPortabilityService({} as any);
+
+    const input = {
+      source: {
+        type: "inline" as const,
+        rootPath: "paperclip-demo",
+        files: {
+          "COMPANY.md": ['---', 'schema: "agentcompanies/v1"', 'name: "Imported Paperclip"', "---", ""].join("\n"),
+          "agents/claudecoder/AGENTS.md": ['---', 'name: "ClaudeCoder"', "---", "", "You write code.", ""].join("\n"),
+          "projects/launch/PROJECT.md": ['---', 'name: "Launch"', "---", ""].join("\n"),
+          "tasks/monday-review/TASK.md": [
+            "---",
+            'name: "Monday Review"',
+            'project: "launch"',
+            'assignee: "claudecoder"',
+            "recurring: true",
+            "---",
+            "",
+            "Review pipeline health.",
+            "",
+          ].join("\n"),
+          ".paperclip.yaml": [
+            'schema: "paperclip/v1"',
+            "routines:",
+            "  monday-review:",
+            '    issueBlackboardTemplate: "future_v2"',
+            "    triggers:",
+            "      - kind: schedule",
+            '        cronExpression: "0 9 * * 1"',
+            '        timezone: "America/Chicago"',
+            "",
+          ].join("\n"),
+        },
+      },
+      include: { company: true, agents: true, projects: true, issues: true, skills: false },
+      target: { mode: "new_company" as const, newCompanyName: "Imported Paperclip" },
+      agents: "all" as const,
+      collisionStrategy: "rename" as const,
+    };
+
+    const preview = await portability.previewImport(input);
+
+    expect(preview.errors).toContain('Recurring task monday-review uses unsupported issueBlackboardTemplate "future_v2".');
+    await expect(portability.importBundle(input, "user-1")).rejects.toThrow('unsupported issueBlackboardTemplate "future_v2"');
+    expect(routineSvc.create).not.toHaveBeenCalled();
   });
 
   it("imports a vendor-neutral package without .paperclip.yaml", async () => {

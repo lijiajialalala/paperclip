@@ -25,6 +25,12 @@ import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useToast } from "../context/ToastContext";
 import { queryKeys } from "../lib/queryKeys";
+import {
+  ISSUE_BLACKBOARD_TEMPLATE_OPTIONS,
+  coerceIssueBlackboardTemplate,
+  describeIssueBlackboardTemplate,
+  type IssueBlackboardTemplateSelection,
+} from "../lib/issue-blackboard-template";
 import { buildRoutineTriggerPatch } from "../lib/routine-trigger-patch";
 import { timeAgo } from "../lib/timeAgo";
 import { ToggleSwitch } from "@/components/ui/toggle-switch";
@@ -56,7 +62,7 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
-import type { RoutineTrigger, RoutineVariable } from "@paperclipai/shared";
+import type { RoutineStatus, RoutineTrigger, RoutineVariable, UpdateRoutine } from "@paperclipai/shared";
 
 const concurrencyPolicies = ["coalesce_if_active", "always_enqueue", "skip_if_active"];
 const catchUpPolicies = ["skip_missed", "enqueue_missed_with_cap"];
@@ -268,6 +274,7 @@ export function RoutineDetail() {
     description: string;
     projectId: string;
     assigneeAgentId: string;
+    issueBlackboardTemplate: IssueBlackboardTemplateSelection;
     dispatchMode: (typeof dispatchModes)[number];
     runIssueMode: "top_level_run_issue" | "child_of_fixed_parent";
     priority: string;
@@ -279,6 +286,7 @@ export function RoutineDetail() {
     description: "",
     projectId: "",
     assigneeAgentId: "",
+    issueBlackboardTemplate: "",
     dispatchMode: "event_driven",
     runIssueMode: "top_level_run_issue",
     priority: "medium",
@@ -347,6 +355,7 @@ export function RoutineDetail() {
             description: routine.description ?? "",
             projectId: routine.projectId,
             assigneeAgentId: routine.assigneeAgentId,
+            issueBlackboardTemplate: coerceIssueBlackboardTemplate(routine.issueBlackboardTemplate),
             dispatchMode: routine.dispatchMode,
             runIssueMode: routine.runIssueMode,
             priority: routine.priority,
@@ -364,6 +373,7 @@ export function RoutineDetail() {
       editDraft.description !== routineDefaults.description ||
       editDraft.projectId !== routineDefaults.projectId ||
       editDraft.assigneeAgentId !== routineDefaults.assigneeAgentId ||
+      editDraft.issueBlackboardTemplate !== routineDefaults.issueBlackboardTemplate ||
       editDraft.dispatchMode !== routineDefaults.dispatchMode ||
       editDraft.runIssueMode !== routineDefaults.runIssueMode ||
       editDraft.priority !== routineDefaults.priority ||
@@ -422,10 +432,20 @@ export function RoutineDetail() {
 
   const saveRoutine = useMutation({
     mutationFn: () => {
-      return routinesApi.update(routineId!, {
-        ...editDraft,
+      const payload: UpdateRoutine = {
+        title: editDraft.title,
         description: editDraft.description.trim() || null,
-      });
+        projectId: editDraft.projectId,
+        assigneeAgentId: editDraft.assigneeAgentId,
+        issueBlackboardTemplate: editDraft.issueBlackboardTemplate || null,
+        dispatchMode: editDraft.dispatchMode,
+        runIssueMode: editDraft.runIssueMode,
+        priority: editDraft.priority as UpdateRoutine["priority"],
+        concurrencyPolicy: editDraft.concurrencyPolicy as UpdateRoutine["concurrencyPolicy"],
+        catchUpPolicy: editDraft.catchUpPolicy as UpdateRoutine["catchUpPolicy"],
+        variables: editDraft.variables,
+      };
+      return routinesApi.update(routineId!, payload);
     },
     onSuccess: async () => {
       await Promise.all([
@@ -476,7 +496,7 @@ export function RoutineDetail() {
   });
 
   const updateRoutineStatus = useMutation({
-    mutationFn: (status: string) => routinesApi.update(routineId!, { status }),
+    mutationFn: (status: RoutineStatus) => routinesApi.update(routineId!, { status }),
     onSuccess: async (_data, status) => {
       pushToast({
         title: "Routine saved",
@@ -941,6 +961,28 @@ export function RoutineDetail() {
                   Fixed-parent mode is legacy and API-only. New routines should stay top-level.
                 </p>
               ) : null}
+            </div>
+            <div className="space-y-2">
+              <p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">Task workspace template</p>
+              <select
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none"
+                value={editDraft.issueBlackboardTemplate}
+                onChange={(event) =>
+                  setEditDraft((current) => ({
+                    ...current,
+                    issueBlackboardTemplate: coerceIssueBlackboardTemplate(event.target.value),
+                  }))}
+              >
+                {ISSUE_BLACKBOARD_TEMPLATE_OPTIONS.map((option) => (
+                  <option key={option.value || "none"} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs text-muted-foreground">
+                {describeIssueBlackboardTemplate(editDraft.issueBlackboardTemplate) ??
+                  "Optionally bootstrap a structured shared workspace whenever this routine opens a new task."}
+              </p>
             </div>
             <div className="space-y-2">
               <p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">Concurrency</p>

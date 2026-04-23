@@ -1,5 +1,6 @@
 import type {
   Approval,
+  CreateIssue,
   DocumentRevision,
   FeedbackTargetType,
   FeedbackTrace,
@@ -16,6 +17,11 @@ import { api } from "./client";
 
 export type IssueUpdateResponse = Issue & {
   comment?: IssueComment | null;
+};
+
+export type CreateIssueRequest = Omit<CreateIssue, "priority" | "requestDepth"> & {
+  priority?: CreateIssue["priority"];
+  requestDepth?: CreateIssue["requestDepth"];
 };
 
 export type PublishIssueArtifactTarget =
@@ -129,7 +135,7 @@ export const issuesApi = {
     api.post<{ id: string; archivedAt: Date }>(`/issues/${id}/inbox-archive`, {}),
   unarchiveFromInbox: (id: string) =>
     api.delete<{ id: string; archivedAt: Date } | { ok: true }>(`/issues/${id}/inbox-archive`),
-  create: (companyId: string, data: Record<string, unknown>) =>
+  create: (companyId: string, data: CreateIssueRequest) =>
     api.post<Issue>(`/companies/${companyId}/issues`, data),
   update: (id: string, data: Record<string, unknown>) =>
     api.patch<IssueUpdateResponse>(`/issues/${id}`, data),

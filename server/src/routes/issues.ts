@@ -17,6 +17,9 @@ import {
   feedbackVoteValueSchema,
   upsertIssueFeedbackVoteSchema,
   linkIssueApprovalSchema,
+  issueBlackboardEntryKeySchema,
+  bootstrapIssueBlackboardSchema,
+  upsertIssueBlackboardEntrySchema,
   issueDocumentKeySchema,
   restoreIssueDocumentRevisionSchema,
   ISSUE_ORIGIN_KINDS,
@@ -76,6 +79,7 @@ import {
   describeIssueExecutionPlanGateError,
   getIssueExecutionPlanGateReason,
 } from "../services/issue-plan-policy.js";
+import { issueBlackboardService } from "../services/issue-blackboard.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
 const updateIssueRouteSchema = updateIssueSchema.extend({
@@ -143,6 +147,7 @@ export function issueRoutes(
   const executionWorkspacesSvc = executionWorkspaceService(db);
   const workProductsSvc = workProductService(db);
   const documentsSvc = documentService(db);
+  const blackboardSvc = issueBlackboardService(db);
   const routinesSvc = routineService(db);
   const statusTruth = issueStatusTruthService(db);
   const qaIssueState = qaIssueStateService(db);
@@ -1136,13 +1141,14 @@ export function issueRoutes(
         ? req.query.wakeCommentId.trim()
         : null;
 
-    const [{ project, goal }, ancestors, commentCursor, wakeComment, qaSummary, platformUnblockSummary] = await Promise.all([
+    const [{ project, goal }, ancestors, commentCursor, wakeComment, qaSummary, platformUnblockSummary, blackboard] = await Promise.all([
       resolveIssueProjectAndGoal(issue),
       svc.getAncestors(issue.id),
       svc.getCommentCursor(issue.id),
       wakeCommentId ? svc.getComment(wakeCommentId) : null,
       canQueryDb ? qaIssueState.getIssueQaSummary(issue.id) : Promise.resolve(null),
       canQueryDb ? platformUnblock.getIssuePlatformUnblockSummary(issue.id) : Promise.resolve(null),
+      blackboardSvc.getIssueBlackboardSummary(issue.id),
     ]);
 
     res.json({
@@ -1188,6 +1194,7 @@ export function issueRoutes(
             parentId: goal.parentId,
           }
         : null,
+      blackboard,
       commentCursor,
       qaSummary,
       platformUnblockSummary,
@@ -1247,6 +1254,119 @@ export function issueRoutes(
     assertCompanyAccess(req, issue.companyId);
     const workProducts = await workProductsSvc.listForIssue(issue.id);
     res.json(workProducts);
+  });
+
+  router.get("/issues/:id/blackboard", async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await svc.getById(id);
+    if (!issue) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+    assertCompanyAccess(req, issue.companyId);
+    const state = await blackboardSvc.getIssueBlackboard(issue.id);
+    res.json(state);
+  });
+
+  router.get("/issues/:id/blackboard/:key", async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await svc.getById(id);
+    if (!issue) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+    assertCompanyAccess(req, issue.companyId);
+    const keyParsed = issueBlackboardEntryKeySchema.safeParse(String(req.params.key ?? "").trim().toLowerCase());
+    if (!keyParsed.success) {
+      res.status(400).json({ error: "Invalid blackboard key", details: keyParsed.error.issues });
+      return;
+    }
+    const entry = await blackboardSvc.getIssueBlackboardEntry(issue.id, keyParsed.data);
+    res.json(entry);
+  });
+
+  router.post("/issues/:id/blackboard/bootstrap", validate(bootstrapIssueBlackboardSchema), async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await svc.getById(id);
+    if (!issue) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+    assertCompanyAccess(req, issue.companyId);
+    if (!(await assertAgentExecutionPlanAllowed(req, res, issue, "bootstrapping issue blackboard"))) return;
+
+    const actor = getActorInfo(req);
+    const state = await blackboardSvc.bootstrapIssueBlackboard({
+      issueId: issue.id,
+      template: req.body.template,
+      createdByAgentId: actor.agentId ?? null,
+      createdByUserId: actor.actorType === "user" ? actor.actorId : null,
+      createdByRunId: actor.runId ?? null,
+    });
+
+    await logActivity(db, {
+      companyId: issue.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "issue.blackboard_bootstrapped",
+      entityType: "issue",
+      entityId: issue.id,
+      details: {
+        template: req.body.template,
+        entryCount: state.entries.length,
+      },
+    });
+
+    res.json(state);
+  });
+
+  router.put("/issues/:id/blackboard/:key", validate(upsertIssueBlackboardEntrySchema), async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await svc.getById(id);
+    if (!issue) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+    assertCompanyAccess(req, issue.companyId);
+    const keyParsed = issueBlackboardEntryKeySchema.safeParse(String(req.params.key ?? "").trim().toLowerCase());
+    if (!keyParsed.success) {
+      res.status(400).json({ error: "Invalid blackboard key", details: keyParsed.error.issues });
+      return;
+    }
+    if (!(await assertAgentExecutionPlanAllowed(req, res, issue, "updating issue blackboard"))) return;
+
+    const actor = getActorInfo(req);
+    const entry = await blackboardSvc.upsertIssueBlackboardEntry({
+      issueId: issue.id,
+      key: keyParsed.data,
+      content: req.body.content,
+      changeSummary: req.body.changeSummary ?? null,
+      baseRevisionId: req.body.baseRevisionId ?? null,
+      createdByAgentId: actor.agentId ?? null,
+      createdByUserId: actor.actorType === "user" ? actor.actorId : null,
+      createdByRunId: actor.runId ?? null,
+    });
+
+    await logActivity(db, {
+      companyId: issue.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "issue.blackboard_entry_updated",
+      entityType: "issue",
+      entityId: issue.id,
+      details: {
+        key: entry.key,
+        documentId: entry.document?.id ?? null,
+        format: entry.document?.format ?? entry.format,
+        revisionNumber: entry.document?.latestRevisionNumber ?? null,
+      },
+    });
+
+    res.json(entry);
   });
 
   router.get("/issues/:id/documents", async (req, res) => {
@@ -2026,6 +2146,7 @@ export function issueRoutes(
           : null,
       createdByAgentId: actor.agentId,
       createdByUserId: actor.actorType === "user" ? actor.actorId : null,
+      createdByRunId: actor.runId,
     });
     const createDisposition = getIssueCreateDisposition(issue);
 

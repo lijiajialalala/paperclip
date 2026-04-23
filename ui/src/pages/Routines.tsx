@@ -12,6 +12,12 @@ import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useToast } from "../context/ToastContext";
 import { queryKeys } from "../lib/queryKeys";
+import {
+  ISSUE_BLACKBOARD_TEMPLATE_OPTIONS,
+  coerceIssueBlackboardTemplate,
+  describeIssueBlackboardTemplate,
+  type IssueBlackboardTemplateSelection,
+} from "../lib/issue-blackboard-template";
 import { groupBy } from "../lib/groupBy";
 import { createIssueDetailLocationState } from "../lib/issueDetailBreadcrumb";
 import { getRecentAssigneeIds, sortAgentsByRecency, trackRecentAssignee } from "../lib/recent-assignees";
@@ -49,7 +55,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
-import type { RoutineListItem, RoutineVariable } from "@paperclipai/shared";
+import type { CreateRoutine, RoutineListItem, RoutineStatus, RoutineVariable, UpdateRoutine } from "@paperclipai/shared";
 
 const concurrencyPolicies = ["coalesce_if_active", "always_enqueue", "skip_if_active"];
 const catchUpPolicies = ["skip_missed", "enqueue_missed_with_cap"];
@@ -74,7 +80,7 @@ function formatLastRunTimestamp(value: Date | string | null | undefined) {
   return new Date(value).toLocaleString();
 }
 
-function nextRoutineStatus(currentStatus: string, enabled: boolean) {
+function nextRoutineStatus(currentStatus: string, enabled: boolean): RoutineStatus {
   if (currentStatus === "archived" && enabled) return "active";
   return enabled ? "active" : "paused";
 }
@@ -292,6 +298,7 @@ export function Routines() {
     description: string;
     projectId: string;
     assigneeAgentId: string;
+    issueBlackboardTemplate: IssueBlackboardTemplateSelection;
     dispatchMode: RoutineListItem["dispatchMode"];
     runIssueMode: RoutineListItem["runIssueMode"];
     priority: string;
@@ -303,6 +310,7 @@ export function Routines() {
     description: "",
     projectId: "",
     assigneeAgentId: "",
+    issueBlackboardTemplate: "",
     dispatchMode: "event_driven",
     runIssueMode: "top_level_run_issue",
     priority: "medium",
@@ -360,17 +368,30 @@ export function Routines() {
   }, [draft.title, composerOpen]);
 
   const createRoutine = useMutation({
-    mutationFn: () =>
-      routinesApi.create(selectedCompanyId!, {
-        ...draft,
+    mutationFn: () => {
+      const payload: CreateRoutine = {
+        title: draft.title,
         description: draft.description.trim() || null,
-      }),
+        projectId: draft.projectId,
+        assigneeAgentId: draft.assigneeAgentId,
+        issueBlackboardTemplate: draft.issueBlackboardTemplate || null,
+        dispatchMode: draft.dispatchMode,
+        runIssueMode: draft.runIssueMode,
+        priority: draft.priority as CreateRoutine["priority"],
+        status: "active",
+        concurrencyPolicy: draft.concurrencyPolicy as CreateRoutine["concurrencyPolicy"],
+        catchUpPolicy: draft.catchUpPolicy as CreateRoutine["catchUpPolicy"],
+        variables: draft.variables,
+      };
+      return routinesApi.create(selectedCompanyId!, payload);
+    },
     onSuccess: async (routine) => {
         setDraft({
           title: "",
           description: "",
           projectId: "",
           assigneeAgentId: "",
+          issueBlackboardTemplate: "",
           dispatchMode: "event_driven",
           runIssueMode: "top_level_run_issue",
           priority: "medium",
@@ -398,7 +419,10 @@ export function Routines() {
   });
 
   const updateRoutineStatus = useMutation({
-    mutationFn: ({ id, status }: { id: string; status: string }) => routinesApi.update(id, { status }),
+    mutationFn: ({ id, status }: { id: string; status: RoutineStatus }) => {
+      const payload: UpdateRoutine = { status };
+      return routinesApi.update(id, payload);
+    },
     onMutate: ({ id }) => {
       setStatusMutationRoutineId(id);
     },
@@ -852,6 +876,28 @@ export function Routines() {
                         </SelectContent>
                       </Select>
                       <p className="text-xs text-muted-foreground">{dispatchModeDescription}</p>
+                    </div>
+                    <div className="space-y-2">
+                      <p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">Task workspace template</p>
+                      <select
+                        className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none"
+                        value={draft.issueBlackboardTemplate}
+                        onChange={(event) =>
+                          setDraft((current) => ({
+                            ...current,
+                            issueBlackboardTemplate: coerceIssueBlackboardTemplate(event.target.value),
+                          }))}
+                      >
+                        {ISSUE_BLACKBOARD_TEMPLATE_OPTIONS.map((option) => (
+                          <option key={option.value || "none"} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                      <p className="text-xs text-muted-foreground">
+                        {describeIssueBlackboardTemplate(draft.issueBlackboardTemplate) ??
+                          "Optionally bootstrap a structured shared workspace whenever this routine opens a new task."}
+                      </p>
                     </div>
                     <div className="space-y-2">
                       <p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">Run issue shape</p>

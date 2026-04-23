@@ -78,6 +78,7 @@ import {
   writeHeartbeatServerBootMarker,
 } from "./runtime-interruption.js";
 import { getIssueExecutionPlanGateReason, type IssueExecutionPlanGateReason } from "./issue-plan-policy.js";
+import { issueBlackboardService, type IssueBlackboardSummary } from "./issue-blackboard.js";
 
 const MAX_LIVE_LOG_CHUNK_BYTES = 8 * 1024;
 const HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT = 1;
@@ -1169,6 +1170,7 @@ async function buildPaperclipWakePayload(input: {
         taskRootIssueId?: string | null;
         taskRootDir?: string | null;
         deliverableRoot?: string | null;
+        blackboard?: IssueBlackboardSummary | null;
       }
     | null;
 }) {
@@ -1193,6 +1195,13 @@ async function buildPaperclipWakePayload(input: {
           .from(issues)
           .where(and(eq(issues.id, issueId), eq(issues.companyId, input.companyId)))
           .then((rows) => rows[0] ?? null)
+      : null);
+  const blackboardSummary =
+    issueSummary?.blackboard ??
+    (issueSummary?.id
+      ? await issueBlackboardService(input.db)
+          .getIssueBlackboardSummary(issueSummary.id)
+          .catch(() => null)
       : null);
   const shouldBuildIssueScopedWake =
     commentIds.length === 0 &&
@@ -1222,7 +1231,12 @@ async function buildPaperclipWakePayload(input: {
 
   return buildPaperclipWakePayloadFromCommentRows({
     contextSnapshot: input.contextSnapshot,
-    issueSummary,
+    issueSummary: issueSummary
+      ? {
+          ...issueSummary,
+          blackboard: blackboardSummary,
+        }
+      : null,
     commentRows,
   });
 }
@@ -1240,6 +1254,7 @@ export function buildPaperclipWakePayloadFromCommentRows(input: {
         taskRootIssueId?: string | null;
         taskRootDir?: string | null;
         deliverableRoot?: string | null;
+        blackboard?: IssueBlackboardSummary | null;
       }
     | null;
   commentRows: Array<{
@@ -1315,6 +1330,7 @@ export function buildPaperclipWakePayloadFromCommentRows(input: {
           taskRootIssueId: input.issueSummary.taskRootIssueId ?? null,
           taskRootDir: input.issueSummary.taskRootDir ?? null,
           deliverableRoot: input.issueSummary.deliverableRoot ?? null,
+          blackboard: input.issueSummary.blackboard ?? null,
         }
       : null,
     commentIds,
@@ -1465,6 +1481,7 @@ export function heartbeatService(db: Db) {
   const secretsSvc = secretService(db);
   const companySkills = companySkillService(db);
   const issuesSvc = issueService(db);
+  const blackboardSvc = issueBlackboardService(db);
   const qaWriteback = qaWritebackService(db, {
     heartbeat: {
       wakeup: enqueueWakeup,
@@ -2093,14 +2110,41 @@ export function heartbeatService(db: Db) {
       .then((rows) => rows[0]);
   }
 
+  function normalizeHeartbeatRunExitCode(exitCode: number | null | undefined): number | null {
+    if (exitCode == null || !Number.isFinite(exitCode)) {
+      return null;
+    }
+
+    const normalized = Math.trunc(exitCode);
+    if (normalized >= -2147483648 && normalized <= 2147483647) {
+      return normalized;
+    }
+
+    // Windows may report process exit codes as unsigned 32-bit integers.
+    if (normalized >= 0 && normalized <= 0xffff_ffff) {
+      return normalized >> 0;
+    }
+
+    return null;
+  }
+
   async function setRunStatus(
     runId: string,
     status: string,
     patch?: Partial<typeof heartbeatRuns.$inferInsert>,
   ) {
+    const normalizedPatch =
+      patch == null
+        ? patch
+        : {
+            ...patch,
+            ...(Object.prototype.hasOwnProperty.call(patch, "exitCode")
+              ? { exitCode: normalizeHeartbeatRunExitCode(patch.exitCode) }
+              : {}),
+          };
     const updated = await db
       .update(heartbeatRuns)
-      .set({ status, ...patch, updatedAt: new Date() })
+      .set({ status, ...normalizedPatch, updatedAt: new Date() })
       .where(eq(heartbeatRuns.id, runId))
       .returning()
       .then((rows) => rows[0] ?? null);
@@ -3913,6 +3957,7 @@ export function heartbeatService(db: Db) {
             : outcome === "failed"
               ? (adapterResult.errorCode ?? "adapter_failed")
               : null;
+      const persistedExitCode = normalizeHeartbeatRunExitCode(adapterResult.exitCode);
       await setRunStatus(run.id, status, {
         finishedAt,
         error:
@@ -3920,7 +3965,7 @@ export function heartbeatService(db: Db) {
             ? null
             : redactCurrentUserText(rawFinalErrorMessage, currentUserRedactionOptions),
         errorCode: finalErrorCode,
-        exitCode: adapterResult.exitCode,
+        exitCode: persistedExitCode,
         signal: adapterResult.signal,
         usageJson,
         resultJson: adapterResult.resultJson ?? null,
@@ -3972,7 +4017,8 @@ export function heartbeatService(db: Db) {
           message: `run ${outcome}`,
           payload: {
             status,
-            exitCode: adapterResult.exitCode,
+            exitCode: persistedExitCode,
+            ...(adapterResult.exitCode !== persistedExitCode ? { rawExitCode: adapterResult.exitCode ?? null } : {}),
             ...(retryPlan ? {
               automaticRetryReason: retryPlan.reason,
               automaticRetryAttempt: retryPlan.attempt,

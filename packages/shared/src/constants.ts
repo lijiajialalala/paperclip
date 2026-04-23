@@ -140,6 +140,28 @@ export const INBOX_MINE_ISSUE_STATUSES = [
 export const INBOX_MINE_ISSUE_STATUS_FILTER = INBOX_MINE_ISSUE_STATUSES.join(",");
 
 export const ISSUE_PRIORITIES = ["critical", "high", "medium", "low"] as const;
+
+export const ISSUE_DOCUMENT_FORMATS = ["markdown", "json"] as const;
+
+export const ISSUE_BLACKBOARD_MANIFEST_KEY = "blackboard-manifest" as const;
+export const ISSUE_BLACKBOARD_TEMPLATES = ["research_v1"] as const;
+export const ISSUE_BLACKBOARD_ENTRY_KEYS = [
+  "original-request",
+  "brief",
+  "clarification-log",
+  "source-matrix",
+  "skeleton",
+  "evidence-ledger",
+  "open-questions",
+  "challenge-memo",
+  "audit-memo",
+  "final-report",
+  "action-memo",
+] as const;
+export const ISSUE_BLACKBOARD_KEYS = [
+  ISSUE_BLACKBOARD_MANIFEST_KEY,
+  ...ISSUE_BLACKBOARD_ENTRY_KEYS,
+] as const;
 export type IssuePriority = (typeof ISSUE_PRIORITIES)[number];
 
 export const ISSUE_ORIGIN_KINDS = ["manual", "routine_execution"] as const;

@@ -15,7 +15,7 @@ import { companySecrets } from "./company_secrets.js";
 import { issues } from "./issues.js";
 import { projects } from "./projects.js";
 import { goals } from "./goals.js";
-import type { RoutineVariable } from "@paperclipai/shared";
+import type { IssueBlackboardTemplate, RoutineVariable } from "@paperclipai/shared";
 
 export const routines = pgTable(
   "routines",
@@ -25,6 +25,7 @@ export const routines = pgTable(
     projectId: uuid("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
     goalId: uuid("goal_id").references(() => goals.id, { onDelete: "set null" }),
     parentIssueId: uuid("parent_issue_id").references(() => issues.id, { onDelete: "set null" }),
+    issueBlackboardTemplate: text("issue_blackboard_template").$type<IssueBlackboardTemplate | null>(),
     title: text("title").notNull(),
     description: text("description"),
     assigneeAgentId: uuid("assignee_agent_id").notNull().references(() => agents.id),

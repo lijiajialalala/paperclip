@@ -30,6 +30,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { instanceSettingsService } from "../services/instance-settings.ts";
+import { issueBlackboardService } from "../services/issue-blackboard.ts";
 import { issueApprovalService } from "../services/issue-approvals.ts";
 import { issueStatusTruthService } from "../services/issue-status-truth.ts";
 import { getIssueCreateDisposition, issueService } from "../services/issues.ts";
@@ -60,6 +61,7 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     await db.delete(issueInboxArchives);
     await db.delete(activityLog);
     await db.delete(issues);
+    await db.execute(sql.raw('TRUNCATE TABLE "document_revisions", "issue_documents", "documents" CASCADE'));
     await db.delete(heartbeatRuns);
     await db.delete(executionWorkspaces);
     await db.delete(projectWorkspaces);
@@ -1863,6 +1865,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     await db.delete(issueInboxArchives);
     await db.delete(activityLog);
     await db.delete(issues);
+    await db.execute(sql.raw('TRUNCATE TABLE "document_revisions", "issue_documents", "documents" CASCADE'));
     await db.delete(heartbeatRuns);
     await db.delete(executionWorkspaces);
     await db.delete(projectWorkspaces);
@@ -2142,6 +2145,62 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
 
     expect(created.parentId).toBeNull();
     expect(created.taskRootIssueId).toBe(created.id);
+  });
+
+  it("bootstraps a research blackboard when create explicitly requests a template", async () => {
+    const companyId = randomUUID();
+    const blackboard = issueBlackboardService(db);
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    const created = await svc.create(companyId, {
+      title: "Research issue",
+      status: "todo",
+      priority: "medium",
+      createdByUserId: "board-user",
+      blackboardTemplate: "research_v1",
+    });
+
+    const summary = await blackboard.getIssueBlackboardSummary(created.id);
+
+    expect(summary.template).toBe("research_v1");
+    expect(summary.manifestStatus).toBe("ready");
+    expect(summary.entries).toHaveLength(11);
+    expect(summary.entries.find((entry) => entry.key === "source-matrix")).toEqual(
+      expect.objectContaining({ status: "ready" }),
+    );
+    expect(summary.entries.find((entry) => entry.key === "brief")).toEqual(
+      expect.objectContaining({ status: "missing" }),
+    );
+  });
+
+  it("keeps the blackboard absent when create omits a template", async () => {
+    const companyId = randomUUID();
+    const blackboard = issueBlackboardService(db);
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    const created = await svc.create(companyId, {
+      title: "Regular issue",
+      status: "todo",
+      priority: "medium",
+    });
+
+    const summary = await blackboard.getIssueBlackboardSummary(created.id);
+
+    expect(summary.template).toBe("research_v1");
+    expect(summary.manifestStatus).toBe("missing");
+    expect(summary.entries).toHaveLength(11);
   });
 
   it("reuses an active agent-created child issue when the same stage identity is retried", async () => {

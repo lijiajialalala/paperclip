@@ -1,5 +1,5 @@
 {
-  "id": "316c1073-2f95-4ed5-894e-de0d58244b7a",
+  "id": "5a17f352-ce62-451c-9a0a-e0ddb8289760",
   "prevId": "2b14f297-7352-49ad-8936-48494fcf0773",
   "version": "7",
   "dialect": "postgresql",
@@ -9044,58 +9044,6 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
-        },
-        "issues_open_reusable_stage_identity_uq": {
-          "name": "issues_open_reusable_stage_identity_uq",
-          "columns": [
-            {
-              "expression": "company_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "parent_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "created_by_agent_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "coalesce(\"assignee_agent_id\"::text, '')",
-              "asc": true,
-              "isExpression": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "coalesce(\"assignee_user_id\", '')",
-              "asc": true,
-              "isExpression": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "origin_kind",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "origin_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "\"issues\".\"parent_id\" is not null\n          and \"issues\".\"created_by_agent_id\" is not null\n          and \"issues\".\"origin_kind\" <> 'routine_execution'\n          and \"issues\".\"origin_id\" is not null\n          and btrim(\"issues\".\"origin_kind\") <> ''\n          and btrim(\"issues\".\"origin_id\") <> ''\n          and \"issues\".\"hidden_at\" is null\n          and \"issues\".\"status\" in ('backlog', 'todo', 'in_progress', 'in_review', 'blocked')",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
         }
       },
       "foreignKeys": {
@@ -12073,6 +12021,12 @@
         "parent_issue_id": {
           "name": "parent_issue_id",
           "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "issue_blackboard_template": {
+          "name": "issue_blackboard_template",
+          "type": "text",
           "primaryKey": false,
           "notNull": false
         },

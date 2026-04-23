@@ -323,4 +323,79 @@ describe("renderPaperclipWakePrompt", () => {
     expect(prompt).toContain("issue priority: high");
     expect(prompt).toContain("No inline comments accompanied this wake");
   });
+
+  it("renders compact blackboard progress when the wake payload includes blackboard summary", () => {
+    const prompt = renderPaperclipWakePrompt({
+      reason: "issue_assigned",
+      issue: {
+        id: "issue-1",
+        identifier: "PAP-103",
+        title: "Prepare research report",
+        status: "todo",
+        priority: "high",
+        blackboard: {
+          template: "research_v1",
+          manifestStatus: "ready",
+          isComplete: false,
+          requiredReadyCount: 2,
+          requiredTotalCount: 5,
+          missingKeys: ["source-matrix", "final-report"],
+          invalidKeys: ["evidence-ledger"],
+        },
+      },
+      commentIds: [],
+      latestCommentId: null,
+      comments: [],
+      commentWindow: {
+        requestedCount: 0,
+        includedCount: 0,
+        missingCount: 0,
+      },
+      truncated: false,
+      fallbackFetchNeeded: false,
+    });
+
+    expect(prompt).toContain("blackboard template: research_v1");
+    expect(prompt).toContain("blackboard progress: 2/5 required entries ready");
+    expect(prompt).toContain("blackboard missing keys: source-matrix, final-report");
+    expect(prompt).toContain("blackboard invalid keys: evidence-ledger");
+    expect(prompt).toContain("research workflow: keep original-request, brief, clarification-log, source-matrix, skeleton, evidence-ledger, final-report, and action-memo aligned in the issue blackboard");
+    expect(prompt).toContain("research gate: do not draft final-report until brief, source-matrix, and skeleton are current");
+    expect(prompt).toContain("evidence rule: every cited conclusion should keep Source_ID and acquisition method in evidence-ledger");
+  });
+
+  it("does not render blackboard guidance when the manifest is still missing", () => {
+    const prompt = renderPaperclipWakePrompt({
+      reason: "issue_assigned",
+      issue: {
+        id: "issue-1",
+        identifier: "PAP-104",
+        title: "Routine quality batch",
+        status: "todo",
+        priority: "medium",
+        blackboard: {
+          template: "research_v1",
+          manifestStatus: "missing",
+          isComplete: false,
+          requiredReadyCount: 0,
+          requiredTotalCount: 8,
+          missingKeys: ["brief", "source-matrix"],
+          invalidKeys: [],
+        },
+      },
+      commentIds: [],
+      latestCommentId: null,
+      comments: [],
+      commentWindow: {
+        requestedCount: 0,
+        includedCount: 0,
+        missingCount: 0,
+      },
+      truncated: false,
+      fallbackFetchNeeded: false,
+    });
+
+    expect(prompt).not.toContain("blackboard template:");
+    expect(prompt).not.toContain("research workflow:");
+  });
 });

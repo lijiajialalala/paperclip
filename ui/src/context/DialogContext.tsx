@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useState, type ReactNode } from "react";
+import type { IssueBlackboardTemplate } from "@paperclipai/shared";
 
 interface NewIssueDefaults {
   status?: string;
@@ -8,6 +9,7 @@ interface NewIssueDefaults {
   assigneeUserId?: string;
   title?: string;
   description?: string;
+  blackboardTemplate?: IssueBlackboardTemplate | null;
 }
 
 interface NewGoalDefaults {

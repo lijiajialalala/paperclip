@@ -311,6 +311,15 @@ type PaperclipWakeIssue = {
   taskRootIssueId: string | null;
   taskRootDir: string | null;
   deliverableRoot: string | null;
+  blackboard: {
+    template: string | null;
+    manifestStatus: string | null;
+    isComplete: boolean;
+    requiredReadyCount: number;
+    requiredTotalCount: number;
+    missingKeys: string[];
+    invalidKeys: string[];
+  } | null;
 };
 
 type PaperclipWakeComment = {
@@ -338,6 +347,7 @@ type PaperclipWakePayload = {
 
 function normalizePaperclipWakeIssue(value: unknown): PaperclipWakeIssue | null {
   const issue = parseObject(value);
+  const blackboard = parseObject(issue.blackboard);
   const id = asString(issue.id, "").trim() || null;
   const identifier = asString(issue.identifier, "").trim() || null;
   const title = asString(issue.title, "").trim() || null;
@@ -347,6 +357,22 @@ function normalizePaperclipWakeIssue(value: unknown): PaperclipWakeIssue | null 
   const taskRootIssueId = asString(issue.taskRootIssueId, "").trim() || null;
   const taskRootDir = asString(issue.taskRootDir, "").trim() || null;
   const deliverableRoot = asString(issue.deliverableRoot, "").trim() || null;
+  const blackboardSummary =
+    Object.keys(blackboard).length > 0
+      ? {
+          template: asString(blackboard.template, "").trim() || null,
+          manifestStatus: asString(blackboard.manifestStatus, "").trim() || null,
+          isComplete: asBoolean(blackboard.isComplete, false),
+          requiredReadyCount: asNumber(blackboard.requiredReadyCount, 0),
+          requiredTotalCount: asNumber(blackboard.requiredTotalCount, 0),
+          missingKeys: asStringArray(blackboard.missingKeys)
+            .map((entry) => entry.trim())
+            .filter(Boolean),
+          invalidKeys: asStringArray(blackboard.invalidKeys)
+            .map((entry) => entry.trim())
+            .filter(Boolean),
+        }
+      : null;
   if (!id && !identifier && !title) return null;
   return {
     id,
@@ -358,6 +384,7 @@ function normalizePaperclipWakeIssue(value: unknown): PaperclipWakeIssue | null 
     taskRootIssueId,
     taskRootDir,
     deliverableRoot,
+    blackboard: blackboardSummary,
   };
 }
 
@@ -422,6 +449,10 @@ export function renderPaperclipWakePrompt(
   if (!normalized) return "";
   const resumedSession = options.resumedSession === true;
   const hasInlineComments = normalized.comments.length > 0 || normalized.commentIds.length > 0;
+  const activeBlackboard =
+    normalized.issue?.blackboard && normalized.issue.blackboard.manifestStatus !== "missing"
+      ? normalized.issue.blackboard
+      : null;
 
   const lines = (() => {
     if (hasInlineComments) {
@@ -512,6 +543,45 @@ export function renderPaperclipWakePrompt(
       "- use the working directory for project files such as docs/, src/, package.json, and tests.",
       "- use the task root only for task-scoped artifacts under .paperclip/tasks/.",
     );
+  }
+  if (activeBlackboard?.template) {
+    lines.push(`- blackboard template: ${activeBlackboard.template}`);
+  }
+  if (activeBlackboard && normalized.issue) {
+    lines.push(
+      `- blackboard progress: ${activeBlackboard.requiredReadyCount}/${activeBlackboard.requiredTotalCount} required entries ready`,
+    );
+    if (activeBlackboard.manifestStatus && activeBlackboard.manifestStatus !== "ready") {
+      lines.push(`- blackboard manifest status: ${activeBlackboard.manifestStatus}`);
+    }
+    if (activeBlackboard.isComplete) {
+      lines.push("- blackboard state: complete");
+    }
+    if (activeBlackboard.missingKeys.length > 0) {
+      lines.push(`- blackboard missing keys: ${activeBlackboard.missingKeys.join(", ")}`);
+    }
+    if (activeBlackboard.invalidKeys.length > 0) {
+      lines.push(`- blackboard invalid keys: ${activeBlackboard.invalidKeys.join(", ")}`);
+    }
+    if (normalized.issue.id) {
+      lines.push(
+        `- blackboard next step: fetch /api/issues/${normalized.issue.id}/blackboard or the specific /blackboard/:key entry before broad repo exploration when you need the working state`,
+      );
+    }
+    if (activeBlackboard.template === "research_v1") {
+      lines.push(
+        "- research workflow: keep original-request, brief, clarification-log, source-matrix, skeleton, evidence-ledger, final-report, and action-memo aligned in the issue blackboard",
+      );
+      lines.push(
+        "- research gate: do not draft final-report until brief, source-matrix, and skeleton are current",
+      );
+      lines.push(
+        "- evidence rule: every cited conclusion should keep Source_ID and acquisition method in evidence-ledger",
+      );
+      lines.push(
+        "- frontstage/backstage: final-report and action-memo are user-facing; challenge and audit notes stay in blackboard docs",
+      );
+    }
   }
   if (normalized.missingCount > 0) {
     lines.push(`- omitted comments: ${normalized.missingCount}`);

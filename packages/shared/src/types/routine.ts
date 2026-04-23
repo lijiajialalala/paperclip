@@ -4,6 +4,7 @@ import type {
   RoutineRunIssueMode,
   RoutineVariableType,
 } from "../constants.js";
+import type { IssueBlackboardTemplate } from "./issue.js";
 
 export interface RoutineProjectSummary {
   id: string;
@@ -47,6 +48,7 @@ export interface Routine {
   projectId: string;
   goalId: string | null;
   parentIssueId: string | null;
+  issueBlackboardTemplate: IssueBlackboardTemplate | null;
   dispatchMode: RoutineDispatchMode;
   runIssueMode: RoutineRunIssueMode;
   title: string;

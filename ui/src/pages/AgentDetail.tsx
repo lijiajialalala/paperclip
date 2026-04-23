@@ -40,6 +40,7 @@ import { RunButton, PauseResumeButton } from "../components/AgentActionButtons";
 import { BudgetPolicyCard } from "../components/BudgetPolicyCard";
 import { PackageFileTree, buildFileTree } from "../components/PackageFileTree";
 import { ScrollToBottom } from "../components/ScrollToBottom";
+import { buildResearchIssueDefaults } from "../lib/new-issue-defaults";
 import { formatCents, formatDate, relativeTime, formatTokens, visibleRunCostUsd } from "../lib/utils";
 import { cn } from "../lib/utils";
 import { Button } from "@/components/ui/button";
@@ -930,6 +931,20 @@ export function AgentDetail() {
           >
             <Plus className="h-3.5 w-3.5 sm:mr-1" />
             <span className="hidden sm:inline">Assign Task</span>
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() =>
+              openNewIssue(
+                buildResearchIssueDefaults({
+                  assigneeAgentId: agent.id,
+                }),
+              )
+            }
+          >
+            <Plus className="h-3.5 w-3.5 sm:mr-1" />
+            <span className="hidden sm:inline">Assign Research Task</span>
           </Button>
           <RunButton
             onClick={() => agentAction.mutate("invoke")}

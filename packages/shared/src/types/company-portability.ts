@@ -86,6 +86,7 @@ export interface CompanyPortabilityIssueRoutineTriggerManifestEntry {
 export interface CompanyPortabilityIssueRoutineManifestEntry {
   concurrencyPolicy: string | null;
   catchUpPolicy: string | null;
+  issueBlackboardTemplate?: string | null;
   variables?: RoutineVariable[] | null;
   triggers: CompanyPortabilityIssueRoutineTriggerManifestEntry[];
 }

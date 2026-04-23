@@ -16,6 +16,7 @@ const routine = {
   projectId,
   goalId: null,
   parentIssueId: null,
+  issueBlackboardTemplate: null,
   dispatchMode: "event_driven",
   runIssueMode: "top_level_run_issue",
   title: "Daily routine",
@@ -152,6 +153,7 @@ describe("routine routes", () => {
         projectId,
         title: "Daily routine",
         assigneeAgentId: agentId,
+        issueBlackboardTemplate: "research_v1",
       });
 
     expect(res.status).toBe(403);
@@ -276,6 +278,7 @@ describe("routine routes", () => {
         projectId,
         title: "Daily routine",
         assigneeAgentId: agentId,
+        issueBlackboardTemplate: "research_v1",
       });
 
     expect(res.status).toBe(201);
@@ -283,6 +286,7 @@ describe("routine routes", () => {
       projectId,
       title: "Daily routine",
       assigneeAgentId: agentId,
+      issueBlackboardTemplate: "research_v1",
     }), {
       agentId: null,
       userId: "board-user",

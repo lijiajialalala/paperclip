@@ -11,6 +11,7 @@ import {
 } from "../constants.js";
 import {
   ISSUE_EXECUTION_WORKSPACE_PREFERENCES,
+  issueBlackboardTemplateSchema,
   issueExecutionWorkspaceSettingsSchema,
 } from "./issue.js";
 
@@ -53,6 +54,7 @@ export const createRoutineSchema = z.object({
   projectId: z.string().uuid(),
   goalId: z.string().uuid().optional().nullable(),
   parentIssueId: z.string().uuid().optional().nullable(),
+  issueBlackboardTemplate: issueBlackboardTemplateSchema.optional().nullable(),
   dispatchMode: z.enum(ROUTINE_DISPATCH_MODES).optional().default("event_driven"),
   runIssueMode: z.enum(ROUTINE_RUN_ISSUE_MODES).optional().nullable(),
   title: z.string().trim().min(1).max(200),

@@ -24,6 +24,9 @@ const mockGoalService = vi.hoisted(() => ({
 const mockStatusTruth = vi.hoisted(() => ({
   getIssueStatusTruthSummary: vi.fn(),
 }));
+const mockBlackboardService = vi.hoisted(() => ({
+  getIssueBlackboardSummary: vi.fn(),
+}));
 
 vi.mock("../services/index.js", () => ({
   accessService: () => ({
@@ -75,6 +78,10 @@ vi.mock("../services/issue-status-truth.js", () => ({
     ? { ...issue, status: summary.effectiveStatus, statusTruthSummary: summary }
     : issue,
   issueStatusTruthService: () => mockStatusTruth,
+}));
+
+vi.mock("../services/issue-blackboard.js", () => ({
+  issueBlackboardService: () => mockBlackboardService,
 }));
 
 function createApp() {
@@ -177,6 +184,16 @@ describe("issue goal context routes", () => {
       id === projectGoal.id ? projectGoal : null,
     );
     mockGoalService.getDefaultCompanyGoal.mockResolvedValue(null);
+    mockBlackboardService.getIssueBlackboardSummary.mockResolvedValue({
+      template: "research_v1",
+      manifestStatus: "ready",
+      isComplete: false,
+      requiredReadyCount: 1,
+      requiredTotalCount: 5,
+      missingKeys: ["brief", "final-report"],
+      invalidKeys: [],
+      entries: [],
+    });
     mockStatusTruth.getIssueStatusTruthSummary.mockResolvedValue({
       effectiveStatus: "todo",
       persistedStatus: "todo",
@@ -221,6 +238,13 @@ describe("issue goal context routes", () => {
         title: projectGoal.title,
       }),
     );
+    expect(res.body.blackboard).toEqual(
+      expect.objectContaining({
+        template: "research_v1",
+        missingKeys: ["brief", "final-report"],
+      }),
+    );
     expect(mockGoalService.getDefaultCompanyGoal).not.toHaveBeenCalled();
+    expect(mockBlackboardService.getIssueBlackboardSummary).toHaveBeenCalledWith(legacyProjectLinkedIssue.id);
   });
 });

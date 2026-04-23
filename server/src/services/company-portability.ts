@@ -31,6 +31,7 @@ import type {
 } from "@paperclipai/shared";
 import { buildIsolatedGitEnv } from "@paperclipai/shared";
 import {
+  ISSUE_BLACKBOARD_TEMPLATES,
   ISSUE_PRIORITIES,
   ISSUE_STATUSES,
   PROJECT_STATUSES,
@@ -595,6 +596,7 @@ function normalizeRoutineVariableExtension(value: unknown): RoutineVariable | nu
 
 function normalizeRoutineExtension(value: unknown): CompanyPortabilityIssueRoutineManifestEntry | null {
   if (!isPlainRecord(value)) return null;
+  const issueBlackboardTemplate = asString(value.issueBlackboardTemplate);
   const triggers = Array.isArray(value.triggers)
     ? value.triggers
       .map((entry) => normalizeRoutineTriggerExtension(entry))
@@ -608,6 +610,7 @@ function normalizeRoutineExtension(value: unknown): CompanyPortabilityIssueRouti
   const routine = {
     concurrencyPolicy: asString(value.concurrencyPolicy),
     catchUpPolicy: asString(value.catchUpPolicy),
+    issueBlackboardTemplate,
     variables,
     triggers,
   };
@@ -618,6 +621,7 @@ function buildRoutineManifestFromLiveRoutine(routine: RoutineLike): CompanyPorta
   return {
     concurrencyPolicy: routine.concurrencyPolicy,
     catchUpPolicy: routine.catchUpPolicy,
+    issueBlackboardTemplate: routine.issueBlackboardTemplate,
     variables: routine.variables,
     triggers: routine.triggers.map((trigger) => ({
       kind: trigger.kind,
@@ -1121,12 +1125,14 @@ function resolvePortableRoutineDefinition(
     ? {
       concurrencyPolicy: issue.routine.concurrencyPolicy,
       catchUpPolicy: issue.routine.catchUpPolicy,
+      issueBlackboardTemplate: issue.routine.issueBlackboardTemplate ?? null,
       variables: issue.routine.variables ?? null,
       triggers: [...issue.routine.triggers],
     }
     : {
       concurrencyPolicy: null,
       catchUpPolicy: null,
+      issueBlackboardTemplate: null,
       variables: null,
       triggers: [] as CompanyPortabilityIssueRoutineTriggerManifestEntry[],
     };
@@ -1136,6 +1142,9 @@ function resolvePortableRoutineDefinition(
   }
   if (routine.catchUpPolicy && !ROUTINE_CATCH_UP_POLICIES.includes(routine.catchUpPolicy as any)) {
     errors.push(`Recurring task ${issue.slug} uses unsupported routine catchUpPolicy "${routine.catchUpPolicy}".`);
+  }
+  if (routine.issueBlackboardTemplate && !ISSUE_BLACKBOARD_TEMPLATES.includes(routine.issueBlackboardTemplate as any)) {
+    errors.push(`Recurring task ${issue.slug} uses unsupported issueBlackboardTemplate "${routine.issueBlackboardTemplate}".`);
   }
 
   for (const trigger of routine.triggers) {
@@ -3241,6 +3250,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
         priority: routine.priority !== "medium" ? routine.priority : undefined,
         concurrencyPolicy: routine.concurrencyPolicy !== "coalesce_if_active" ? routine.concurrencyPolicy : undefined,
         catchUpPolicy: routine.catchUpPolicy !== "skip_missed" ? routine.catchUpPolicy : undefined,
+        issueBlackboardTemplate: routine.issueBlackboardTemplate ?? undefined,
         variables: (routine.variables ?? []).length > 0 ? routine.variables : undefined,
         triggers: routine.triggers.map((trigger) => stripEmptyValues({
           kind: trigger.kind,
@@ -4211,6 +4221,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
           const routineDefinition = resolvedRoutine.routine ?? {
             concurrencyPolicy: null,
             catchUpPolicy: null,
+            issueBlackboardTemplate: null,
             variables: null,
             triggers: [],
           };
@@ -4236,6 +4247,11 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
               routineDefinition.catchUpPolicy && ROUTINE_CATCH_UP_POLICIES.includes(routineDefinition.catchUpPolicy as any)
                 ? routineDefinition.catchUpPolicy as typeof ROUTINE_CATCH_UP_POLICIES[number]
                 : "skip_missed",
+            issueBlackboardTemplate:
+              routineDefinition.issueBlackboardTemplate
+              && ISSUE_BLACKBOARD_TEMPLATES.includes(routineDefinition.issueBlackboardTemplate as any)
+                ? routineDefinition.issueBlackboardTemplate as typeof ISSUE_BLACKBOARD_TEMPLATES[number]
+                : null,
             variables: routineDefinition.variables ?? [],
           }, {
             agentId: null,

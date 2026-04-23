@@ -32,7 +32,13 @@ import {
   routineRuns,
   workspaceRuntimeServices,
 } from "@paperclipai/db";
-import { ISSUE_ORIGIN_KINDS, extractAgentMentionIds, extractProjectMentionIds, isUuidLike } from "@paperclipai/shared";
+import {
+  ISSUE_ORIGIN_KINDS,
+  extractAgentMentionIds,
+  extractProjectMentionIds,
+  isUuidLike,
+  type IssueBlackboardTemplate,
+} from "@paperclipai/shared";
 import { conflict, HttpError, notFound, unprocessable } from "../errors.js";
 import { logActivity } from "./activity-log.js";
 import { deriveHeartbeatRunBusinessVerdict } from "./heartbeat-run-verdict.js";
@@ -58,6 +64,7 @@ import {
   resolveTaskRootIssueId,
   syncTaskRootForDescendants,
 } from "./issue-task-roots.js";
+import { issueBlackboardService } from "./issue-blackboard.js";
 
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
@@ -192,6 +199,8 @@ type DbReader = Pick<Db, "select">;
 type IssueCreateInput = Omit<typeof issues.$inferInsert, "companyId"> & {
   labelIds?: string[];
   inheritExecutionWorkspaceFromIssueId?: string | null;
+  blackboardTemplate?: IssueBlackboardTemplate | null;
+  createdByRunId?: string | null;
 };
 type IssueDoneGuardActorType = "agent" | "board";
 type IssueCommentActor = {
@@ -2033,6 +2042,8 @@ async function adoptStaleCheckoutRun(input: {
       const {
         labelIds: inputLabelIds,
         inheritExecutionWorkspaceFromIssueId,
+        blackboardTemplate,
+        createdByRunId,
         taskRootIssueId: _ignoredTaskRootIssueId,
         ...issueData
       } = data as IssueCreateInput & { taskRootIssueId?: string | null };
@@ -2213,6 +2224,16 @@ async function adoptStaleCheckoutRun(input: {
         const [issue] = await tx.insert(issues).values(values).returning();
         if (inputLabelIds) {
           await syncIssueLabels(issue.id, companyId, inputLabelIds, tx);
+        }
+        if (blackboardTemplate) {
+          const txBlackboardSvc = issueBlackboardService(tx as unknown as Db);
+          await txBlackboardSvc.bootstrapIssueBlackboard({
+            issueId: issue.id,
+            template: blackboardTemplate,
+            createdByAgentId: issueData.createdByAgentId ?? null,
+            createdByUserId: issueData.createdByUserId ?? null,
+            createdByRunId: createdByRunId ?? null,
+          });
         }
         await recomputeAncestorStatuses(tx, [issue.parentId]);
         const [enriched] = await withIssueLabels(tx, [issue]);

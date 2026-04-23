@@ -56,7 +56,7 @@ if (!embeddedPostgresSupport.supported) {
 const timerTestAdapter: ServerAdapterModule = {
   type: "codex_local",
   execute: async (ctx) => {
-    timerAdapterExecute(ctx);
+    const override = await timerAdapterExecute(ctx);
     return {
       exitCode: 0,
       signal: null,
@@ -65,6 +65,7 @@ const timerTestAdapter: ServerAdapterModule = {
         summary: "adapter executed",
         timeoutSec: typeof ctx.config.timeoutSec === "number" ? ctx.config.timeoutSec : null,
       },
+      ...(override && typeof override === "object" ? override : {}),
     };
   },
   testEnvironment: async () => ({
@@ -342,5 +343,41 @@ describeEmbeddedPostgres("heartbeat idle timer preflight", () => {
       summary: "adapter executed",
       timeoutSec: 900,
     });
+  });
+
+  it("normalizes unsigned Windows exit codes before persisting the heartbeat run", async () => {
+    timerAdapterExecute.mockResolvedValueOnce({
+      exitCode: 4_294_967_295,
+      signal: null,
+      timedOut: false,
+      errorMessage: "Process exited with code 4294967295",
+      resultJson: {
+        summary: "windows-style failure",
+      },
+    });
+
+    const { agentId } = await seedAgentFixture({
+      withIssue: true,
+      issueStatus: "todo",
+    });
+    const heartbeat = heartbeatService(db);
+
+    const queuedRun = await heartbeat.invoke(
+      agentId,
+      "timer",
+      {
+        source: "scheduler",
+        reason: "interval_elapsed",
+      },
+      "system",
+      { actorType: "system", actorId: "heartbeat_scheduler" },
+    );
+
+    expect(queuedRun).not.toBeNull();
+    const finalizedRun = await waitForRunStatus(heartbeat, queuedRun!.id, ["failed"]);
+
+    expect(finalizedRun.exitCode).toBe(-1);
+    expect(finalizedRun.status).toBe("failed");
+    expect(finalizedRun.error).toContain("4294967295");
   });
 });

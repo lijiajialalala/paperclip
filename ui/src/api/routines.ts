@@ -1,5 +1,6 @@
 import type {
   ActivityEvent,
+  CreateRoutine,
   Routine,
   RoutineDetail,
   RoutineListItem,
@@ -7,6 +8,7 @@ import type {
   RoutineRunSummary,
   RoutineTrigger,
   RoutineTriggerSecretMaterial,
+  UpdateRoutine,
 } from "@paperclipai/shared";
 import { activityApi } from "./activity";
 import { api } from "./client";
@@ -23,10 +25,10 @@ export interface RotateRoutineTriggerResponse {
 
 export const routinesApi = {
   list: (companyId: string) => api.get<RoutineListItem[]>(`/companies/${companyId}/routines`),
-  create: (companyId: string, data: Record<string, unknown>) =>
+  create: (companyId: string, data: CreateRoutine) =>
     api.post<Routine>(`/companies/${companyId}/routines`, data),
   get: (id: string) => api.get<RoutineDetail>(`/routines/${id}`),
-  update: (id: string, data: Record<string, unknown>) => api.patch<Routine>(`/routines/${id}`, data),
+  update: (id: string, data: UpdateRoutine) => api.patch<Routine>(`/routines/${id}`, data),
   listRuns: (id: string, limit: number = 50) => api.get<RoutineRunSummary[]>(`/routines/${id}/runs?limit=${limit}`),
   createTrigger: (id: string, data: Record<string, unknown>) =>
     api.post<RoutineTriggerResponse>(`/routines/${id}/triggers`, data),
