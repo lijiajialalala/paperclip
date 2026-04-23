@@ -52,6 +52,7 @@ vi.mock("../services/index.js", () => ({
   }),
   issueApprovalService: () => ({}),
   issueService: () => mockIssueService,
+  getIssueCreateDisposition: () => "created",
   logActivity: mockLogActivity,
   projectService: () => ({
     getById: vi.fn(),

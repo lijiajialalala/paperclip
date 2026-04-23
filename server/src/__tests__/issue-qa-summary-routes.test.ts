@@ -94,6 +94,12 @@ vi.mock("../services/platform-unblock.js", () => ({
   platformUnblockService: () => mockPlatformUnblock,
 }));
 
+vi.mock("../services/issue-blackboard.js", () => ({
+  issueBlackboardService: () => ({
+    getIssueBlackboardSummary: vi.fn(async () => null),
+  }),
+}));
+
 function createApp() {
   const app = express();
   app.use(express.json());
