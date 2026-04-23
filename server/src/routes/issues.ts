@@ -22,6 +22,7 @@ import {
   upsertIssueBlackboardEntrySchema,
   issueDocumentKeySchema,
   restoreIssueDocumentRevisionSchema,
+  ISSUE_BLACKBOARD_KEYS,
   ISSUE_ORIGIN_KINDS,
   updateIssueWorkProductSchema,
   upsertIssueDocumentSchema,
@@ -119,6 +120,21 @@ const publishIssueArtifactSchema = z.object({
     .nullable(),
   wakeTargets: z.boolean().optional().default(true),
 });
+const RESERVED_BLACKBOARD_DOCUMENT_KEYS = new Set<string>(ISSUE_BLACKBOARD_KEYS);
+
+function isReservedBlackboardDocumentKey(key: string) {
+  return RESERVED_BLACKBOARD_DOCUMENT_KEYS.has(key.trim().toLowerCase());
+}
+
+function respondReservedBlackboardDocumentKey(res: Response) {
+  res.status(422).json({
+    error: "Reserved blackboard document keys must be accessed via the /blackboard routes.",
+  });
+}
+
+function filterGenericDocumentSummaries<T extends { key: string }>(documents: T[]) {
+  return documents.filter((document) => !isReservedBlackboardDocumentKey(document.key));
+}
 
 export function issueRoutes(
   db: Db,
@@ -1105,6 +1121,10 @@ export function issueRoutes(
     ]);
     const statusSummary = await statusTruth.getIssueStatusTruthSummary(issue.id);
     const serializedIssue = attachIssueRuntimeState(applyEffectiveStatus(issue, statusSummary));
+    const genericDocumentPayload = {
+      ...documentPayload,
+      documentSummaries: filterGenericDocumentSummaries(documentPayload.documentSummaries ?? []),
+    };
     const mentionedProjects = mentionedProjectIds.length > 0
       ? await projectsSvc.listByIds(issue.companyId, mentionedProjectIds)
       : [];
@@ -1116,7 +1136,7 @@ export function issueRoutes(
       ...serializedIssue,
       goalId: goal?.id ?? serializedIssue.goalId,
       ancestors,
-      ...documentPayload,
+      ...genericDocumentPayload,
       project: project ?? null,
       goal: goal ?? null,
       mentionedProjects,
@@ -1378,7 +1398,7 @@ export function issueRoutes(
     }
     assertCompanyAccess(req, issue.companyId);
     const docs = await documentsSvc.listIssueDocuments(issue.id);
-    res.json(docs);
+    res.json(filterGenericDocumentSummaries(docs));
   });
 
   router.get("/issues/:id/documents/:key", async (req, res) => {
@@ -1392,6 +1412,10 @@ export function issueRoutes(
     const keyParsed = issueDocumentKeySchema.safeParse(String(req.params.key ?? "").trim().toLowerCase());
     if (!keyParsed.success) {
       res.status(400).json({ error: "Invalid document key", details: keyParsed.error.issues });
+      return;
+    }
+    if (isReservedBlackboardDocumentKey(keyParsed.data)) {
+      respondReservedBlackboardDocumentKey(res);
       return;
     }
     const doc = await documentsSvc.getIssueDocumentByKey(issue.id, keyParsed.data);
@@ -1413,6 +1437,10 @@ export function issueRoutes(
     const keyParsed = issueDocumentKeySchema.safeParse(String(req.params.key ?? "").trim().toLowerCase());
     if (!keyParsed.success) {
       res.status(400).json({ error: "Invalid document key", details: keyParsed.error.issues });
+      return;
+    }
+    if (isReservedBlackboardDocumentKey(keyParsed.data)) {
+      respondReservedBlackboardDocumentKey(res);
       return;
     }
     if (!(await assertAgentExecutionPlanAllowed(req, res, issue, "writing issue documents"))) return;
@@ -1493,6 +1521,10 @@ export function issueRoutes(
     let artifactHealthStatus: "unknown" | "healthy" | "unhealthy" = "unknown";
 
     if (req.body.artifact.kind === "document") {
+      if (isReservedBlackboardDocumentKey(req.body.artifact.key)) {
+        respondReservedBlackboardDocumentKey(res);
+        return;
+      }
       const document = await documentsSvc.getIssueDocumentByKey(sourceIssue.id, req.body.artifact.key);
       if (!document) {
         res.status(404).json({ error: "Document not found" });
@@ -1720,6 +1752,10 @@ export function issueRoutes(
       res.status(400).json({ error: "Invalid document key", details: keyParsed.error.issues });
       return;
     }
+    if (isReservedBlackboardDocumentKey(keyParsed.data)) {
+      respondReservedBlackboardDocumentKey(res);
+      return;
+    }
     const revisions = await documentsSvc.listIssueDocumentRevisions(issue.id, keyParsed.data);
     res.json(revisions);
   });
@@ -1739,6 +1775,10 @@ export function issueRoutes(
       const keyParsed = issueDocumentKeySchema.safeParse(String(req.params.key ?? "").trim().toLowerCase());
       if (!keyParsed.success) {
         res.status(400).json({ error: "Invalid document key", details: keyParsed.error.issues });
+        return;
+      }
+      if (isReservedBlackboardDocumentKey(keyParsed.data)) {
+        respondReservedBlackboardDocumentKey(res);
         return;
       }
       if (!(await assertAgentExecutionPlanAllowed(req, res, issue, "restoring issue documents"))) return;
@@ -1791,6 +1831,10 @@ export function issueRoutes(
     const keyParsed = issueDocumentKeySchema.safeParse(String(req.params.key ?? "").trim().toLowerCase());
     if (!keyParsed.success) {
       res.status(400).json({ error: "Invalid document key", details: keyParsed.error.issues });
+      return;
+    }
+    if (isReservedBlackboardDocumentKey(keyParsed.data)) {
+      respondReservedBlackboardDocumentKey(res);
       return;
     }
     const removed = await documentsSvc.deleteIssueDocument(issue.id, keyParsed.data);

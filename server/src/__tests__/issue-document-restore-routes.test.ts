@@ -1,6 +1,7 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ISSUE_BLACKBOARD_MANIFEST_KEY } from "@paperclipai/shared";
 import { issueRoutes } from "../routes/issues.js";
 import { errorHandler } from "../middleware/index.js";
 
@@ -12,8 +13,12 @@ const mockIssueService = vi.hoisted(() => ({
 }));
 
 const mockDocumentsService = vi.hoisted(() => ({
+  getIssueDocumentByKey: vi.fn(),
+  listIssueDocuments: vi.fn(),
   listIssueDocumentRevisions: vi.fn(),
   restoreIssueDocumentRevision: vi.fn(),
+  upsertIssueDocument: vi.fn(),
+  deleteIssueDocument: vi.fn(),
 }));
 
 const mockAccessService = vi.hoisted(() => ({
@@ -97,6 +102,42 @@ describe("issue document revision routes", () => {
         createdAt: new Date("2026-03-26T12:00:00.000Z"),
       },
     ]);
+    mockDocumentsService.listIssueDocuments.mockResolvedValue([
+      {
+        id: "document-1",
+        companyId,
+        issueId,
+        key: "plan",
+        title: "Plan",
+        format: "markdown",
+        body: "# Plan",
+        latestRevisionId: "revision-2",
+        latestRevisionNumber: 2,
+        createdByAgentId: null,
+        createdByUserId: "board-user",
+        updatedByAgentId: null,
+        updatedByUserId: "board-user",
+        createdAt: new Date("2026-03-26T12:00:00.000Z"),
+        updatedAt: new Date("2026-03-26T12:10:00.000Z"),
+      },
+      {
+        id: "document-2",
+        companyId,
+        issueId,
+        key: ISSUE_BLACKBOARD_MANIFEST_KEY,
+        title: "Blackboard manifest",
+        format: "json",
+        body: "{\"template\":\"research_v1\"}",
+        latestRevisionId: "revision-3",
+        latestRevisionNumber: 1,
+        createdByAgentId: null,
+        createdByUserId: "board-user",
+        updatedByAgentId: null,
+        updatedByUserId: "board-user",
+        createdAt: new Date("2026-03-26T12:00:00.000Z"),
+        updatedAt: new Date("2026-03-26T12:10:00.000Z"),
+      },
+    ]);
     mockDocumentsService.restoreIssueDocumentRevision.mockResolvedValue({
       restoredFromRevisionId: "revision-1",
       restoredFromRevisionNumber: 1,
@@ -133,6 +174,20 @@ describe("issue document revision routes", () => {
         body: "# Two",
       }),
     ]);
+  });
+
+  it("filters reserved blackboard docs out of the generic documents list", async () => {
+    const res = await request(createApp()).get(`/api/issues/${issueId}/documents`);
+
+    expect(res.status).toBe(200);
+    expect(mockDocumentsService.listIssueDocuments).toHaveBeenCalledWith(issueId);
+    expect(res.body).toEqual([
+      expect.objectContaining({
+        key: "plan",
+        format: "markdown",
+      }),
+    ]);
+    expect(res.body).toHaveLength(1);
   });
 
   it("restores a revision through the append-only route and logs the action", async () => {
@@ -174,5 +229,45 @@ describe("issue document revision routes", () => {
 
     expect(res.status).toBe(400);
     expect(mockDocumentsService.restoreIssueDocumentRevision).not.toHaveBeenCalled();
+  });
+
+  it("rejects reserved blackboard keys on generic document writes", async () => {
+    const res = await request(createApp())
+      .put(`/api/issues/${issueId}/documents/${ISSUE_BLACKBOARD_MANIFEST_KEY}`)
+      .send({
+        title: "Manifest",
+        format: "markdown",
+        body: "{\"status\":\"ready\"}",
+      });
+
+    expect(res.status).toBe(422);
+    expect(res.body).toEqual(expect.objectContaining({
+      error: expect.stringContaining("/blackboard"),
+    }));
+    expect(mockDocumentsService.upsertIssueDocument).not.toHaveBeenCalled();
+  });
+
+  it("rejects reserved blackboard keys across the generic document detail routes", async () => {
+    const requests = [
+      () => request(createApp()).get(`/api/issues/${issueId}/documents/${ISSUE_BLACKBOARD_MANIFEST_KEY}`),
+      () => request(createApp()).get(`/api/issues/${issueId}/documents/${ISSUE_BLACKBOARD_MANIFEST_KEY}/revisions`),
+      () => request(createApp())
+        .post(`/api/issues/${issueId}/documents/${ISSUE_BLACKBOARD_MANIFEST_KEY}/revisions/revision-1/restore`)
+        .send({}),
+      () => request(createApp()).delete(`/api/issues/${issueId}/documents/${ISSUE_BLACKBOARD_MANIFEST_KEY}`),
+    ];
+
+    for (const invoke of requests) {
+      const res = await invoke();
+      expect(res.status).toBe(422);
+      expect(res.body).toEqual(expect.objectContaining({
+        error: expect.stringContaining("/blackboard"),
+      }));
+    }
+
+    expect(mockDocumentsService.getIssueDocumentByKey).not.toHaveBeenCalled();
+    expect(mockDocumentsService.listIssueDocumentRevisions).not.toHaveBeenCalled();
+    expect(mockDocumentsService.restoreIssueDocumentRevision).not.toHaveBeenCalled();
+    expect(mockDocumentsService.deleteIssueDocument).not.toHaveBeenCalled();
   });
 });

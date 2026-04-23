@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type {
-  DocumentRevision,
-  FeedbackDataSharingPreference,
-  FeedbackVote,
-  FeedbackVoteValue,
-  Issue,
-  IssueDocument,
+import {
+  ISSUE_BLACKBOARD_KEYS,
+  type DocumentRevision,
+  type FeedbackDataSharingPreference,
+  type FeedbackVote,
+  type FeedbackVoteValue,
+  type Issue,
+  type IssueDocument,
 } from "@paperclipai/shared";
 import { useLocation } from "@/lib/router";
 import { ApiError } from "../api/client";
@@ -66,6 +67,7 @@ type PublishDialogState = {
 
 const DOCUMENT_AUTOSAVE_DEBOUNCE_MS = 900;
 const DOCUMENT_KEY_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
+const RESERVED_BLACKBOARD_KEYS = new Set<string>(ISSUE_BLACKBOARD_KEYS);
 const getFoldedDocumentsStorageKey = (issueId: string) => `paperclip:issue-document-folds:${issueId}`;
 
 function loadFoldedDocumentKeys(issueId: string) {
@@ -91,6 +93,10 @@ function renderBody(body: string, className?: string) {
 
 function isPlanKey(key: string) {
   return key.trim().toLowerCase() === "plan";
+}
+
+function isReservedBlackboardKey(key: string) {
+  return RESERVED_BLACKBOARD_KEYS.has(key.trim().toLowerCase());
 }
 
 function titlesMatchKey(title: string | null | undefined, key: string) {
@@ -318,11 +324,13 @@ export function IssueDocumentsSection({
   });
 
   const sortedDocuments = useMemo(() => {
-    return [...(documents ?? [])].sort((a, b) => {
+    return [...(documents ?? [])]
+      .filter((document) => !isReservedBlackboardKey(document.key))
+      .sort((a, b) => {
       if (a.key === "plan" && b.key !== "plan") return -1;
       if (a.key !== "plan" && b.key === "plan") return 1;
       return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
-    });
+      });
   }, [documents]);
 
   const feedbackVoteByTargetId = useMemo(() => {
@@ -349,8 +357,12 @@ export function IssueDocumentsSection({
   }, [issue.ancestors, issue.parentId]);
   const canPublishDocuments = publishTargetOptions.length > 0;
   const newDocumentKeyError =
-    draft?.isNew && draft.key.trim().length > 0 && !DOCUMENT_KEY_PATTERN.test(draft.key.trim())
-      ? "Use lowercase letters, numbers, -, or _, and start with a letter or number."
+    draft?.isNew && draft.key.trim().length > 0
+      ? isReservedBlackboardKey(draft.key.trim())
+        ? "This key is reserved for issue blackboards. Use the blackboard routes instead."
+        : !DOCUMENT_KEY_PATTERN.test(draft.key.trim())
+          ? "Use lowercase letters, numbers, -, or _, and start with a letter or number."
+          : null
       : null;
 
   const resetAutosaveState = useCallback(() => {
@@ -448,6 +460,14 @@ export function IssueDocumentsSection({
 
     if (!DOCUMENT_KEY_PATTERN.test(normalizedKey)) {
       setError("Document key must start with a letter or number and use only lowercase letters, numbers, -, or _.");
+      if (options?.trackAutosave) {
+        resetAutosaveState();
+      }
+      return false;
+    }
+
+    if (isReservedBlackboardKey(normalizedKey)) {
+      setError("This document key is reserved for issue blackboards. Use the dedicated blackboard editor instead.");
       if (options?.trackAutosave) {
         resetAutosaveState();
       }

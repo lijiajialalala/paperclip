@@ -4,6 +4,7 @@ import path from "node:path";
 import express from "express";
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ISSUE_BLACKBOARD_MANIFEST_KEY } from "@paperclipai/shared";
 import { errorHandler } from "../middleware/index.js";
 import { issueRoutes } from "../routes/issues.js";
 
@@ -370,6 +371,22 @@ describe("issue artifact publication routes", () => {
         payload: expect.objectContaining({ issueId: targetIssueId }),
       }),
     );
+  });
+
+  it("rejects reserved blackboard keys for document artifact publication", async () => {
+    const res = await request(createApp())
+      .post(`/api/issues/${sourceIssueId}/publish-artifact`)
+      .send({
+        artifact: { kind: "document", key: ISSUE_BLACKBOARD_MANIFEST_KEY },
+        target: { mode: "issues", issueIds: [targetIssueId] },
+      });
+
+    expect(res.status).toBe(422);
+    expect(res.body).toEqual(expect.objectContaining({
+      error: expect.stringContaining("/blackboard"),
+    }));
+    expect(mockDocumentsService.getIssueDocumentByKey).not.toHaveBeenCalled();
+    expect(mockWorkProductsService.createForIssue).not.toHaveBeenCalled();
   });
 
   it("publishes a work product handoff to sibling issues", async () => {

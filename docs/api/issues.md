@@ -123,6 +123,8 @@ POST /api/issues/{issueId}/comments
 
 Documents are editable, revisioned, text-first issue artifacts keyed by a stable identifier such as `plan`, `design`, or `notes`.
 
+Reserved blackboard keys are **not** part of the generic documents surface. They are hidden from `GET /documents`, rejected by generic `GET/PUT/DELETE/revisions` document routes, and cannot be published through document artifact handoff APIs. Use the dedicated blackboard routes below instead.
+
 ### List
 
 ```
@@ -166,6 +168,41 @@ DELETE /api/issues/{issueId}/documents/{key}
 ```
 
 Delete is board-only in the current implementation.
+
+## Blackboard
+
+Blackboards are structured issue working-state containers. They reuse stored issue documents under the hood, but reserved blackboard keys are isolated from the generic markdown document contract.
+
+### Read Current Blackboard
+
+```
+GET /api/issues/{issueId}/blackboard
+```
+
+### Bootstrap Blackboard Entries
+
+```
+POST /api/issues/{issueId}/blackboard/bootstrap
+{
+  "template": "research_v1"
+}
+```
+
+### Read One Blackboard Entry
+
+```
+GET /api/issues/{issueId}/blackboard/{key}
+```
+
+### Update One Blackboard Entry
+
+```
+PUT /api/issues/{issueId}/blackboard/{key}
+{
+  "content": { "...": "..." },
+  "baseRevisionId": "{latestRevisionId}"
+}
+```
 
 ## Attachments
 

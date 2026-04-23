@@ -4,7 +4,7 @@ import { act } from "react";
 import type { ComponentProps } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { DocumentRevision, Issue, IssueDocument } from "@paperclipai/shared";
+import { ISSUE_BLACKBOARD_MANIFEST_KEY, type DocumentRevision, type Issue, type IssueDocument } from "@paperclipai/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IssueDocumentsSection } from "./IssueDocumentsSection";
 import { queryKeys } from "../lib/queryKeys";
@@ -63,7 +63,12 @@ vi.mock("./MarkdownEditor", async () => {
 
       return (
         <div className={contentClassName} data-testid="markdown-editor">
-          {value || placeholder || ""}
+          <textarea
+            aria-label={placeholder ?? "Markdown editor"}
+            value={value}
+            onChange={(event) => onChange?.(event.target.value)}
+          />
+          <div>{value || placeholder || ""}</div>
         </div>
       );
     },
@@ -170,6 +175,15 @@ async function flush() {
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
+}
+
+function setControlValue(element: HTMLInputElement | HTMLTextAreaElement, value: string) {
+  const prototype = element instanceof HTMLTextAreaElement
+    ? HTMLTextAreaElement.prototype
+    : HTMLInputElement.prototype;
+  const descriptor = Object.getOwnPropertyDescriptor(prototype, "value");
+  descriptor?.set?.call(element, value);
+  element.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
 function createIssueDocument(overrides: Partial<IssueDocument> = {}): IssueDocument {
@@ -480,6 +494,127 @@ describe("IssueDocumentsSection", () => {
       }),
     );
     expect(container.textContent).toContain("Published prd to 1 issue.");
+
+    await act(async () => {
+      root.unmount();
+    });
+    queryClient.clear();
+  });
+
+  it("hides reserved blackboard documents from the generic documents panel", async () => {
+    const visibleDocument = createIssueDocument({
+      id: "document-prd",
+      key: "prd",
+      title: "PRD",
+      body: "Product requirements",
+      latestRevisionId: "revision-prd",
+    });
+    const blackboardDocument = createIssueDocument({
+      id: "document-source-matrix",
+      key: "source-matrix",
+      title: "Source matrix",
+      format: "json",
+      body: "{\"sources\":[]}",
+      latestRevisionId: "revision-source-matrix",
+    });
+    const issue = createIssue({
+      planDocument: null,
+      documentSummaries: [visibleDocument, blackboardDocument],
+    });
+    const root = createRoot(container);
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+        mutations: { retry: false },
+      },
+    });
+
+    mockIssuesApi.listDocuments.mockResolvedValue([visibleDocument, blackboardDocument]);
+
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <IssueDocumentsSection issue={issue} canDeleteDocuments={false} />
+        </QueryClientProvider>,
+      );
+    });
+
+    await flush();
+    await flush();
+
+    expect(container.textContent).toContain("prd");
+    expect(container.textContent).toContain("Product requirements");
+    expect(container.textContent).not.toContain("source-matrix");
+    expect(container.textContent).not.toContain("{\"sources\":[]}");
+
+    await act(async () => {
+      root.unmount();
+    });
+    queryClient.clear();
+  });
+
+  it("rejects reserved blackboard keys when creating a generic document", async () => {
+    const issue = createIssue({
+      planDocument: null,
+      documentSummaries: [],
+    });
+    const root = createRoot(container);
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+        mutations: { retry: false },
+      },
+    });
+
+    mockIssuesApi.listDocuments.mockResolvedValue([]);
+
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <IssueDocumentsSection issue={issue} canDeleteDocuments={false} />
+        </QueryClientProvider>,
+      );
+    });
+
+    await flush();
+    await flush();
+
+    const newDocumentButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("New document"));
+    expect(newDocumentButton).toBeTruthy();
+
+    await act(async () => {
+      newDocumentButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    const keyInput = container.querySelector('input[placeholder="Document key"]') as HTMLInputElement | null;
+    const bodyInput = container.querySelector('textarea[aria-label="Markdown body"]') as HTMLTextAreaElement | null;
+
+    expect(keyInput).toBeTruthy();
+    expect(bodyInput).toBeTruthy();
+
+    await act(async () => {
+      if (keyInput) {
+        setControlValue(keyInput, ISSUE_BLACKBOARD_MANIFEST_KEY);
+      }
+      if (bodyInput) {
+        setControlValue(bodyInput, "{\"status\":\"ready\"}");
+      }
+    });
+    await flush();
+
+    expect(container.textContent).toContain("This key is reserved for issue blackboards");
+
+    const createButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Create document"));
+    expect(createButton).toBeTruthy();
+
+    await act(async () => {
+      createButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(mockIssuesApi.upsertDocument).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("This document key is reserved for issue blackboards");
 
     await act(async () => {
       root.unmount();
