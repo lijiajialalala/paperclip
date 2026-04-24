@@ -3429,7 +3429,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
         authoritativeStatus: "in_progress",
         consistency: "drifted",
         driftCode: "status_mismatch",
-        executionState: "active",
+        executionState: "idle",
         canExecute: false,
       }));
       expect(
