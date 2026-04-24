@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   agentRuntimeState,
@@ -120,6 +120,52 @@ async function waitForRuntimeState(
   throw new Error(`Timed out waiting for runtime state to record run ${expectedRunId}`);
 }
 
+async function waitForNoActiveHeartbeatRuns(
+  db: ReturnType<typeof createDb>,
+  timeoutMs = 10_000,
+  intervalMs = 50,
+) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const activeCount = await db
+      .select({ id: heartbeatRuns.id })
+      .from(heartbeatRuns)
+      .where(inArray(heartbeatRuns.status, ["queued", "running"]))
+      .limit(1)
+      .then((rows) => rows.length);
+    if (activeCount === 0) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+
+  throw new Error("Timed out waiting for heartbeat runs to leave queued/running states");
+}
+
+async function deleteHeartbeatArtifactsWithRetry(db: ReturnType<typeof createDb>) {
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      await db.delete(heartbeatRunEvents);
+      await db.delete(agentTaskSessions);
+      await db.delete(heartbeatRuns);
+      return;
+    } catch (error) {
+      lastError = error;
+      const code =
+        !!error && typeof error === "object" && "code" in error
+          ? String((error as { code?: unknown }).code ?? "")
+          : "";
+      if (code !== "23503" || attempt === 4) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+
+  if (lastError) throw lastError;
+}
+
 describeEmbeddedPostgres("heartbeat idle timer preflight", () => {
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
@@ -132,9 +178,8 @@ describeEmbeddedPostgres("heartbeat idle timer preflight", () => {
 
   afterEach(async () => {
     vi.clearAllMocks();
-    await db.delete(heartbeatRunEvents);
-    await db.delete(agentTaskSessions);
-    await db.delete(heartbeatRuns);
+    await waitForNoActiveHeartbeatRuns(db);
+    await deleteHeartbeatArtifactsWithRetry(db);
     await db.delete(agentWakeupRequests);
     await db.delete(agentRuntimeState);
     await db.delete(companySkills);
