@@ -451,6 +451,9 @@ describe("buildPaperclipWakePayloadFromCommentRows", () => {
         title: "Run routine batch",
         status: "todo",
         priority: "medium",
+        originKind: "qa_stage",
+        parentId: "parent-1",
+        planMode: "direct_execute",
         workspaceCwd: "/workspace/project",
         taskRootIssueId: "task-root-1",
         blackboard: {
@@ -474,6 +477,9 @@ describe("buildPaperclipWakePayloadFromCommentRows", () => {
         title: "Run routine batch",
         status: "todo",
         priority: "medium",
+        originKind: "qa_stage",
+        parentId: "parent-1",
+        planMode: "direct_execute",
         workspaceCwd: "/workspace/project",
         taskRootIssueId: "task-root-1",
         blackboard: {

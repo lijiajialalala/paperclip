@@ -2,6 +2,7 @@ import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { activityLog, heartbeatRunEvents, heartbeatRuns, issues } from "@paperclipai/db";
 import { ISSUE_STATUSES, IssueStatus } from "@paperclipai/shared";
+import { getIssueExecutionPlanGateReason, type IssueExecutionPlanGateReason } from "./issue-plan-policy.js";
 
 const ISSUE_STALLED_RUN_THRESHOLD_MS = 5 * 60 * 1000;
 
@@ -38,6 +39,9 @@ type IssueRow = {
   companyId: string;
   identifier: string | null;
   status: string;
+  originKind: string | null;
+  parentId: string | null;
+  assigneeAgentId: string | null;
   executionRunId: string | null;
   planProposedAt: Date | string | null;
   planApprovedAt: Date | string | null;
@@ -165,19 +169,16 @@ function maxDate(...values: Array<Date | string | null | undefined>) {
   return new Date(Math.max(...timestamps));
 }
 
-function hasPendingPlanReview(issue: Pick<IssueRow, "planProposedAt" | "planApprovedAt">) {
-  return Boolean(issue.planProposedAt) && !issue.planApprovedAt;
-}
-
 function resolveExecutionDiagnosis(input: {
   effectiveStatus: IssueStatus;
   authoritativeStatus: IssueStatus;
   issue: IssueRow;
+  planGateReason: IssueExecutionPlanGateReason | null;
   latestSignal: ExecutionSignalRow | null;
   now: Date;
 }) {
   const statusSuggestsExecution =
-    !hasPendingPlanReview(input.issue)
+    !input.planGateReason
     && (
       input.effectiveStatus === "in_progress"
       || input.effectiveStatus === "in_review"
@@ -261,10 +262,12 @@ function buildSummary(
         : "status_mismatch"
       : null;
   const evidence: PlatformEvidenceRef[] = [];
+  const planGateReason = getIssueExecutionPlanGateReason(issue);
   const executionDiagnosis = resolveExecutionDiagnosis({
     effectiveStatus,
     authoritativeStatus,
     issue,
+    planGateReason,
     latestSignal,
     now,
   });
@@ -322,7 +325,7 @@ function buildSummary(
     canExecute:
       consistency === "consistent"
       && canExecuteForStatus(effectiveStatus)
-      && !hasPendingPlanReview(issue),
+      && !planGateReason,
     canClose: canCloseForStatus(authoritativeStatus),
     executionState: executionDiagnosis.executionState,
     executionDiagnosis: executionDiagnosis.executionDiagnosis,
@@ -394,6 +397,9 @@ export function issueStatusTruthService(db: Db) {
         companyId: issues.companyId,
         identifier: issues.identifier,
         status: issues.status,
+        originKind: issues.originKind,
+        parentId: issues.parentId,
+        assigneeAgentId: issues.assigneeAgentId,
         executionRunId: issues.executionRunId,
         planProposedAt: issues.planProposedAt,
         planApprovedAt: issues.planApprovedAt,

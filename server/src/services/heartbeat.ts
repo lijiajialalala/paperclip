@@ -77,7 +77,11 @@ import {
   runBelongsToDifferentServerBoot,
   writeHeartbeatServerBootMarker,
 } from "./runtime-interruption.js";
-import { getIssueExecutionPlanGateReason, type IssueExecutionPlanGateReason } from "./issue-plan-policy.js";
+import {
+  getIssueExecutionPlanGateReason,
+  issueRequiresApprovedPlan,
+  type IssueExecutionPlanGateReason,
+} from "./issue-plan-policy.js";
 import { issueBlackboardService, type IssueBlackboardSummary } from "./issue-blackboard.js";
 
 const MAX_LIVE_LOG_CHUNK_BYTES = 8 * 1024;
@@ -1159,13 +1163,19 @@ async function buildPaperclipWakePayload(input: {
   db: Db;
   companyId: string;
   contextSnapshot: Record<string, unknown>;
-      issueSummary?:
+  issueSummary?:
     | {
         id: string;
         identifier: string | null;
         title: string;
         status: string;
         priority: string;
+        originKind?: string | null;
+        parentId?: string | null;
+        assigneeAgentId?: string | null;
+        planProposedAt?: Date | string | null;
+        planApprovedAt?: Date | string | null;
+        planMode?: "approval_required" | "direct_execute";
         workspaceCwd?: string | null;
         taskRootIssueId?: string | null;
         taskRootDir?: string | null;
@@ -1189,6 +1199,11 @@ async function buildPaperclipWakePayload(input: {
             title: issues.title,
             status: issues.status,
             priority: issues.priority,
+            originKind: issues.originKind,
+            parentId: issues.parentId,
+            assigneeAgentId: issues.assigneeAgentId,
+            planProposedAt: issues.planProposedAt,
+            planApprovedAt: issues.planApprovedAt,
             workspaceCwd: sql<string | null>`${wakeWorkspaceCwd ?? null}`,
             taskRootIssueId: issues.taskRootIssueId,
           })
@@ -1196,6 +1211,14 @@ async function buildPaperclipWakePayload(input: {
           .where(and(eq(issues.id, issueId), eq(issues.companyId, input.companyId)))
           .then((rows) => rows[0] ?? null)
       : null);
+  const planMode =
+    issueSummary
+      ? issueRequiresApprovedPlan(issueSummary)
+        ? "approval_required"
+        : issueSummary.parentId && issueSummary.originKind === "qa_stage"
+          ? "direct_execute"
+          : undefined
+      : undefined;
   const blackboardSummary =
     issueSummary?.blackboard ??
     (issueSummary?.id
@@ -1234,6 +1257,7 @@ async function buildPaperclipWakePayload(input: {
     issueSummary: issueSummary
       ? {
           ...issueSummary,
+          planMode,
           blackboard: blackboardSummary,
         }
       : null,
@@ -1250,6 +1274,12 @@ export function buildPaperclipWakePayloadFromCommentRows(input: {
         title: string;
         status: string;
         priority: string;
+        originKind?: string | null;
+        parentId?: string | null;
+        assigneeAgentId?: string | null;
+        planProposedAt?: Date | string | null;
+        planApprovedAt?: Date | string | null;
+        planMode?: "approval_required" | "direct_execute";
         workspaceCwd?: string | null;
         taskRootIssueId?: string | null;
         taskRootDir?: string | null;
@@ -1326,6 +1356,9 @@ export function buildPaperclipWakePayloadFromCommentRows(input: {
           title: input.issueSummary.title,
           status: input.issueSummary.status,
           priority: input.issueSummary.priority,
+          originKind: input.issueSummary.originKind ?? null,
+          parentId: input.issueSummary.parentId ?? null,
+          planMode: input.issueSummary.planMode ?? null,
           workspaceCwd: input.issueSummary.workspaceCwd ?? null,
           taskRootIssueId: input.issueSummary.taskRootIssueId ?? null,
           taskRootDir: input.issueSummary.taskRootDir ?? null,

@@ -1,5 +1,7 @@
 import type { Issue } from "@paperclipai/shared";
 
+import { getIssueExecutionPlanGateReason } from "./issue-plan-policy.js";
+
 type IssueRuntimeExecutionState = "idle" | "active" | "stalled";
 type IssueRuntimeActivationState =
   | "runnable"
@@ -50,6 +52,9 @@ type RuntimeIssueStatusTruthLike = {
 } | null | undefined;
 
 type RuntimeIssueInput = {
+  originKind?: string | null;
+  parentId?: string | null;
+  assigneeAgentId?: string | null;
   status: string;
   statusTruthSummary?: RuntimeIssueStatusTruthLike;
   planProposedAt?: Date | string | null;
@@ -87,6 +92,7 @@ function coerceExecutionDiagnosis(value: string | null | undefined): IssueRuntim
 
 export function buildIssueRuntimeState(issue: RuntimeIssueInput): IssueRuntimeState {
   const reviewPending = hasPendingPlanReview(issue);
+  const planGateReason = getIssueExecutionPlanGateReason(issue);
   const humanReplyWait = hasHumanReplyWait(issue);
   const statusSummary = issue.statusTruthSummary ?? null;
   const lifecycle = {
@@ -131,7 +137,7 @@ export function buildIssueRuntimeState(issue: RuntimeIssueInput): IssueRuntimeSt
   let activation: IssueRuntimeState["execution"]["activation"] = "runnable";
   if (lifecycle.isTerminal) activation = "closed";
   else if (lifecycle.isBlocked) activation = "blocked";
-  else if (review.state === "pending") activation = "awaiting_review";
+  else if (planGateReason) activation = "awaiting_review";
   else if (humanWait.state === "reply_needed") activation = "awaiting_human";
 
   let diagnosis = coerceExecutionDiagnosis(statusSummary?.executionDiagnosis);

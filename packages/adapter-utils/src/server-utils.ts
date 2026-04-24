@@ -307,6 +307,9 @@ type PaperclipWakeIssue = {
   title: string | null;
   status: string | null;
   priority: string | null;
+  originKind: string | null;
+  parentId: string | null;
+  planMode: string | null;
   workspaceCwd: string | null;
   taskRootIssueId: string | null;
   taskRootDir: string | null;
@@ -353,6 +356,9 @@ function normalizePaperclipWakeIssue(value: unknown): PaperclipWakeIssue | null 
   const title = asString(issue.title, "").trim() || null;
   const status = asString(issue.status, "").trim() || null;
   const priority = asString(issue.priority, "").trim() || null;
+  const originKind = asString(issue.originKind, "").trim() || null;
+  const parentId = asString(issue.parentId, "").trim() || null;
+  const planMode = asString(issue.planMode, "").trim() || null;
   const workspaceCwd = asString(issue.workspaceCwd, "").trim() || null;
   const taskRootIssueId = asString(issue.taskRootIssueId, "").trim() || null;
   const taskRootDir = asString(issue.taskRootDir, "").trim() || null;
@@ -380,6 +386,9 @@ function normalizePaperclipWakeIssue(value: unknown): PaperclipWakeIssue | null 
     title,
     status,
     priority,
+    originKind,
+    parentId,
+    planMode,
     workspaceCwd,
     taskRootIssueId,
     taskRootDir,
@@ -525,6 +534,12 @@ export function renderPaperclipWakePrompt(
   }
   if (normalized.issue?.priority) {
     lines.push(`- issue priority: ${normalized.issue.priority}`);
+  }
+  if (normalized.issue?.planMode === "direct_execute") {
+    lines.push(
+      "- execution mode: direct_execute",
+      "- direct-execute lane: this child issue is already scoped by its parent/routine; do not call propose-plan just to restate the lane contract",
+    );
   }
   if (normalized.issue?.workspaceCwd) {
     lines.push(`- working directory: ${normalized.issue.workspaceCwd}`);

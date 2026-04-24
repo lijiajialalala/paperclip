@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { Db } from "@paperclipai/db";
 import {
+  ISSUE_BLACKBOARD_KEYS,
   ISSUE_BLACKBOARD_MANIFEST_KEY,
   issueBlackboardChallengeMemoSchema,
   issueBlackboardEntryKeySchema,
@@ -48,6 +49,8 @@ export type IssueBlackboardSummary = {
   invalidKeys: IssueBlackboardEntryKey[];
   entries: IssueBlackboardSummaryEntry[];
 };
+
+const issueBlackboardKeySet = new Set<string>(ISSUE_BLACKBOARD_KEYS);
 
 type PersistedIssueDocument = Omit<IssueDocument, "body" | "format"> & {
   body?: string;
@@ -438,10 +441,14 @@ export function summarizeIssueBlackboardState(state: IssueBlackboardState): Issu
 export function issueBlackboardService(db: Db) {
   const documentsSvc = documentService(db);
 
-  async function getIssueBlackboard(issueId: string) {
-    const documents = (await documentsSvc.listIssueDocuments(issueId)).map((document) =>
+  async function listStoredIssueDocuments(issueId: string) {
+    return (await documentsSvc.listIssueDocuments(issueId)).map((document) =>
       coerceIssueDocument(document as PersistedIssueDocument),
     );
+  }
+
+  async function getIssueBlackboard(issueId: string) {
+    const documents = await listStoredIssueDocuments(issueId);
     const manifestDocument = documents.find((document) => document.key === ISSUE_BLACKBOARD_MANIFEST_KEY) ?? null;
     return deriveIssueBlackboardState({
       manifestDocument,
@@ -458,8 +465,16 @@ export function issueBlackboardService(db: Db) {
     return entry;
   }
 
-  async function getIssueBlackboardSummary(issueId: string) {
-    const state = await getIssueBlackboard(issueId);
+  async function getIssueBlackboardSummary(issueId: string): Promise<IssueBlackboardSummary | null> {
+    const documents = await listStoredIssueDocuments(issueId);
+    const hasPersistedBlackboard = documents.some((document) => issueBlackboardKeySet.has(document.key));
+    if (!hasPersistedBlackboard) return null;
+
+    const manifestDocument = documents.find((document) => document.key === ISSUE_BLACKBOARD_MANIFEST_KEY) ?? null;
+    const state = deriveIssueBlackboardState({
+      manifestDocument,
+      documents: documents.filter((document) => document.key !== ISSUE_BLACKBOARD_MANIFEST_KEY),
+    });
     return summarizeIssueBlackboardState(state);
   }
 

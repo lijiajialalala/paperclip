@@ -91,6 +91,23 @@ describeEmbeddedPostgres("issueStatusTruthService activity signals", () => {
     return agentId;
   }
 
+  async function seedParentIssue(companyId: string) {
+    const parentId = randomUUID();
+    const issueNumber = Math.floor(Math.random() * 10_000) + 10_001;
+
+    await db.insert(issues).values({
+      id: parentId,
+      companyId,
+      title: "Parent issue",
+      status: "todo",
+      priority: "medium",
+      issueNumber,
+      identifier: `STAT-${issueNumber}`,
+    });
+
+    return parentId;
+  }
+
   it("treats issue.checked_out as the latest in_progress status signal after a prior blocked update", async () => {
     const { companyId, issueId } = await seedIssue("in_progress");
 
@@ -279,6 +296,57 @@ describeEmbeddedPostgres("issueStatusTruthService activity signals", () => {
       executionState: "idle",
       executionDiagnosis: null,
       canExecute: false,
+    }));
+  });
+
+  it("treats an assigned child issue without a proposed plan as non-executable", async () => {
+    const { companyId, issueId } = await seedIssue("todo");
+    const parentId = await seedParentIssue(companyId);
+    const agentId = await seedAgent(companyId);
+
+    await db
+      .update(issues)
+      .set({
+        parentId,
+        assigneeAgentId: agentId,
+      })
+      .where(eq(issues.id, issueId));
+
+    const summary = await issueStatusTruthService(db).getIssueStatusTruthSummary(issueId);
+
+    expect(summary).toEqual(expect.objectContaining({
+      effectiveStatus: "todo",
+      persistedStatus: "todo",
+      authoritativeStatus: "todo",
+      executionState: "idle",
+      executionDiagnosis: null,
+      canExecute: false,
+    }));
+  });
+
+  it("keeps qa_stage child issues executable without a proposed plan", async () => {
+    const { companyId, issueId } = await seedIssue("todo");
+    const parentId = await seedParentIssue(companyId);
+    const agentId = await seedAgent(companyId);
+
+    await db
+      .update(issues)
+      .set({
+        originKind: "qa_stage",
+        parentId,
+        assigneeAgentId: agentId,
+      })
+      .where(eq(issues.id, issueId));
+
+    const summary = await issueStatusTruthService(db).getIssueStatusTruthSummary(issueId);
+
+    expect(summary).toEqual(expect.objectContaining({
+      effectiveStatus: "todo",
+      persistedStatus: "todo",
+      authoritativeStatus: "todo",
+      executionState: "idle",
+      executionDiagnosis: null,
+      canExecute: true,
     }));
   });
 

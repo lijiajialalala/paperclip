@@ -58,4 +58,19 @@ describe("issue-plan-policy", () => {
 
     expect(reason).toBeNull();
   });
+
+  it("does not require a work plan for qa_stage child issues", () => {
+    const reason = getIssueExecutionPlanGateReason(
+      {
+        originKind: "qa_stage",
+        parentId: "parent-1",
+        assigneeAgentId: "agent-1",
+        planProposedAt: null,
+        planApprovedAt: null,
+      },
+      { executionStartedAt: "2026-04-08T00:05:00.000Z" },
+    );
+
+    expect(reason).toBeNull();
+  });
 });

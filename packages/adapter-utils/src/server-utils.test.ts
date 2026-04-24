@@ -324,6 +324,35 @@ describe("renderPaperclipWakePrompt", () => {
     expect(prompt).toContain("No inline comments accompanied this wake");
   });
 
+  it("tells pre-scoped fixed lanes to execute directly instead of proposing a plan", () => {
+    const prompt = renderPaperclipWakePrompt({
+      reason: "issue_assigned",
+      issue: {
+        id: "issue-1",
+        identifier: "CMPA-218",
+        title: "系统验证：平台质量深度审计批次",
+        status: "todo",
+        priority: "medium",
+        originKind: "qa_stage",
+        parentId: "parent-1",
+        planMode: "direct_execute",
+      },
+      commentIds: [],
+      latestCommentId: null,
+      comments: [],
+      commentWindow: {
+        requestedCount: 0,
+        includedCount: 0,
+        missingCount: 0,
+      },
+      truncated: false,
+      fallbackFetchNeeded: false,
+    });
+
+    expect(prompt).toContain("execution mode: direct_execute");
+    expect(prompt).toContain("do not call propose-plan just to restate the lane contract");
+  });
+
   it("renders compact blackboard progress when the wake payload includes blackboard summary", () => {
     const prompt = renderPaperclipWakePrompt({
       reason: "issue_assigned",

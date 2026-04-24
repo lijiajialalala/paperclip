@@ -2168,13 +2168,14 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
 
     const summary = await blackboard.getIssueBlackboardSummary(created.id);
 
-    expect(summary.template).toBe("research_v1");
-    expect(summary.manifestStatus).toBe("ready");
-    expect(summary.entries).toHaveLength(11);
-    expect(summary.entries.find((entry) => entry.key === "source-matrix")).toEqual(
+    expect(summary).not.toBeNull();
+    expect(summary?.template).toBe("research_v1");
+    expect(summary?.manifestStatus).toBe("ready");
+    expect(summary?.entries).toHaveLength(11);
+    expect(summary?.entries.find((entry) => entry.key === "source-matrix")).toEqual(
       expect.objectContaining({ status: "ready" }),
     );
-    expect(summary.entries.find((entry) => entry.key === "brief")).toEqual(
+    expect(summary?.entries.find((entry) => entry.key === "brief")).toEqual(
       expect.objectContaining({ status: "missing" }),
     );
   });
@@ -2198,9 +2199,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
 
     const summary = await blackboard.getIssueBlackboardSummary(created.id);
 
-    expect(summary.template).toBe("research_v1");
-    expect(summary.manifestStatus).toBe("missing");
-    expect(summary.entries).toHaveLength(11);
+    expect(summary).toBeNull();
   });
 
   it("reuses an active agent-created child issue when the same stage identity is retried", async () => {

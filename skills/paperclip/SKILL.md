@@ -226,6 +226,23 @@ Submitted CTO hire request and linked it for board review.
 
 ## Planning (REQUIRED BY DEFAULT)
 
+### Direct-Execute Exception For Pre-Scoped Fixed Lanes
+
+Do **not** apply the default planning gate when the current issue is already a pre-scoped execution lane created by a parent orchestrator. Treat the issue as **direct-execute** when both are true:
+
+- the issue is a fixed execution child such as `originKind = qa_stage`
+- the issue description, parent context, or agent instructions already define the lane scope, deliverables, and escalation path
+
+Typical example: fixed quality lanes created under a routine-owned batch such as `系统验证` / `工程质量审计` / `缺陷根因分析` / `流程与体验审计`.
+
+For those pre-scoped fixed lanes:
+
+1. checkout and execute directly
+2. do **not** call `propose-plan`
+3. do **not** move the issue to `in_review` just to restate the lane contract
+4. only use `blocked` for real hard blockers or a true contract contradiction
+5. preserve the parent-defined scope instead of renegotiating it
+
 As a strict company policy, you MUST propose a plan before executing any task, unless the user explicitly bypasses this requirement. This applies to ALL types of work — including delegation, task decomposition, and architecture decisions, not only code changes. If your work is to break a task into subtasks and delegate them, that is still "execution" and requires a plan first.
 
 ### Proactive Clarification (Anti-Hallucination Rule)

@@ -11,6 +11,11 @@ export type IssueExecutionPlanGateReason =
   | "missing_plan_approval"
   | "plan_pending_review";
 
+const PLAN_EXEMPT_ORIGIN_KINDS = new Set([
+  "routine_execution",
+  "qa_stage",
+]);
+
 function readDate(value: Date | string | null | undefined): Date | null {
   if (!value) return null;
   if (value instanceof Date) {
@@ -21,7 +26,7 @@ function readDate(value: Date | string | null | undefined): Date | null {
 }
 
 export function issueRequiresApprovedPlan(issue: IssuePlanPolicyRecord): boolean {
-  if (issue.originKind === "routine_execution") return false;
+  if (issue.originKind && PLAN_EXEMPT_ORIGIN_KINDS.has(issue.originKind)) return false;
   return Boolean(issue.parentId && issue.assigneeAgentId);
 }
 
