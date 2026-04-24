@@ -16,6 +16,11 @@ const PLAN_EXEMPT_ORIGIN_KINDS = new Set([
   "qa_stage",
 ]);
 
+export function isPlanExemptOriginKind(originKind: string | null | undefined): boolean {
+  const normalizedOriginKind = typeof originKind === "string" ? originKind.trim() : "";
+  return normalizedOriginKind.length > 0 && PLAN_EXEMPT_ORIGIN_KINDS.has(normalizedOriginKind);
+}
+
 function readDate(value: Date | string | null | undefined): Date | null {
   if (!value) return null;
   if (value instanceof Date) {
@@ -26,7 +31,7 @@ function readDate(value: Date | string | null | undefined): Date | null {
 }
 
 export function issueRequiresApprovedPlan(issue: IssuePlanPolicyRecord): boolean {
-  if (issue.originKind && PLAN_EXEMPT_ORIGIN_KINDS.has(issue.originKind)) return false;
+  if (isPlanExemptOriginKind(issue.originKind)) return false;
   return Boolean(issue.parentId && issue.assigneeAgentId);
 }
 

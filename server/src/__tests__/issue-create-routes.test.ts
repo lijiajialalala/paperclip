@@ -147,13 +147,16 @@ describe("issue create routes", () => {
     );
   });
 
-  it("rejects reserved runtime lineage on generic issue creation", async () => {
+  it.each([
+    ["routine_execution", "routine-123"],
+    ["qa_stage", "system-verification"],
+  ])("rejects reserved runtime lineage %s on generic issue creation", async (originKind, originId) => {
     const res = await request(createApp())
       .post("/api/companies/company-1/issues")
       .send({
         title: "AI 视频研究主线",
-        originKind: "routine_execution",
-        originId: "routine-123",
+        originKind,
+        originId,
       });
 
     expect(res.status).toBe(422);
