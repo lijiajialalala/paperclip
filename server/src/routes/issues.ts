@@ -23,7 +23,6 @@ import {
   issueDocumentKeySchema,
   restoreIssueDocumentRevisionSchema,
   ISSUE_BLACKBOARD_KEYS,
-  ISSUE_ORIGIN_KINDS,
   updateIssueWorkProductSchema,
   upsertIssueDocumentSchema,
   updateIssueSchema,
@@ -79,6 +78,7 @@ import {
 import {
   describeIssueExecutionPlanGateError,
   getIssueExecutionPlanGateReason,
+  isPlanExemptOriginKind,
 } from "../services/issue-plan-policy.js";
 import { issueBlackboardService } from "../services/issue-blackboard.js";
 
@@ -2354,7 +2354,7 @@ export function issueRoutes(
       }
       if (!(await assertAgentExecutionPlanAllowed(req, res, parentIssue, "creating child issues"))) return;
     }
-    if (req.body.originKind === ISSUE_ORIGIN_KINDS[1]) {
+    if (isPlanExemptOriginKind(req.body.originKind)) {
       res.status(422).json({
         error: "Reserved issue lineage cannot be set through generic issue creation",
       });

@@ -122,7 +122,7 @@ describe("issue create routes", () => {
     });
   });
 
-  it("passes blackboardTemplate and actor run context into issue creation", async () => {
+  it("passes blackboardTemplate and board actor context into issue creation without stale run attribution", async () => {
     const res = await request(createApp())
       .post(`/api/companies/${companyId}/issues`)
       .send({
@@ -138,8 +138,23 @@ describe("issue create routes", () => {
       blackboardTemplate: "research_v1",
       createdByAgentId: null,
       createdByUserId: "board-user",
-      createdByRunId: runId,
+      createdByRunId: null,
     }));
     expect(mockQueueIssueAssignmentWakeup).toHaveBeenCalled();
+  });
+
+  it("rejects plan-exempt reserved lineage through generic issue creation", async () => {
+    const res = await request(createApp())
+      .post(`/api/companies/${companyId}/issues`)
+      .send({
+        title: "QA stage should not use generic create",
+        status: "todo",
+        priority: "medium",
+        originKind: "qa_stage",
+      });
+
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe("Reserved issue lineage cannot be set through generic issue creation");
+    expect(mockIssueService.create).not.toHaveBeenCalled();
   });
 });
