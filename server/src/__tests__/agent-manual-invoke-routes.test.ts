@@ -16,6 +16,8 @@ const mockHeartbeatService = vi.hoisted(() => ({
   wakeup: vi.fn(),
 }));
 
+const mockLogActivity = vi.hoisted(() => vi.fn(async () => undefined));
+
 const mockIssueService = vi.hoisted(() => ({
   list: vi.fn(),
 }));
@@ -39,7 +41,7 @@ vi.mock("../services/index.js", () => ({
   heartbeatService: () => mockHeartbeatService,
   issueApprovalService: () => ({}),
   issueService: () => mockIssueService,
-  logActivity: vi.fn(async () => undefined),
+  logActivity: mockLogActivity,
   secretService: () => ({
     resolveAdapterConfigForRuntime: vi.fn(),
     normalizeAdapterConfigForPersistence: vi.fn(async (_companyId: string, config: Record<string, unknown>) => config),
@@ -89,7 +91,7 @@ function createApp(dbOverride?: { select?: ReturnType<typeof vi.fn> }) {
   app.use(express.json());
   app.use((req, _res, next) => {
     (req as any).actor = {
-      type: "user",
+      type: "board",
       userId: "board-user",
       companyIds: [companyId],
       source: "local_implicit",
@@ -190,6 +192,48 @@ describe("agent manual invoke routes", () => {
           issueId: "issue-1",
           taskId: "issue-1",
         }),
+      }),
+    );
+  });
+
+  it("attributes generic manual wake activity to the queued run instead of a stale actor run", async () => {
+    const staleRunId = "99999999-9999-4999-8999-999999999999";
+    const res = await request(createApp())
+      .post(`/api/agents/${agentId}/wakeup`)
+      .set("x-paperclip-run-id", staleRunId)
+      .send({
+        source: "on_demand",
+        triggerDetail: "manual",
+        reason: "retry_failed_run",
+      });
+
+    expect(res.status).toBe(202);
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "heartbeat.invoked",
+        entityType: "heartbeat_run",
+        entityId: "run-wakeup",
+        runId: "run-wakeup",
+      }),
+    );
+  });
+
+  it("attributes direct manual invoke activity to the queued run instead of a stale actor run", async () => {
+    const staleRunId = "99999999-9999-4999-8999-999999999999";
+    const res = await request(createApp())
+      .post(`/api/agents/${agentId}/heartbeat/invoke`)
+      .set("x-paperclip-run-id", staleRunId)
+      .send({});
+
+    expect(res.status).toBe(202);
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "heartbeat.invoked",
+        entityType: "heartbeat_run",
+        entityId: "run-invoke",
+        runId: "run-invoke",
       }),
     );
   });

@@ -200,7 +200,7 @@ function agentActor(agentId: string, runId = randomUUID()) {
 }
 
 // local_implicit Board actor — assertCanAssignTasks returns immediately, no DB calls
-function boardActor() {
+function boardActor(overrides: Record<string, unknown> = {}) {
   return {
     type: "board",
     actorType: "board",
@@ -209,6 +209,7 @@ function boardActor() {
     companyIds: [COMPANY_ID],
     source: "local_implicit",
     isInstanceAdmin: false,
+    ...overrides,
   };
 }
 
@@ -1102,6 +1103,51 @@ describe("Propose-Plan & Checkout Gate Workflow", () => {
       expect.objectContaining({
         action: "issue.plan_approved",
         entityId: ISSUE_ID,
+      }),
+    );
+  });
+
+  it("does not attribute board plan approval side effects to a stale request run id", async () => {
+    const staleRunId = randomUUID();
+    const issue = makeIssue({
+      assigneeAgentId: AGENT_ASSIGNEE,
+      status: "in_review",
+      planProposedAt: new Date(),
+    });
+    const updated = { ...issue, status: "todo", planApprovedAt: new Date() };
+
+    mockIssueSvc.getById.mockResolvedValue(issue);
+    mockIssueSvc.approvePlan.mockResolvedValue({
+      issue: updated,
+      approval: { id: randomUUID(), status: "approved" },
+    });
+    mockIssueApprovalSvc.getLiveWorkPlanApprovalForIssue.mockResolvedValue({
+      id: randomUUID(),
+      type: "work_plan",
+      status: "pending",
+      targetAgentId: null,
+      targetUserId: null,
+      routingMode: "board_pool",
+    });
+
+    const res = await request(makeApp(boardActor({ runId: staleRunId })))
+      .post(`/api/issues/${ISSUE_ID}/approve-plan`)
+      .send();
+
+    expect(res.status).toBe(200);
+    expect(mockIssueSvc.addComment).toHaveBeenCalledWith(
+      ISSUE_ID,
+      expect.any(String),
+      expect.objectContaining({
+        userId: "user-board-1",
+        runId: null,
+      }),
+    );
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "issue.plan_approved",
+        runId: null,
       }),
     );
   });

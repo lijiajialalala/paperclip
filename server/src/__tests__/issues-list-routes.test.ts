@@ -83,7 +83,7 @@ vi.mock("../services/platform-unblock.js", () => ({
   platformUnblockService: () => mockPlatformUnblock,
 }));
 
-function createApp() {
+function createApp(dbOverride: any = { select: vi.fn() }) {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
@@ -96,9 +96,135 @@ function createApp() {
     };
     next();
   });
-  app.use("/api", issueRoutes({ select: vi.fn() } as any, {} as any));
+  app.use("/api", issueRoutes(dbOverride, {} as any));
   app.use(errorHandler);
   return app;
+}
+
+function createRuntimeDiagnosticsDb() {
+  const issueRows = [
+    {
+      id: "issue-blocked",
+      identifier: "CMPA-155",
+      title: "Blocked issue without active run",
+      status: "blocked",
+      parentId: null,
+      assigneeAgentId: "agent-1",
+      originKind: "manual",
+      checkoutRunId: null,
+      executionRunId: null,
+      planProposedAt: null,
+      planApprovedAt: null,
+      executionRunStatus: null,
+      executionRunAgentId: null,
+    },
+    {
+      id: "issue-stale-run",
+      identifier: "CMPA-156",
+      title: "Issue with terminal execution lock",
+      status: "in_progress",
+      parentId: null,
+      assigneeAgentId: "agent-2",
+      originKind: "manual",
+      checkoutRunId: null,
+      executionRunId: "run-failed",
+      planProposedAt: null,
+      planApprovedAt: null,
+      executionRunStatus: "failed",
+      executionRunAgentId: "agent-2",
+    },
+    {
+      id: "issue-missing-plan",
+      identifier: "CMPA-157",
+      title: "Assigned child issue missing a plan",
+      status: "todo",
+      parentId: "parent-1",
+      assigneeAgentId: "agent-3",
+      originKind: "manual",
+      checkoutRunId: null,
+      executionRunId: null,
+      planProposedAt: null,
+      planApprovedAt: null,
+      executionRunStatus: null,
+      executionRunAgentId: null,
+    },
+    {
+      id: "issue-plan-review",
+      identifier: "CMPA-158",
+      title: "Assigned child issue pending plan review",
+      status: "in_review",
+      parentId: "parent-1",
+      assigneeAgentId: "agent-4",
+      originKind: "manual",
+      checkoutRunId: null,
+      executionRunId: null,
+      planProposedAt: new Date("2026-04-25T01:00:00.000Z"),
+      planApprovedAt: null,
+      executionRunStatus: null,
+      executionRunAgentId: null,
+    },
+  ];
+
+  const deferredWakeRows = [
+    {
+      id: "wake-1",
+      agentId: "agent-5",
+      reason: "issue_execution_deferred",
+      payload: { issueId: "issue-blocked" },
+      requestedAt: new Date("2026-04-25T01:02:00.000Z"),
+      updatedAt: new Date("2026-04-25T01:03:00.000Z"),
+    },
+  ];
+
+  const routineRunRows = [
+    {
+      id: "routine-run-1",
+      routineId: "routine-1",
+      status: "issue_created",
+      linkedIssueId: "issue-blocked",
+      failureReason: null,
+      triggeredAt: new Date("2026-04-25T01:04:00.000Z"),
+      linkedIssueStatus: "blocked",
+      linkedIssueExecutionRunId: null,
+      linkedIssueExecutionRunStatus: null,
+    },
+    {
+      id: "routine-run-2",
+      routineId: "routine-2",
+      status: "failed",
+      linkedIssueId: null,
+      failureReason: "queue failed",
+      triggeredAt: new Date("2026-04-25T01:05:00.000Z"),
+      linkedIssueStatus: null,
+      linkedIssueExecutionRunId: null,
+      linkedIssueExecutionRunStatus: null,
+    },
+  ];
+
+  const issueChain: any = {};
+  issueChain.from = vi.fn(() => issueChain);
+  issueChain.leftJoin = vi.fn(() => issueChain);
+  issueChain.where = vi.fn(async () => issueRows);
+
+  const deferredChain: any = {};
+  deferredChain.from = vi.fn(() => deferredChain);
+  deferredChain.where = vi.fn(() => deferredChain);
+  deferredChain.orderBy = vi.fn(() => deferredChain);
+  deferredChain.limit = vi.fn(async () => deferredWakeRows);
+
+  const routineChain: any = {};
+  routineChain.from = vi.fn(() => routineChain);
+  routineChain.leftJoin = vi.fn(() => routineChain);
+  routineChain.where = vi.fn(() => routineChain);
+  routineChain.orderBy = vi.fn(() => routineChain);
+  routineChain.limit = vi.fn(async () => routineRunRows);
+
+  return {
+    select: vi.fn()
+      .mockReturnValueOnce(issueChain)
+      .mockReturnValueOnce(deferredChain)
+      .mockReturnValueOnce(routineChain),
+  };
 }
 
 describe("issue list routes", () => {
@@ -170,6 +296,55 @@ describe("issue list routes", () => {
     ]));
     mockStatusTruth.getIssueStatusTruthSummary.mockResolvedValue(driftedBlockedSummary);
     mockPlatformUnblock.listIssuePlatformUnblockSummaries.mockResolvedValue(new Map());
+  });
+
+  it("reports runtime truth diagnostics for stalled issues, deferred wakes, and routine drift", async () => {
+    const res = await request(createApp(createRuntimeDiagnosticsDb() as any))
+      .get("/api/companies/company-1/issues/runtime-diagnostics");
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts).toEqual({
+      issueRuntime: 4,
+      deferredWakeRequests: 1,
+      routineRuns: 2,
+    });
+    expect(res.body.issueRuntime).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        issueId: "issue-blocked",
+        findings: ["no_active_run"],
+      }),
+      expect.objectContaining({
+        issueId: "issue-stale-run",
+        findings: ["no_active_run", "execution_run_not_active"],
+      }),
+      expect.objectContaining({
+        issueId: "issue-missing-plan",
+        planGate: "missing_plan_approval",
+        findings: ["missing_plan_approval"],
+      }),
+      expect.objectContaining({
+        issueId: "issue-plan-review",
+        planGate: "plan_pending_review",
+        findings: ["plan_pending_review"],
+      }),
+    ]));
+    expect(res.body.deferredWakeRequests).toEqual([
+      expect.objectContaining({
+        wakeupRequestId: "wake-1",
+        issueId: "issue-blocked",
+        reason: "issue_execution_deferred",
+      }),
+    ]);
+    expect(res.body.routineRuns).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        routineRunId: "routine-run-1",
+        findings: ["linked_issue_without_active_run"],
+      }),
+      expect.objectContaining({
+        routineRunId: "routine-run-2",
+        findings: ["routine_run_failed"],
+      }),
+    ]));
   });
 
   it("filters company issue lists by effective status, not just persisted row status", async () => {
