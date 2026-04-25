@@ -57,7 +57,6 @@ import {
   type ApprovalActor,
   workProductService,
 } from "../services/index.js";
-import { isPlanExemptOriginKind } from "../services/issue-plan-policy.js";
 import { logger } from "../middleware/logger.js";
 import { forbidden, HttpError, unauthorized } from "../errors.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
