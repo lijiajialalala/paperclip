@@ -65,11 +65,15 @@ type LogActivityDeps = (
   }]
 ) => Promise<unknown>;
 
+function actorRunIdForWrite(actor: PlanWorkflowActor) {
+  return actor.actorType === "agent" ? actor.runId : null;
+}
+
 function toCommentActor(actor: PlanWorkflowActor): IssueCommentActor {
   return {
     agentId: actor.agentId ?? undefined,
     userId: actor.actorType === "user" ? actor.actorId : undefined,
-    runId: actor.runId,
+    runId: actorRunIdForWrite(actor),
   };
 }
 
@@ -145,7 +149,7 @@ export async function runPlanProposalSideEffects(input: {
       actorType: input.actor.actorType,
       actorId: input.actor.actorId,
       agentId: input.actor.agentId,
-      runId: input.actor.runId,
+      runId: actorRunIdForWrite(input.actor),
       action: "issue.plan_proposed",
       entityType: "issue",
       entityId: input.issue.id,
@@ -259,7 +263,7 @@ export async function runPlanReviewSideEffects(input: {
       actorType: input.actor.actorType,
       actorId: input.actor.actorId,
       agentId: input.actor.agentId,
-      runId: input.actor.runId,
+      runId: actorRunIdForWrite(input.actor),
       action: `issue.plan_${input.action}`,
       entityType: "issue",
       entityId: input.issue.id,

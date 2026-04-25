@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { Request, RequestHandler } from "express";
 import { and, eq, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agentApiKeys, agents, companyMemberships, instanceUserRoles } from "@paperclipai/db";
+import { agentApiKeys, agents, companyMemberships, heartbeatRuns, instanceUserRoles } from "@paperclipai/db";
 import { verifyLocalAgentJwt } from "../agent-auth-jwt.js";
 import type { DeploymentMode } from "@paperclipai/shared";
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
@@ -11,6 +11,45 @@ import { boardAuthService } from "../services/board-auth.js";
 
 function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export async function resolveTrustedAgentRunId(
+  db: Db,
+  input: {
+    companyId: string;
+    agentId: string;
+    candidateRunIds: Array<string | null | undefined>;
+  },
+) {
+  const seen = new Set<string>();
+  for (const raw of input.candidateRunIds) {
+    const runId = raw?.trim();
+    if (!runId || seen.has(runId) || !UUID_RE.test(runId)) continue;
+    seen.add(runId);
+
+    try {
+      const run = await db
+        .select({ id: heartbeatRuns.id })
+        .from(heartbeatRuns)
+        .where(
+          and(
+            eq(heartbeatRuns.id, runId),
+            eq(heartbeatRuns.companyId, input.companyId),
+            eq(heartbeatRuns.agentId, input.agentId),
+          ),
+        )
+        .then((rows) => rows[0] ?? null);
+      if (run) return run.id;
+    } catch (err) {
+      logger.warn(
+        { err, runId, companyId: input.companyId, agentId: input.agentId },
+        "failed to validate actor run id",
+      );
+    }
+  }
+  return undefined;
 }
 
 interface ActorMiddlewareOptions {
@@ -64,14 +103,12 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
             userId,
             companyIds: memberships.map((row) => row.companyId),
             isInstanceAdmin: Boolean(roleRow),
-            runId: runIdHeader ?? undefined,
             source: "session",
           };
           next();
           return;
         }
       }
-      if (runIdHeader) req.actor.runId = runIdHeader;
       next();
       return;
     }
@@ -93,7 +130,6 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
           companyIds: access.companyIds,
           isInstanceAdmin: access.isInstanceAdmin,
           keyId: boardKey.id,
-          runId: runIdHeader || undefined,
           source: "board_key",
         };
         next();
@@ -131,12 +167,18 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
         return;
       }
 
+      const trustedRunId = await resolveTrustedAgentRunId(db, {
+        companyId: claims.company_id,
+        agentId: claims.sub,
+        candidateRunIds: [runIdHeader, claims.run_id],
+      });
+
       req.actor = {
         type: "agent",
         agentId: claims.sub,
         companyId: claims.company_id,
         keyId: undefined,
-        runId: runIdHeader || claims.run_id || undefined,
+        runId: trustedRunId,
         source: "agent_jwt",
       };
       next();
@@ -159,12 +201,18 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
       return;
     }
 
+    const trustedRunId = await resolveTrustedAgentRunId(db, {
+      companyId: key.companyId,
+      agentId: key.agentId,
+      candidateRunIds: [runIdHeader],
+    });
+
     req.actor = {
       type: "agent",
       agentId: key.agentId,
       companyId: key.companyId,
       keyId: key.id,
-      runId: runIdHeader || undefined,
+      runId: trustedRunId,
       source: "agent_key",
     };
 

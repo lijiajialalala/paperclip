@@ -230,6 +230,10 @@ function sameRunLock(checkoutRunId: string | null, actorRunId: string | null) {
   return checkoutRunId == null;
 }
 
+function planActorRunIdForWrite(actor: { actorType: "agent" | "board"; runId?: string | null }) {
+  return actor.actorType === "agent" ? actor.runId ?? null : null;
+}
+
 const TERMINAL_HEARTBEAT_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
 const AUTO_RECOMPUTED_ANCESTOR_STATUSES = new Set(["backlog", "todo", "in_progress", "done"]);
 const ACTIVE_CHILD_ISSUE_STATUSES = new Set(["in_progress", "in_review"]);
@@ -2444,7 +2448,7 @@ async function adoptStaleCheckoutRun(input: {
           {
             agentId: input.actor.agentId ?? undefined,
             userId: input.actor.actorType === "board" ? (input.actor.userId ?? undefined) : undefined,
-            runId: input.actor.runId,
+            runId: planActorRunIdForWrite(input.actor),
           },
           censorUsernameInLogs,
         );
@@ -2472,7 +2476,7 @@ async function adoptStaleCheckoutRun(input: {
             actorType: input.actor.actorType === "board" ? "user" : "agent",
             actorId: input.actor.actorId,
             agentId: input.actor.agentId ?? null,
-            runId: input.actor.runId ?? null,
+            runId: planActorRunIdForWrite(input.actor),
             action: "issue.updated",
             entityType: "issue",
             entityId: issue.id,

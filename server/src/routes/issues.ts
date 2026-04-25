@@ -2,9 +2,9 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { Router, type Request, type Response } from "express";
 import multer from "multer";
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull } from "drizzle-orm";
 import { z } from "zod";
-import { activityLog, type Db } from "@paperclipai/db";
+import { activityLog, agentWakeupRequests, heartbeatRuns, issues, routineRuns, type Db } from "@paperclipai/db";
 import {
   addIssueCommentSchema,
   createIssueAttachmentMetadataSchema,
@@ -79,10 +79,185 @@ import {
 import {
   describeIssueExecutionPlanGateError,
   getIssueExecutionPlanGateReason,
+  isPlanExemptOriginKind,
 } from "../services/issue-plan-policy.js";
 import { issueBlackboardService } from "../services/issue-blackboard.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
+const ACTIVE_HEARTBEAT_RUN_STATUSES = new Set(["queued", "running"]);
+const RUNTIME_DIAGNOSTIC_ISSUE_STATUSES = ["todo", "in_progress", "in_review", "blocked"] as const;
+const RUNTIME_DIAGNOSTIC_ISSUE_STATUS_SET = new Set<string>(RUNTIME_DIAGNOSTIC_ISSUE_STATUSES);
+const RUNTIME_DIAGNOSTIC_ROUTINE_STATUSES = ["received", "issue_created", "failed"] as const;
+
+function readObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+async function buildRuntimeDiagnostics(db: Db, companyId: string) {
+  const [issueRows, deferredWakeRows, routineRunRows] = await Promise.all([
+    db
+      .select({
+        id: issues.id,
+        identifier: issues.identifier,
+        title: issues.title,
+        status: issues.status,
+        parentId: issues.parentId,
+        assigneeAgentId: issues.assigneeAgentId,
+        originKind: issues.originKind,
+        checkoutRunId: issues.checkoutRunId,
+        executionRunId: issues.executionRunId,
+        planProposedAt: issues.planProposedAt,
+        planApprovedAt: issues.planApprovedAt,
+        executionRunStatus: heartbeatRuns.status,
+        executionRunAgentId: heartbeatRuns.agentId,
+      })
+      .from(issues)
+      .leftJoin(heartbeatRuns, eq(issues.executionRunId, heartbeatRuns.id))
+      .where(
+        and(
+          eq(issues.companyId, companyId),
+          isNull(issues.hiddenAt),
+          inArray(issues.status, [...RUNTIME_DIAGNOSTIC_ISSUE_STATUSES]),
+        ),
+      ),
+    db
+      .select({
+        id: agentWakeupRequests.id,
+        agentId: agentWakeupRequests.agentId,
+        reason: agentWakeupRequests.reason,
+        payload: agentWakeupRequests.payload,
+        requestedAt: agentWakeupRequests.requestedAt,
+        updatedAt: agentWakeupRequests.updatedAt,
+      })
+      .from(agentWakeupRequests)
+      .where(
+        and(
+          eq(agentWakeupRequests.companyId, companyId),
+          eq(agentWakeupRequests.status, "deferred_issue_execution"),
+        ),
+      )
+      .orderBy(asc(agentWakeupRequests.requestedAt))
+      .limit(100),
+    db
+      .select({
+        id: routineRuns.id,
+        routineId: routineRuns.routineId,
+        status: routineRuns.status,
+        linkedIssueId: routineRuns.linkedIssueId,
+        failureReason: routineRuns.failureReason,
+        triggeredAt: routineRuns.triggeredAt,
+        linkedIssueStatus: issues.status,
+        linkedIssueExecutionRunId: issues.executionRunId,
+        linkedIssueExecutionRunStatus: heartbeatRuns.status,
+      })
+      .from(routineRuns)
+      .leftJoin(issues, eq(routineRuns.linkedIssueId, issues.id))
+      .leftJoin(heartbeatRuns, eq(issues.executionRunId, heartbeatRuns.id))
+      .where(
+        and(
+          eq(routineRuns.companyId, companyId),
+          inArray(routineRuns.status, [...RUNTIME_DIAGNOSTIC_ROUTINE_STATUSES]),
+        ),
+      )
+      .orderBy(desc(routineRuns.triggeredAt))
+      .limit(100),
+  ]);
+
+  const issueRuntime = issueRows
+    .map((issue) => {
+      const executionRunActive = Boolean(
+        issue.executionRunId &&
+        issue.executionRunStatus &&
+        ACTIVE_HEARTBEAT_RUN_STATUSES.has(issue.executionRunStatus),
+      );
+      const planGate = getIssueExecutionPlanGateReason(issue);
+      const findings: string[] = [];
+      if ((issue.status === "in_progress" || issue.status === "blocked") && !executionRunActive) {
+        findings.push("no_active_run");
+      }
+      if (issue.executionRunId && !executionRunActive) {
+        findings.push(issue.executionRunStatus ? "execution_run_not_active" : "execution_run_missing");
+      }
+      if (planGate) findings.push(planGate);
+
+      return {
+        issueId: issue.id,
+        identifier: issue.identifier,
+        title: issue.title,
+        status: issue.status,
+        parentId: issue.parentId,
+        assigneeAgentId: issue.assigneeAgentId,
+        originKind: issue.originKind,
+        checkoutRunId: issue.checkoutRunId,
+        executionRunId: issue.executionRunId,
+        executionRunStatus: issue.executionRunStatus ?? null,
+        executionRunAgentId: issue.executionRunAgentId ?? null,
+        planGate,
+        findings,
+      };
+    })
+    .filter((issue) => issue.findings.length > 0);
+
+  const deferredWakeRequests = deferredWakeRows.map((request) => {
+    const payload = readObject(request.payload);
+    return {
+      wakeupRequestId: request.id,
+      agentId: request.agentId,
+      issueId: typeof payload.issueId === "string" ? payload.issueId : null,
+      reason: request.reason,
+      requestedAt: request.requestedAt,
+      updatedAt: request.updatedAt,
+    };
+  });
+
+  const routineRunsWithDrift = routineRunRows
+    .map((run) => {
+      const findings: string[] = [];
+      const linkedIssueOpen = run.linkedIssueStatus
+        ? RUNTIME_DIAGNOSTIC_ISSUE_STATUS_SET.has(run.linkedIssueStatus)
+        : false;
+      const linkedHeartbeatActive = Boolean(
+        run.linkedIssueExecutionRunId &&
+        run.linkedIssueExecutionRunStatus &&
+        ACTIVE_HEARTBEAT_RUN_STATUSES.has(run.linkedIssueExecutionRunStatus),
+      );
+      if (!run.linkedIssueId && run.status !== "failed") findings.push("missing_linked_issue");
+      if (run.status === "issue_created" && linkedIssueOpen && !linkedHeartbeatActive) {
+        findings.push("linked_issue_without_active_run");
+      }
+      if (run.status === "failed") findings.push("routine_run_failed");
+
+      return {
+        routineRunId: run.id,
+        routineId: run.routineId,
+        status: run.status,
+        linkedIssueId: run.linkedIssueId,
+        linkedIssueStatus: run.linkedIssueStatus ?? null,
+        linkedIssueExecutionRunId: run.linkedIssueExecutionRunId ?? null,
+        linkedIssueExecutionRunStatus: run.linkedIssueExecutionRunStatus ?? null,
+        failureReason: run.failureReason,
+        triggeredAt: run.triggeredAt,
+        findings,
+      };
+    })
+    .filter((run) => run.findings.length > 0);
+
+  return {
+    generatedAt: new Date().toISOString(),
+    companyId,
+    counts: {
+      issueRuntime: issueRuntime.length,
+      deferredWakeRequests: deferredWakeRequests.length,
+      routineRuns: routineRunsWithDrift.length,
+    },
+    issueRuntime,
+    deferredWakeRequests,
+    routineRuns: routineRunsWithDrift,
+  };
+}
+
 const updateIssueRouteSchema = updateIssueSchema.extend({
   interrupt: z.boolean().optional(),
 });
@@ -624,7 +799,7 @@ export function issueRoutes(
     return false;
   }
 
-    function requireAgentRunId(req: Request, res: Response) {
+  function requireAgentRunId(req: Request, res: Response) {
     if (req.actor.type !== "agent") return null;
     const runId = req.actor.runId?.trim();
     if (runId) return runId;
@@ -943,6 +1118,12 @@ export function issueRoutes(
     res.status(400).json({
       error: "Missing companyId in path. Use /api/companies/{companyId}/issues.",
     });
+  });
+
+  router.get("/companies/:companyId/issues/runtime-diagnostics", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    res.json(await buildRuntimeDiagnostics(db, companyId));
   });
 
   router.get("/companies/:companyId/issues", async (req, res) => {
@@ -2329,7 +2510,7 @@ export function issueRoutes(
         companyId: existing.companyId,
         actorType: req.actor.type === "agent" ? "agent" : "board",
         actorAgentId: req.actor.type === "agent" ? req.actor.agentId ?? null : null,
-        actorRunId: req.actor.runId ?? null,
+        actorRunId: req.actor.type === "agent" ? req.actor.runId ?? null : null,
       });
     }
     let issue;

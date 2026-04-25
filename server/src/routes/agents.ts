@@ -29,6 +29,7 @@ import {
 } from "@paperclipai/adapter-utils/server-utils";
 import { trackAgentCreated } from "@paperclipai/shared/telemetry";
 import { validate } from "../middleware/validate.js";
+import { logger } from "../middleware/logger.js";
 import {
   agentService,
   agentInstructionsService,
@@ -2205,12 +2206,13 @@ export function agentRoutes(db: Db) {
       actorType: actor.actorType,
       actorId: actor.actorId,
       agentId: actor.agentId,
-      runId: actor.runId,
+      runId: run.id,
       action: "heartbeat.invoked",
       entityType: "heartbeat_run",
       entityId: run.id,
       details: { agentId: id },
-    });
+    }).catch((err) =>
+      logger.warn({ err, agentId: id, runId: run.id }, "failed to log manual wake activity"));
 
     res.status(202).json(run);
   });
@@ -2262,12 +2264,13 @@ export function agentRoutes(db: Db) {
       actorType: actor.actorType,
       actorId: actor.actorId,
       agentId: actor.agentId,
-      runId: actor.runId,
+      runId: run.id,
       action: "heartbeat.invoked",
       entityType: "heartbeat_run",
       entityId: run.id,
       details: { agentId: id },
-    });
+    }).catch((err) =>
+      logger.warn({ err, agentId: id, runId: run.id }, "failed to log manual invoke activity"));
 
     res.status(202).json(run);
   });

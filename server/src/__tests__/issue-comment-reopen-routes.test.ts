@@ -143,6 +143,38 @@ describe("issue comment reopen routes", () => {
     );
   });
 
+  it("does not attribute board comments to a stale request run id", async () => {
+    const staleRunId = "99999999-9999-4999-8999-999999999999";
+
+    const res = await request(createApp({
+      type: "board",
+      userId: "local-board",
+      companyIds: ["company-1"],
+      source: "local_implicit",
+      isInstanceAdmin: false,
+      runId: staleRunId,
+    }))
+      .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
+      .send({ body: "board comment" });
+
+    expect(res.status).toBe(201);
+    expect(mockIssueService.addComment).toHaveBeenCalledWith(
+      "11111111-1111-4111-8111-111111111111",
+      "board comment",
+      expect.objectContaining({
+        userId: "local-board",
+        runId: null,
+      }),
+    );
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "issue.comment_added",
+        runId: null,
+      }),
+    );
+  });
+
   it("treats reopen=true as a no-op when the issue is already open", async () => {
     mockIssueService.getById.mockResolvedValue(makeIssue("todo"));
     mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
