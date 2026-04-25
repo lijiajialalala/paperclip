@@ -150,7 +150,7 @@ describe("agent manual invoke routes", () => {
       agentId,
       "on_demand",
       expect.objectContaining({
-        triggeredBy: "user",
+        triggeredBy: "board",
         actorId: "board-user",
         issueId: "issue-1",
         taskId: "issue-1",
@@ -187,7 +187,7 @@ describe("agent manual invoke routes", () => {
         triggerDetail: "manual",
         reason: "retry_failed_run",
         contextSnapshot: expect.objectContaining({
-          triggeredBy: "user",
+          triggeredBy: "board",
           actorId: "board-user",
           issueId: "issue-1",
           taskId: "issue-1",
@@ -260,7 +260,7 @@ describe("agent manual invoke routes", () => {
     const invokeContext = mockHeartbeatService.invoke.mock.calls[0]?.[2] as Record<string, unknown>;
     expect(invokeContext).toEqual(
       expect.objectContaining({
-        triggeredBy: "user",
+        triggeredBy: "board",
         actorId: "board-user",
       }),
     );
