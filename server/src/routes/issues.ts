@@ -84,9 +84,14 @@ import { issueBlackboardService } from "../services/issue-blackboard.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
 const ACTIVE_HEARTBEAT_RUN_STATUSES = new Set(["queued", "running"]);
+const OPEN_CHILD_LANE_STATUSES = new Set(["backlog", "todo", "in_progress", "in_review", "blocked"]);
 const RUNTIME_DIAGNOSTIC_ISSUE_STATUSES = ["todo", "in_progress", "in_review", "blocked"] as const;
 const RUNTIME_DIAGNOSTIC_ISSUE_STATUS_SET = new Set<string>(RUNTIME_DIAGNOSTIC_ISSUE_STATUSES);
 const RUNTIME_DIAGNOSTIC_ROUTINE_STATUSES = ["received", "issue_created", "failed"] as const;
+
+function readNonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
 
 function readObject(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -1012,6 +1017,66 @@ export function issueRoutes(
       targets: [],
       summary: "No actionable next hop was eligible for recovery.",
     };
+  }
+
+  function isOpenAssignedChildIssue(issue: Pick<IssueRecord, "status" | "assigneeAgentId" | "assigneeUserId">) {
+    return OPEN_CHILD_LANE_STATUSES.has(issue.status)
+      && Boolean(readNonEmptyString(issue.assigneeAgentId) ?? readNonEmptyString(issue.assigneeUserId));
+  }
+
+  function matchesReusableChildCreate(input: {
+    existing: IssueRecord;
+    actor: ReturnType<typeof getActorInfo>;
+    body: Record<string, unknown>;
+  }) {
+    if (input.actor.actorType !== "agent" || !input.actor.agentId) return false;
+    const originKind = readNonEmptyString(input.body.originKind);
+    const originId = readNonEmptyString(input.body.originId);
+    if (!originKind || !originId || isPlanExemptOriginKind(originKind)) return false;
+    return input.existing.createdByAgentId === input.actor.agentId
+      && readNonEmptyString(input.existing.originKind) === originKind
+      && readNonEmptyString(input.existing.originId) === originId
+      && (readNonEmptyString(input.existing.assigneeAgentId) ?? null) === (readNonEmptyString(input.body.assigneeAgentId) ?? null)
+      && (readNonEmptyString(input.existing.assigneeUserId) ?? null) === (readNonEmptyString(input.body.assigneeUserId) ?? null);
+  }
+
+  async function assertEventDrivenChildCreateAllowed(input: {
+    req: Request;
+    res: Response;
+    parentIssue: IssueRecord;
+    actor: ReturnType<typeof getActorInfo>;
+  }) {
+    const childWillBeAssigned = Boolean(
+      readNonEmptyString(input.req.body.assigneeAgentId) ?? readNonEmptyString(input.req.body.assigneeUserId),
+    );
+    if (!childWillBeAssigned) return true;
+
+    const children = await svc
+      .list(input.parentIssue.companyId, { parentId: input.parentIssue.id, includeHidden: false })
+      .then((items) => items as IssueRecord[]);
+    const dispatch = await resolveIssueDispatchMode(input.parentIssue, children);
+    if (dispatch.mode === "fixed_parallel_lanes") return true;
+
+    const openAssignedChildren = children.filter(isOpenAssignedChildIssue);
+    if (openAssignedChildren.length === 0) return true;
+    if (openAssignedChildren.some((existing) => matchesReusableChildCreate({
+      existing,
+      actor: input.actor,
+      body: input.req.body,
+    }))) {
+      return true;
+    }
+
+    input.res.status(409).json({
+      error: "Event-driven issue flow already has an open assigned child issue; close the current child, reassign it, or switch the routine to fixed_parallel_lanes before opening another lane.",
+      code: "event_driven_single_child_lane_conflict",
+      parentIssueId: input.parentIssue.id,
+      dispatchMode: dispatch.mode,
+      dispatchSource: dispatch.source,
+      routineId: dispatch.routineId,
+      existingChildIssueIds: openAssignedChildren.map((issue) => issue.id),
+    });
+    return false;
   }
 
   async function resolveActiveIssueRun(issue: {
@@ -2346,13 +2411,14 @@ export function issueRoutes(
     if (req.body.assigneeAgentId || req.body.assigneeUserId) {
       await assertCanAssignTasks(req, companyId);
     }
-    if (req.actor.type === "agent" && req.body.parentId) {
-      const parentIssue = await svc.getById(req.body.parentId);
+    let parentIssue: IssueRecord | null = null;
+    if (req.body.parentId) {
+      parentIssue = await svc.getById(req.body.parentId);
       if (!parentIssue) {
         res.status(404).json({ error: "Parent issue not found" });
         return;
       }
-      if (!(await assertAgentExecutionPlanAllowed(req, res, parentIssue, "creating child issues"))) return;
+      if (req.actor.type === "agent" && !(await assertAgentExecutionPlanAllowed(req, res, parentIssue, "creating child issues"))) return;
     }
     if (isPlanExemptOriginKind(req.body.originKind)) {
       res.status(422).json({
@@ -2362,6 +2428,17 @@ export function issueRoutes(
     }
 
     const actor = getActorInfo(req);
+    if (
+      parentIssue &&
+      !(await assertEventDrivenChildCreateAllowed({
+        req,
+        res,
+        parentIssue,
+        actor,
+      }))
+    ) {
+      return;
+    }
     const issue = await svc.create(companyId, {
       ...req.body,
       originRunId:
