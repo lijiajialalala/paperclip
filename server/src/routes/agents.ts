@@ -2178,7 +2178,7 @@ export function agentRoutes(db: Db) {
       source: req.body.source,
       payload: req.body.payload ?? null,
       contextSnapshot: {
-        triggeredBy: req.actor.type === "agent" ? "agent" : "user",
+        triggeredBy: req.actor.type,
         actorId: req.actor.type === "agent" ? req.actor.agentId : req.actor.userId,
         forceFreshSession: req.body.forceFreshSession === true,
       },
@@ -2237,7 +2237,7 @@ export function agentRoutes(db: Db) {
       source: "on_demand",
       payload: null,
       contextSnapshot: {
-        triggeredBy: req.actor.type === "agent" ? "agent" : "user",
+        triggeredBy: req.actor.type,
         actorId: req.actor.type === "agent" ? req.actor.agentId : req.actor.userId,
       },
     });
