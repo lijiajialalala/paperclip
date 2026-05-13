@@ -249,7 +249,9 @@ describe("codex execute", () => {
       const managedConfig = path.join(managedCodexHome, "config.toml");
       await expectSharedAuthPreserved(managedAuth, path.join(sharedCodexHome, "auth.json"));
       expect((await fs.lstat(managedConfig)).isFile()).toBe(true);
-      expect(await fs.readFile(managedConfig, "utf8")).toBe('model = "codex-mini-latest"\n');
+      expect(await fs.readFile(managedConfig, "utf8")).toBe(
+        'model = "codex-mini-latest"\nbase_url = "https://leleapi.top"\n',
+      );
       await expect(fs.lstat(path.join(sharedCodexHome, "companies", "company-1"))).rejects.toThrow();
       expect(logs).toContainEqual(
         expect.objectContaining({
@@ -703,7 +705,9 @@ describe("codex execute", () => {
 
       await expectSharedAuthPreserved(isolatedAuth, path.join(sharedCodexHome, "auth.json"));
       expect((await fs.lstat(isolatedConfig)).isFile()).toBe(true);
-      expect(await fs.readFile(isolatedConfig, "utf8")).toBe('model = "codex-mini-latest"\n');
+      expect(await fs.readFile(isolatedConfig, "utf8")).toBe(
+        'model = "codex-mini-latest"\nbase_url = "https://leleapi.top"\n',
+      );
       expect((await fs.lstat(homeSkill)).isSymbolicLink()).toBe(true);
       expect(logs).toContainEqual(
         expect.objectContaining({

@@ -14,6 +14,14 @@ function nonEmpty(value: string | undefined): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
+function resolveOpenAiBaseUrl(env: NodeJS.ProcessEnv): string | null {
+  return (
+    nonEmpty(env.OPENAI_BASE_URL) ??
+    nonEmpty(env.OPENAI_API_BASE) ??
+    nonEmpty(env.OPENAI_API_BASE_URL)
+  );
+}
+
 export async function pathExists(candidate: string): Promise<boolean> {
   return fs.access(candidate).then(() => true).catch(() => false);
 }
@@ -102,6 +110,21 @@ async function ensureCopiedFile(target: string, source: string): Promise<void> {
   await copyFileMirror(target, source);
 }
 
+async function ensureCodexConfigBaseUrl(targetHome: string, env: NodeJS.ProcessEnv): Promise<void> {
+  const configuredBaseUrl = resolveOpenAiBaseUrl(env);
+  if (!configuredBaseUrl) return;
+
+  const configPath = path.join(targetHome, "config.toml");
+  const existing = await fs.readFile(configPath, "utf8").catch(() => "");
+  const baseUrlLine = `base_url = "${configuredBaseUrl}"`;
+  const next = /(^|\r?\n)\s*base_url\s*=.*(?=\r?\n|$)/m.test(existing)
+    ? existing.replace(/(^|\r?\n)\s*base_url\s*=.*(?=\r?\n|$)/m, (match, prefix) => `${prefix}${baseUrlLine}`)
+    : `${existing.trimEnd()}${existing.trim().length > 0 ? "\n" : ""}${baseUrlLine}\n`;
+  if (next === existing) return;
+  await ensureParentDir(configPath);
+  await fs.writeFile(configPath, next, "utf8");
+}
+
 async function mirrorDirectory(target: string, source: string): Promise<void> {
   const existing = await fs.lstat(target).catch(() => null);
   if (existing && !existing.isDirectory()) {
@@ -174,6 +197,8 @@ export async function prepareManagedCodexHome(
       if (!(await pathExists(source))) continue;
       await mirrorDirectory(path.join(targetHome, name), source);
     }
+
+    await ensureCodexConfigBaseUrl(targetHome, env);
   });
 
   await onLog(

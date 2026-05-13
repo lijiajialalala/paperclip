@@ -49,6 +49,37 @@ async function waitForTextMatch(read: () => string, pattern: RegExp, timeoutMs =
 }
 
 describe("runChildProcess", () => {
+  it("can strip inherited env keys from spawned child processes", async () => {
+    const key = "PAPERCLIP_TEST_UNSET_ENV_KEY";
+    const previous = process.env[key];
+    process.env[key] = "inherited-value";
+
+    try {
+      const result = await runChildProcess(
+        randomUUID(),
+        process.execPath,
+        ["-e", `process.stdout.write(process.env.${key} ?? "missing")`],
+        {
+          cwd: process.cwd(),
+          env: {},
+          unsetEnvKeys: [key],
+          timeoutSec: 0,
+          graceSec: 1,
+          onLog: async () => {},
+        },
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe("missing");
+    } finally {
+      if (previous === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = previous;
+      }
+    }
+  });
+
   it.skipIf(process.platform === "win32")("cleans up a lingering process group after terminal output and child exit", async () => {
     let spawnedMeta: { pid: number; processGroupId?: number | null; startedAt: string } | null = null;
     const result = await runChildProcess(

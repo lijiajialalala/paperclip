@@ -1248,6 +1248,7 @@ export async function runChildProcess(
   opts: {
     cwd: string;
     env: Record<string, string>;
+    unsetEnvKeys?: string[];
     timeoutSec: number;
     graceSec: number;
     onLog: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
@@ -1267,6 +1268,10 @@ export async function runChildProcess(
       ...process.env,
       ...opts.env,
     };
+
+    for (const key of opts.unsetEnvKeys ?? []) {
+      delete rawMerged[key];
+    }
 
     // Strip Claude Code nesting-guard env vars so spawned `claude` processes
     // don't refuse to start with "cannot be launched inside another session".

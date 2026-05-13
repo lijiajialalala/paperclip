@@ -52,6 +52,32 @@ describe("adapter model listing", () => {
     expect(first.some((model) => model.id === "codex-mini-latest")).toBe(true);
   });
 
+  it("uses OPENAI_BASE_URL for codex model discovery when configured", async () => {
+    process.env.OPENAI_API_KEY = "sk-test";
+    process.env.OPENAI_BASE_URL = "https://leleapi.top/v1";
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [
+          { id: "gpt-5.4" },
+        ],
+      }),
+    } as Response);
+
+    const models = await listAdapterModels("codex_local");
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "https://leleapi.top/v1/models",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: "Bearer sk-test",
+        }),
+      }),
+    );
+    expect(models.some((model) => model.id === "gpt-5.4")).toBe(true);
+  });
+
   it("falls back to static codex models when OpenAI model discovery fails", async () => {
     process.env.OPENAI_API_KEY = "sk-test";
     vi.spyOn(globalThis, "fetch").mockResolvedValue({

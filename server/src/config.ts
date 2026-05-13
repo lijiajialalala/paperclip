@@ -1,7 +1,7 @@
 import { readConfigFile } from "./config-file.js";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
-import { config as loadDotenv } from "dotenv";
+import { config as loadDotenv, parse as parseDotenv } from "dotenv";
 import { resolvePaperclipEnvPath } from "./paths.js";
 import { maybeRepairLegacyWorktreeConfigAndEnvFiles } from "./worktree-config.js";
 import {
@@ -24,9 +24,30 @@ import {
   resolveHomeAwarePath,
 } from "./home-paths.js";
 
+const PAPERCLIP_PROVIDER_ENV_KEYS = new Set([
+  "OPENAI_API_KEY",
+  "OPENAI_BASE_URL",
+  "OPENAI_API_BASE",
+  "OPENAI_API_BASE_URL",
+  "OPENROUTER_API_KEY",
+  "ANTHROPIC_API_KEY",
+  "GEMINI_API_KEY",
+  "GOOGLE_API_KEY",
+]);
+
+function applyPaperclipProviderEnvOverrides(envPath: string) {
+  if (!existsSync(envPath)) return;
+  const parsed = parseDotenv(readFileSync(envPath, "utf8"));
+  for (const [key, value] of Object.entries(parsed)) {
+    if (!PAPERCLIP_PROVIDER_ENV_KEYS.has(key)) continue;
+    process.env[key] = value;
+  }
+}
+
 const PAPERCLIP_ENV_FILE_PATH = resolvePaperclipEnvPath();
 if (existsSync(PAPERCLIP_ENV_FILE_PATH)) {
   loadDotenv({ path: PAPERCLIP_ENV_FILE_PATH, override: false, quiet: true });
+  applyPaperclipProviderEnvOverrides(PAPERCLIP_ENV_FILE_PATH);
 }
 
 const CWD_ENV_PATH = resolve(process.cwd(), ".env");

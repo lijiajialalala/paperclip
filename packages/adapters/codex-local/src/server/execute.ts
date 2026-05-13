@@ -34,6 +34,11 @@ import { resolveCodexDesiredSkillNames } from "./skills.js";
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const CODEX_ROLLOUT_NOISE_RE =
   /^\d{4}-\d{2}-\d{2}T[^\s]+\s+ERROR\s+codex_(core|rollout)::(?:rollout::)?list:\s+(?:state db (?:missing|returned stale) rollout path for thread|no rollout found for thread)\s+[a-z0-9-]+$/i;
+const CODEX_DEPRECATED_OPENAI_BASE_URL_ENV_KEYS = [
+  "OPENAI_BASE_URL",
+  "OPENAI_API_BASE",
+  "OPENAI_API_BASE_URL",
+] as const;
 
 function stripCodexRolloutNoise(text: string): string {
   const parts = text.split(/\r?\n/);
@@ -554,6 +559,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const proc = await runChildProcess(runId, command, args, {
       cwd,
       env,
+      unsetEnvKeys: [...CODEX_DEPRECATED_OPENAI_BASE_URL_ENV_KEYS],
       stdin: prompt,
       timeoutSec,
       graceSec,

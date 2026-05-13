@@ -41,11 +41,23 @@ function resolveOpenAiApiKey(): string | null {
   return configKey && configKey.length > 0 ? configKey : null;
 }
 
+function resolveOpenAiModelsEndpoint(): string {
+  const envBaseUrl =
+    process.env.OPENAI_BASE_URL?.trim() ||
+    process.env.OPENAI_API_BASE?.trim() ||
+    process.env.OPENAI_API_BASE_URL?.trim();
+  if (envBaseUrl) {
+    return new URL("models", envBaseUrl.endsWith("/") ? envBaseUrl : `${envBaseUrl}/`).toString();
+  }
+  return OPENAI_MODELS_ENDPOINT;
+}
+
 async function fetchOpenAiModels(apiKey: string): Promise<AdapterModel[]> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), OPENAI_MODELS_TIMEOUT_MS);
   try {
-    const response = await fetch(OPENAI_MODELS_ENDPOINT, {
+    const endpoint = resolveOpenAiModelsEndpoint();
+    const response = await fetch(endpoint, {
       headers: {
         Authorization: `Bearer ${apiKey}`,
       },

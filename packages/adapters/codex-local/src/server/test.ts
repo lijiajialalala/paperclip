@@ -51,6 +51,11 @@ function summarizeProbeDetail(stdout: string, stderr: string, parsedError: strin
 
 const CODEX_AUTH_REQUIRED_RE =
   /(?:not\s+logged\s+in|login\s+required|authentication\s+required|unauthorized|invalid(?:\s+or\s+missing)?\s+api(?:[_\s-]?key)?|openai[_\s-]?api[_\s-]?key|api[_\s-]?key.*required|please\s+run\s+`?codex\s+login`?)/i;
+const CODEX_DEPRECATED_OPENAI_BASE_URL_ENV_KEYS = [
+  "OPENAI_BASE_URL",
+  "OPENAI_API_BASE",
+  "OPENAI_API_BASE_URL",
+] as const;
 
 export async function testEnvironment(
   ctx: AdapterEnvironmentTestContext,
@@ -173,6 +178,7 @@ export async function testEnvironment(
         {
           cwd,
           env,
+          unsetEnvKeys: [...CODEX_DEPRECATED_OPENAI_BASE_URL_ENV_KEYS],
           timeoutSec: 45,
           graceSec: 5,
           stdin: "Respond with hello.",

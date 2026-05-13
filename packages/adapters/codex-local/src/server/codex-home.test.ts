@@ -106,4 +106,17 @@ describe("prepareManagedCodexHome", () => {
     expect(fs.existsSync(path.join(targetHome, "agents", "explorer.toml"))).toBe(true);
     expect(mockCp).toHaveBeenCalledTimes(2);
   });
+
+  it("overrides managed config.toml base_url from Paperclip env", async () => {
+    const sharedHome = env.CODEX_HOME!;
+    fs.writeFileSync(path.join(sharedHome, "config.toml"), 'model = "gpt-5.4"\nbase_url = "https://old.example/v1"\n');
+    env.OPENAI_BASE_URL = "https://leleapi.top/v1";
+
+    const onLog = vi.fn(async () => undefined);
+    const targetHome = await prepareManagedCodexHome(env, onLog, "company-2");
+    const managedConfig = fs.readFileSync(path.join(targetHome, "config.toml"), "utf8");
+
+    expect(managedConfig).toContain('base_url = "https://leleapi.top/v1"');
+    expect(managedConfig).not.toContain('base_url = "https://old.example/v1"');
+  });
 });
